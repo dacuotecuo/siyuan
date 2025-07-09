@@ -47,6 +47,7 @@ cd app
 
 ### 打包
 ```bash
+cd app
 pnpm run dist
 ```
 
