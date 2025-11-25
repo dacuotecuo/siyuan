@@ -3,7 +3,7 @@ import {transaction, turnsIntoOneTransaction, updateTransaction} from "./transac
 import {genEmptyBlock} from "../../block/util";
 import * as dayjs from "dayjs";
 import {Constants} from "../../constants";
-import {moveToPrevious} from "./remove";
+import {moveToPrevious, removeBlock} from "./remove";
 import {hasClosestByClassName} from "../util/hasClosest";
 import {setFold} from "../../menus/protyle";
 
@@ -13,6 +13,10 @@ export const updateListOrder = (listElement: Element, sIndex?: number) => {
     }
     let starIndex: number;
     Array.from(listElement.children).forEach((item, index) => {
+        // https://github.com/siyuan-note/siyuan/issues/16315 第三点会有为空的情况
+        if (!item.classList.contains("li")) {
+            return;
+        }
         if (index === 0) {
             if (sIndex) {
                 starIndex = sIndex;
@@ -219,6 +223,10 @@ export const listIndent = (protyle: IProtyle, liItemElements: Element[], range: 
 
 export const breakList = (protyle: IProtyle, blockElement: Element, range: Range) => {
     const listItemElement = blockElement.parentElement;
+    if (!listItemElement.previousElementSibling) {
+        removeBlock(protyle, blockElement, range, "Backspace");
+        return;
+    }
     const listItemId = listItemElement.getAttribute("data-node-id");
     const doOperations: IOperation[] = [];
     const undoOperations: IOperation[] = [];
@@ -228,7 +236,7 @@ export const breakList = (protyle: IProtyle, blockElement: Element, range: Range
     let newListHTML = "";
     let hasFind = 0;
     Array.from(listItemElement.parentElement.children).forEach(item => {
-        if (!hasFind && item.isSameNode(listItemElement)) {
+        if (!hasFind && item === listItemElement) {
             hasFind = 1;
         } else if (hasFind && !item.classList.contains("protyle-attr")) {
             undoOperations.push({
@@ -268,7 +276,7 @@ export const breakList = (protyle: IProtyle, blockElement: Element, range: Range
         action: "delete"
     });
 
-    Array.from(listItemElement.children).reverse().forEach((item) => {
+    Array.from(listItemElement.children).reverse().forEach((item, index) => {
         if (!item.classList.contains("protyle-action") && !item.classList.contains("protyle-attr")) {
             doOperations.push({
                 id: item.getAttribute("data-node-id"),
@@ -278,7 +286,8 @@ export const breakList = (protyle: IProtyle, blockElement: Element, range: Range
             undoOperations.push({
                 id: item.getAttribute("data-node-id"),
                 action: "move",
-                parentID: listItemId
+                parentID: listItemId,
+                data: index === listItemElement.childElementCount - 2 ? "focus" : null
             });
             listItemElement.parentElement.after(item);
         }

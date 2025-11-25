@@ -19,6 +19,7 @@ package util
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -132,12 +133,11 @@ func SaveAssetsTexts() {
 }
 
 func SetAssetText(asset, text string) {
-	var oldText string
 	assetsTextsLock.Lock()
-	oldText = assetsTexts[asset]
+	oldText, ok := assetsTexts[asset]
 	assetsTexts[asset] = text
 	assetsTextsLock.Unlock()
-	if oldText != text {
+	if !ok || oldText != text {
 		assetsTextsChanged.Store(true)
 	}
 }
@@ -149,7 +149,12 @@ func ExistsAssetText(asset string) (ret bool) {
 	return
 }
 
-func OcrAsset(asset string) (ret []map[string]interface{}) {
+func OcrAsset(asset string) (ret []map[string]interface{}, err error) {
+	if !TesseractEnabled {
+		err = fmt.Errorf(Langs[Lang][266])
+		return
+	}
+
 	assetsPath := GetDataAssetsAbsPath()
 	assetAbsPath := strings.TrimPrefix(asset, "assets")
 	assetAbsPath = filepath.Join(assetsPath, assetAbsPath)
@@ -178,9 +183,29 @@ func RemoveAssetText(asset string) {
 	assetsTextsChanged.Store(true)
 }
 
+var tesseractExts = []string{
+	".png",
+	".jpg",
+	".jpeg",
+	".tif",
+	".tiff",
+	".bmp",
+	".gif",
+	".webp",
+	".pbm",
+	".pgm",
+	".ppm",
+	".pnm",
+}
+
 func IsTesseractExtractable(p string) bool {
 	lowerName := strings.ToLower(p)
-	return strings.HasSuffix(lowerName, ".png") || strings.HasSuffix(lowerName, ".jpg") || strings.HasSuffix(lowerName, ".jpeg")
+	for _, ext := range tesseractExts {
+		if strings.HasSuffix(lowerName, ext) {
+			return true
+		}
+	}
+	return false
 }
 
 // tesseractOCRLock 用于 Tesseract OCR 加锁串行执行提升稳定性 https://github.com/siyuan-note/siyuan/issues/7265
@@ -210,14 +235,23 @@ func Tesseract(imgAbsPath string) (ret []map[string]interface{}) {
 
 	defer logging.Recover()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 7*time.Second)
+	timeout := 7000
+	timeoutEnv := os.Getenv("SIYUAN_TESSERACT_TIMEOUT")
+	if "" != timeoutEnv {
+		if timeoutParsed, parseErr := strconv.Atoi(timeoutEnv); nil == parseErr {
+			timeout = timeoutParsed
+		} else {
+			logging.LogWarnf("parse tesseract timeout [%s] failed: %s", timeoutEnv, parseErr)
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeout)*time.Millisecond)
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, TesseractBin, "-c", "debug_file=/dev/null", imgAbsPath, "stdout", "-l", strings.Join(TesseractLangs, "+"), "tsv")
 	gulu.CmdAttr(cmd)
 	output, err := cmd.CombinedOutput()
-	if ctx.Err() == context.DeadlineExceeded {
-		logging.LogWarnf("tesseract [path=%s, size=%d] timeout", imgAbsPath, info.Size())
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		logging.LogWarnf("tesseract [path=%s, size=%d] timeout [%dms]", imgAbsPath, info.Size(), timeout)
 		return
 	}
 
@@ -260,7 +294,7 @@ func Tesseract(imgAbsPath string) (ret []map[string]interface{}) {
 	return
 }
 
-// 提取并连接所有 text 字段的函数
+// GetOcrJsonText 提取并连接所有 text 字段的函数
 func GetOcrJsonText(jsonData []map[string]interface{}) (ret string) {
 	for _, dataMap := range jsonData {
 		// 检查 text 字段是否存在
@@ -296,7 +330,7 @@ func InitTesseract() {
 
 	langs := getTesseractLangs()
 	if 1 > len(langs) {
-		logging.LogWarnf("no tesseract langs found")
+		logging.LogWarnf("no tesseract langs found, disabling tesseract-ocr")
 		TesseractEnabled = false
 		tesseractInited.Store(true)
 		return
@@ -340,7 +374,7 @@ func filterTesseractLangs(langs []string) (ret []string) {
 	} else {
 		for _, lang := range langs {
 			if "eng" == lang || strings.HasPrefix(lang, "chi") || "fra" == lang || "spa" == lang || "deu" == lang ||
-				"rus" == lang || "osd" == lang {
+				"rus" == lang || "jpn" == lang || "osd" == lang {
 				ret = append(ret, lang)
 			}
 		}
@@ -357,17 +391,21 @@ func getTesseractVer() (ret string) {
 	gulu.CmdAttr(cmd)
 	data, err := cmd.CombinedOutput()
 	if err != nil {
-		if strings.Contains(err.Error(), "executable file not found") {
+		errMsg := strings.ToLower(err.Error())
+		if strings.Contains(errMsg, "executable file not found") || strings.Contains(errMsg, "no such file or directory") {
 			// macOS 端 Tesseract OCR 安装后不识别 https://github.com/siyuan-note/siyuan/issues/7107
 			TesseractBin = "/usr/local/bin/tesseract"
 			cmd = exec.Command(TesseractBin, "--version")
 			gulu.CmdAttr(cmd)
 			data, err = cmd.CombinedOutput()
-			if err != nil && strings.Contains(err.Error(), "executable file not found") {
-				TesseractBin = "/opt/homebrew/bin/tesseract"
-				cmd = exec.Command(TesseractBin, "--version")
-				gulu.CmdAttr(cmd)
-				data, err = cmd.CombinedOutput()
+			if err != nil {
+				errMsg = strings.ToLower(err.Error())
+				if strings.Contains(errMsg, "executable file not found") || strings.Contains(errMsg, "no such file or directory") {
+					TesseractBin = "/opt/homebrew/bin/tesseract"
+					cmd = exec.Command(TesseractBin, "--version")
+					gulu.CmdAttr(cmd)
+					data, err = cmd.CombinedOutput()
+				}
 			}
 		}
 	}

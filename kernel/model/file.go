@@ -187,7 +187,7 @@ func SearchDocsByKeyword(keyword string, flashcard bool) (ret []map[string]strin
 			}
 		}
 
-		rootBlocks = sql.QueryRootBlockByCondition(condition)
+		rootBlocks = sql.QueryRootBlockByCondition(condition, Conf.Search.Limit)
 	} else {
 		for _, box := range boxes {
 			if flashcard {
@@ -323,6 +323,11 @@ func ListDocTree(boxID, listPath string, sortMode int, flashcard, showHidden boo
 			}
 
 			continue
+		} else {
+			if strings.HasSuffix(file.name, ".sy") && !ast.IsNodeIDPattern(strings.TrimSuffix(file.name, ".sy")) {
+				// 不以块 ID 命名的 .sy 文件不应该被加载到思源中 https://github.com/siyuan-note/siyuan/issues/16089
+				continue
+			}
 		}
 
 		subFolder := filepath.Join(boxLocalPath, strings.TrimSuffix(file.path, ".sy"))
@@ -764,6 +769,11 @@ func loadNodesByStartEnd(tree *parse.Tree, startID, endID string) (nodes []*ast.
 			}
 			break
 		}
+
+		if len(nodes) >= Conf.Editor.DynamicLoadBlocks {
+			// 如果加载到指定数量的块则停止加载
+			break
+		}
 	}
 	return
 }
@@ -928,7 +938,7 @@ func writeTreeUpsertQueue(tree *parse.Tree) (err error) {
 		return
 	}
 	sql.UpsertTreeQueue(tree)
-	refreshDocInfo(tree, size)
+	refreshDocInfoWithSize(tree, size)
 	return
 }
 
@@ -954,7 +964,7 @@ func renameWriteJSONQueue(tree *parse.Tree) (err error) {
 	}
 	sql.RenameTreeQueue(tree)
 	treenode.UpsertBlockTree(tree)
-	refreshDocInfo(tree, size)
+	refreshDocInfoWithSize(tree, size)
 	return
 }
 
@@ -962,28 +972,23 @@ func DuplicateDoc(tree *parse.Tree) {
 	msgId := util.PushMsg(Conf.Language(116), 30000)
 	defer util.PushClearMsg(msgId)
 
+	previousPath := tree.Path
 	resetTree(tree, "Duplicated", false)
 	createTreeTx(tree)
+	box := Conf.Box(tree.Box)
+	if nil != box {
+		box.addSort(previousPath, tree.ID)
+	}
 	FlushTxQueue()
 
-	// 复制为副本时将该副本块插入到数据库中 https://github.com/siyuan-note/siyuan/issues/11959
+	// 复制为副本时移除数据库绑定状态 https://github.com/siyuan-note/siyuan/issues/12294
 	ast.Walk(tree.Root, func(n *ast.Node, entering bool) ast.WalkStatus {
 		if !entering || !n.IsBlock() {
 			return ast.WalkContinue
 		}
 
-		avs := n.IALAttr(av.NodeAttrNameAvs)
-		for _, avID := range strings.Split(avs, ",") {
-			if !ast.IsNodeIDPattern(avID) {
-				continue
-			}
-
-			AddAttributeViewBlock(nil, []map[string]interface{}{{
-				"id":         n.ID,
-				"isDetached": false,
-			}}, avID, "", "", false)
-			ReloadAttrView(avID)
-		}
+		n.RemoveIALAttr(av.NodeAttrNameAvs)
+		n.RemoveIALAttrsByPrefix(av.NodeAttrViewStaticText)
 		return ast.WalkContinue
 	})
 	return
@@ -1014,7 +1019,11 @@ func CreateDocByMd(boxID, p, title, md string, sorts []string) (tree *parse.Tree
 	}
 
 	FlushTxQueue()
-	ChangeFileTreeSort(box.ID, sorts)
+	if 0 < len(sorts) {
+		ChangeFileTreeSort(box.ID, sorts)
+	} else {
+		box.setSortByConf(path.Dir(tree.Path), tree.ID)
+	}
 	return
 }
 
@@ -1054,6 +1063,13 @@ func CreateWithMarkdown(tags, boxID, hPath, md, parentID, id string, withMath bo
 	SetBlockAttrs(retID, nameValues)
 
 	FlushTxQueue()
+
+	bt := treenode.GetBlockTree(retID)
+	if nil == bt {
+		logging.LogWarnf("get block tree by id [%s] failed after create", retID)
+		return
+	}
+	box.setSortByConf(path.Dir(bt.Path), retID)
 	return
 }
 
@@ -1357,6 +1373,8 @@ func moveDoc(fromBox *Box, fromPath string, toBox *Box, toPath string, luteEngin
 		return
 	}
 
+	fromParentTree := loadParentTree(tree)
+
 	moveToRoot := "/" == toPath
 	toBlockID := tree.ID
 	fromFolder := path.Join(path.Dir(fromPath), tree.ID)
@@ -1475,6 +1493,8 @@ func moveDoc(fromBox *Box, fromPath string, toBox *Box, toPath string, luteEngin
 	}
 	evt.Callback = callback
 	util.PushEvent(evt)
+
+	refreshDocInfo(fromParentTree)
 	return
 }
 
@@ -1524,16 +1544,7 @@ func removeDoc(box *Box, p string, luteEngine *lute.Lute) {
 		return
 	}
 
-	// 关联的属性视图也要复制到历史中 https://github.com/siyuan-note/siyuan/issues/9567
-	avNodes := tree.Root.ChildrenByType(ast.NodeAttributeView)
-	for _, avNode := range avNodes {
-		srcAvPath := filepath.Join(util.DataDir, "storage", "av", avNode.AttributeViewID+".json")
-		destAvPath := filepath.Join(historyDir, "storage", "av", avNode.AttributeViewID+".json")
-		if copyErr := filelock.Copy(srcAvPath, destAvPath); nil != copyErr {
-			logging.LogErrorf("copy av [%s] failed: %s", srcAvPath, copyErr)
-		}
-	}
-
+	generateAvHistory(tree, historyDir)
 	copyDocAssetsToDataAssets(box.ID, p)
 
 	removeIDs := treenode.RootChildIDs(tree.ID)
@@ -1599,13 +1610,7 @@ func removeDoc0(tree *parse.Tree, childrenDir string) {
 	refDefIDs := getRefDefIDs(tree.Root)
 	// 推送定义节点引用计数
 	for _, defID := range refDefIDs {
-		defTree, _ := LoadTreeByBlockID(defID)
-		if nil != defTree {
-			defNode := treenode.GetNodeInTree(defTree, defID)
-			if nil != defNode {
-				task.AppendAsyncTaskWithDelay(task.SetDefRefCount, util.SQLFlushInterval, refreshRefCount, defTree.ID, defNode.ID)
-			}
-		}
+		task.AppendAsyncTaskWithDelay(task.SetDefRefCount, util.SQLFlushInterval, refreshRefCount, defID)
 	}
 
 	treenode.RemoveBlockTreesByPathPrefix(childrenDir)
@@ -1843,6 +1848,24 @@ func moveSorts(rootID, fromBox, toBox string) {
 		logging.LogErrorf("write sort conf failed: %s", err)
 		return
 	}
+
+	sortIDs := map[string]int{}
+	bt := treenode.GetBlockTree(rootID)
+	if nil != bt {
+		parentPath := path.Dir(bt.Path)
+		docs, _, listErr := ListDocTree(toBox, parentPath, util.SortModeUnassigned, false, false, 102400)
+		if listErr != nil {
+			logging.LogErrorf("list doc tree failed: %s", err)
+			return
+		}
+
+		for _, doc := range docs {
+			sortIDs[doc.ID] = doc.Sort
+		}
+
+		pushFiletreeSortChanged(sortIDs)
+	}
+
 }
 
 func ChangeFileTreeSort(boxID string, paths []string) {
@@ -1920,6 +1943,8 @@ func ChangeFileTreeSort(boxID string, paths []string) {
 	}
 
 	IncSync()
+
+	pushFiletreeSortChanged(sortFolderIDs)
 }
 
 func (box *Box) fillSort(files *[]*File) {
@@ -1979,6 +2004,36 @@ func (box *Box) removeSort(ids []string) {
 	}
 }
 
+func (box *Box) setSortByConf(parentPath, id string) {
+	if *Conf.FileTree.CreateDocAtTop {
+		box.addMinSort(parentPath, id)
+	} else {
+		box.addMaxSort(parentPath, id)
+	}
+}
+
+func (box *Box) addMaxSort(parentPath, id string) {
+	docs, _, err := ListDocTree(box.ID, parentPath, util.SortModeUnassigned, false, false, 102400)
+	if err != nil {
+		logging.LogErrorf("list doc tree failed: %s", err)
+		return
+	}
+
+	sortVal := 0
+	if 0 < len(docs) {
+		sortVal = docs[len(docs)-1].Sort + 1
+	}
+
+	box.setSortVal(id, sortVal)
+
+	sortIDs := map[string]int{}
+	for _, doc := range docs {
+		sortIDs[doc.ID] = doc.Sort
+	}
+	sortIDs[id] = sortVal
+	pushFiletreeSortChanged(sortIDs)
+}
+
 func (box *Box) addMinSort(parentPath, id string) {
 	docs, _, err := ListDocTree(box.ID, parentPath, util.SortModeUnassigned, false, false, 1)
 	if err != nil {
@@ -1991,6 +2046,18 @@ func (box *Box) addMinSort(parentPath, id string) {
 		sortVal = docs[0].Sort - 1
 	}
 
+	box.setSortVal(id, sortVal)
+
+	sortIDs := map[string]int{}
+	for _, doc := range docs {
+		sortIDs[doc.ID] = doc.Sort
+	}
+	sortIDs[id] = sortVal
+	pushFiletreeSortChanged(sortIDs)
+}
+
+func (box *Box) setSortVal(id string, sortVal int) {
+	var err error
 	confDir := filepath.Join(util.DataDir, box.ID, ".siyuan")
 	if err = os.MkdirAll(confDir, 0755); err != nil {
 		logging.LogErrorf("create conf dir failed: %s", err)
@@ -2012,7 +2079,6 @@ func (box *Box) addMinSort(parentPath, id string) {
 	}
 
 	fullSortIDs[id] = sortVal
-
 	data, err = gulu.JSON.MarshalJSON(fullSortIDs)
 	if err != nil {
 		logging.LogErrorf("marshal sort conf failed: %s", err)
@@ -2022,6 +2088,7 @@ func (box *Box) addMinSort(parentPath, id string) {
 		logging.LogErrorf("write sort conf failed: %s", err)
 		return
 	}
+	return
 }
 
 func (box *Box) addSort(previousPath, id string) {
@@ -2052,6 +2119,7 @@ func (box *Box) addSort(previousPath, id string) {
 		return
 	}
 
+	sortIDs := map[string]int{}
 	previousID := util.GetTreeID(previousPath)
 	sortVal := 0
 	for _, doc := range docs {
@@ -2061,6 +2129,7 @@ func (box *Box) addSort(previousPath, id string) {
 			fullSortIDs[id] = sortVal
 		}
 		sortVal++
+		sortIDs[doc.ID] = sortVal
 	}
 
 	data, err = gulu.JSON.MarshalJSON(fullSortIDs)
@@ -2072,6 +2141,8 @@ func (box *Box) addSort(previousPath, id string) {
 		logging.LogErrorf("write sort conf failed: %s", err)
 		return
 	}
+
+	pushFiletreeSortChanged(sortIDs)
 }
 
 func (box *Box) setSort(sortIDVals map[string]int) {
@@ -2105,4 +2176,28 @@ func (box *Box) setSort(sortIDVals map[string]int) {
 		logging.LogErrorf("write sort conf failed: %s", err)
 		return
 	}
+
+	pushFiletreeSortChanged(sortIDVals)
+}
+
+func pushFiletreeSortChanged(sortIDs map[string]int) {
+	var childIDs []string
+	for sortID := range sortIDs {
+		childIDs = append(childIDs, sortID)
+	}
+	sort.Slice(childIDs, func(i, j int) bool {
+		return sortIDs[childIDs[i]] < sortIDs[childIDs[j]]
+	})
+
+	firstID := childIDs[0]
+	bt := treenode.GetBlockTree(firstID)
+	if nil == bt {
+		return
+	}
+
+	parentPath := path.Dir(bt.Path)
+	util.BroadcastByType("main", "filetreeSortChanged", 0, "", map[string]any{
+		"parentPath": parentPath,
+		"childIDs":   childIDs,
+	})
 }

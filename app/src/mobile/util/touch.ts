@@ -244,7 +244,8 @@ export const handleTouchMove = (event: TouchEvent) => {
             } else if (scrollElement.classList.contains("code-block")) {
                 scrollElement = scrollElement.firstElementChild.nextElementSibling as HTMLElement;
             } else if (scrollElement.classList.contains("av")) {
-                scrollElement = hasClosestByClassName(target, "layout-tab-bar") || hasClosestByClassName(target, "av__scroll");
+                scrollElement = hasClosestByClassName(target, "layout-tab-bar") || hasClosestByClassName(target, "av__scroll") ||
+                    hasClosestByClassName(target, "av__kanban");
             } else if (scrollElement.dataset.type === "NodeMathBlock") {
                 scrollElement = target;
                 while (scrollElement && scrollElement.dataset.type !== "NodeMathBlock") {
@@ -271,11 +272,12 @@ export const handleTouchMove = (event: TouchEvent) => {
                     scrollBlock = true;
                     return;
                 }
-                if (scrollBlock) {
-                    return;
-                }
+            }
+            if (scrollBlock) {
+                return;
             }
         }
+
         if (isFirstMove) {
             sideMaskElement.style.zIndex = (++window.siyuan.zIndex).toString();
             document.getElementById("sidebar").style.zIndex = (++window.siyuan.zIndex).toString();

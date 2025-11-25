@@ -106,7 +106,7 @@ export const genSearch = (app: App, config: Config.IUILayoutTabSearchConfig, ele
         </span>
         <span class="fn__space"></span>
         <span data-position="9south" id="searchInclude" ${enableIncludeChild ? "" : "disabled"} aria-label="${window.siyuan.languages.includeChildDoc}" class="block__icon block__icon--show ariaLabel">
-            <svg${includeChild ? ' class="ft__primary"' : ""}><use xlink:href="#iconCopy"></use></svg>
+            <svg${includeChild ? ' class="ft__primary"' : ""}><use xlink:href="#iconInclude"></use></svg>
         </span>
         <span class="fn__space"></span>
         <span id="searchPath" aria-label="${window.siyuan.languages.specifyPath}" class="block__icon block__icon--show ariaLabel" data-position="9south">
@@ -135,7 +135,7 @@ export const genSearch = (app: App, config: Config.IUILayoutTabSearchConfig, ele
                 <svg data-menu="true" class="b3-form__icon-icon"><use xlink:href="#iconSearch"></use></svg>
                 <svg class="search__arrowdown"><use xlink:href="#iconDown"></use></svg>
             </span>
-            <input id="searchInput" class="b3-text-field b3-text-field--text" placeholder="${window.siyuan.languages.showRecentUpdatedBlocks}">
+            <input id="searchInput" class="b3-text-field b3-text-field--text" placeholder="${window.siyuan.languages.showRecentUpdatedBlocks}" autocomplete="off" autocorrect="off" spellcheck="false">
         </div>
         <div class="block__icons">
             <span id="searchFilter" aria-label="${window.siyuan.languages.searchType}" class="block__icon ariaLabel" data-position="9south">
@@ -239,7 +239,8 @@ export const genSearch = (app: App, config: Config.IUILayoutTabSearchConfig, ele
         blockId: "",
         render: {
             gutter: true,
-            breadcrumbDocName: true
+            breadcrumbDocName: true,
+            title: true
         },
     });
     edit.resize();
@@ -247,7 +248,8 @@ export const genSearch = (app: App, config: Config.IUILayoutTabSearchConfig, ele
         blockId: "",
         render: {
             gutter: true,
-            breadcrumbDocName: true
+            breadcrumbDocName: true,
+            title: true
         },
     });
     unRefEdit.resize();
@@ -337,7 +339,7 @@ export const genSearch = (app: App, config: Config.IUILayoutTabSearchConfig, ele
     element.addEventListener("click", (event: MouseEvent) => {
         let target = event.target as HTMLElement;
         const searchPathInputElement = element.querySelector("#searchPathInput");
-        while (target && !target.isSameNode(element)) {
+        while (target && target !== element) {
             const type = target.getAttribute("data-type");
             if (type === "removeCriterion") {
                 updateConfig(element, {
@@ -494,6 +496,11 @@ export const genSearch = (app: App, config: Config.IUILayoutTabSearchConfig, ele
                 event.preventDefault();
                 break;
             } else if (target.id === "searchInclude") {
+                event.stopPropagation();
+                event.preventDefault();
+                if (target.hasAttribute("disabled")) {
+                    return;
+                }
                 const svgElement = target.firstElementChild;
                 svgElement.classList.toggle("ft__primary");
                 if (!svgElement.classList.contains("ft__primary")) {
@@ -511,13 +518,12 @@ export const genSearch = (app: App, config: Config.IUILayoutTabSearchConfig, ele
                 }
                 config.page = 1;
                 inputEvent(element, config, edit, true);
-                event.stopPropagation();
-                event.preventDefault();
                 break;
             } else if (target.id === "searchReplace") {
                 // ctrl+P 不需要保存
                 config.hasReplace = !config.hasReplace;
                 element.querySelectorAll(".search__header")[1].classList.toggle("fn__none");
+                element.querySelector("#criteria .b3-chip--current")?.classList.remove("b3-chip--current");
                 event.stopPropagation();
                 event.preventDefault();
                 break;
@@ -809,13 +815,15 @@ export const genSearch = (app: App, config: Config.IUILayoutTabSearchConfig, ele
                             } else {
                                 if (event.altKey) {
                                     const id = target.getAttribute("data-node-id");
-                                    checkFold(id, (zoomIn, action) => {
+                                    checkFold(id, (zoomIn) => {
                                         openFileById({
                                             app,
                                             id,
-                                            action,
+                                            action: zoomIn ? [Constants.CB_GET_FOCUS, Constants.CB_GET_ALL, Constants.CB_GET_HL] :
+                                                [Constants.CB_GET_FOCUS, Constants.CB_GET_CONTEXT, Constants.CB_GET_HL],
                                             zoomIn,
-                                            position: "right"
+                                            position: "right",
+                                            scrollPosition: "center"
                                         });
                                         if (closeCB) {
                                             closeCB();
@@ -849,12 +857,14 @@ export const genSearch = (app: App, config: Config.IUILayoutTabSearchConfig, ele
                             /// #endif
                         } else {
                             const id = target.getAttribute("data-node-id");
-                            checkFold(id, (zoomIn, action) => {
+                            checkFold(id, (zoomIn) => {
                                 openFileById({
                                     app,
                                     id,
-                                    action,
-                                    zoomIn
+                                    action: zoomIn ? [Constants.CB_GET_FOCUS, Constants.CB_GET_ALL, Constants.CB_GET_HL] :
+                                        [Constants.CB_GET_FOCUS, Constants.CB_GET_CONTEXT, Constants.CB_GET_HL],
+                                    zoomIn,
+                                    scrollPosition: "center"
                                 });
                                 if (closeCB) {
                                     closeCB();
@@ -947,7 +957,7 @@ export const updateConfig = (element: Element, item: Config.IUILayoutTabSearchCo
     if (dialogElement && dialogElement.getAttribute("data-key") === Constants.DIALOG_SEARCH) {
         // https://github.com/siyuan-note/siyuan/issues/6828
         item.hPath = config.hPath;
-        item.idPath = config.idPath.join(",").split(",");
+        item.idPath = [...config.idPath];
     }
     if (config.hasReplace !== item.hasReplace) {
         const replaceHeaderElement = element.querySelectorAll(".search__header")[1];
@@ -974,11 +984,11 @@ export const updateConfig = (element: Element, item: Config.IUILayoutTabSearchCo
     }
     let includeChild = true;
     let enableIncludeChild = false;
-    item.idPath.forEach(item => {
-        if (item.endsWith(".sy")) {
+    item.idPath.forEach(pathItem => {
+        if (pathItem.endsWith(".sy")) {
             includeChild = false;
         }
-        if (item.split("/").length > 1) {
+        if (pathItem.split("/").length > 1) {
             enableIncludeChild = true;
         }
     });
@@ -998,8 +1008,8 @@ export const updateConfig = (element: Element, item: Config.IUILayoutTabSearchCo
     }
     (element.querySelector("#replaceInput") as HTMLInputElement).value = item.r;
     element.querySelector("#searchSyntaxCheck").outerHTML = genQueryHTML(item.method, "searchSyntaxCheck");
-    Object.assign(config, item);
-    window.siyuan.storage[Constants.LOCAL_SEARCHDATA] = Object.assign({}, config);
+    config = JSON.parse(JSON.stringify(item));
+    window.siyuan.storage[Constants.LOCAL_SEARCHDATA] = JSON.parse(JSON.stringify(item));
     setStorageVal(Constants.LOCAL_SEARCHDATA, window.siyuan.storage[Constants.LOCAL_SEARCHDATA]);
     inputEvent(element, config, edit);
     window.siyuan.menus.menu.remove();
@@ -1044,7 +1054,7 @@ const renderNextSearchMark = (options: {
         });
         if (currentRange) {
             if (!currentRange.toString()) {
-                highlightById(options.edit.protyle, options.id);
+                highlightById(options.edit.protyle, options.id, "center");
             } else {
                 scrollToCurrent(options.edit.protyle.contentElement, currentRange, contentRect);
             }
@@ -1090,7 +1100,9 @@ export const getArticle = (options: {
             if (articleId !== options.id) {
                 return;
             }
-            options.edit.protyle.wysiwyg.renderCustom(response.data.ial);
+            if (options.edit.protyle.options.render.title) {
+                options.edit.protyle.title.render(options.edit.protyle, response);
+            }
             fetchPost("/api/filetree/getDoc", {
                 id: options.id,
                 query: options.value || null,
@@ -1118,21 +1130,25 @@ export const getArticle = (options: {
 
                 const contentRect = options.edit.protyle.contentElement.getBoundingClientRect();
                 if (isSupportCSSHL()) {
+                    let observer: ResizeObserver;
                     searchMarkRender(options.edit.protyle, getResponse.data.keywords, options.id, () => {
                         const highlightKeys = () => {
                             const currentRange = options.edit.protyle.highlight.ranges[options.edit.protyle.highlight.rangeIndex];
                             if (options.edit.protyle.highlight.ranges.length > 0 && currentRange) {
                                 if (!currentRange.toString()) {
-                                    highlightById(options.edit.protyle, options.id);
+                                    highlightById(options.edit.protyle, options.id, "center");
                                 } else {
                                     scrollToCurrent(options.edit.protyle.contentElement, currentRange, contentRect);
                                 }
                             } else {
-                                highlightById(options.edit.protyle, options.id);
+                                highlightById(options.edit.protyle, options.id, "center");
                             }
                         };
+                        if (observer) {
+                            observer.disconnect();
+                        }
                         highlightKeys();
-                        const observer = new ResizeObserver(() => {
+                        observer = new ResizeObserver(() => {
                             highlightKeys();
                         });
                         observer.observe(options.edit.protyle.wysiwyg.element);
@@ -1234,7 +1250,7 @@ export const inputEvent = (element: Element, config: Config.IUILayoutTabSearchCo
         const loadingElement = element.querySelector(".fn__loading--top");
         loadingElement.classList.remove("fn__none");
         const searchInputElement = element.querySelector("#searchInput") as HTMLInputElement;
-        const inputValue = searchInputElement.value;
+        config.query = searchInputElement.value;
         element.querySelector("#searchList").scrollTo(0, 0);
         const previousElement = element.querySelector('[data-type="previous"]');
         const nextElement = element.querySelector('[data-type="next"]');
@@ -1246,7 +1262,7 @@ export const inputEvent = (element: Element, config: Config.IUILayoutTabSearchCo
             });
         });
         const searchResultElement = element.querySelector("#searchResult");
-        if (inputValue === "" && (!config.idPath || config.idPath.length === 0)) {
+        if (config.query === "" && (!config.idPath || config.idPath.length === 0)) {
             fetchPost("/api/block/getRecentUpdatedBlocks", {}, (response) => {
                 if (window.siyuan.reqIds["/api/block/getRecentUpdatedBlocks"] && window.siyuan.reqIds["/api/search/fullTextSearchBlock"] &&
                     window.siyuan.reqIds["/api/block/getRecentUpdatedBlocks"] < window.siyuan.reqIds["/api/search/fullTextSearchBlock"]) {
@@ -1265,7 +1281,7 @@ export const inputEvent = (element: Element, config: Config.IUILayoutTabSearchCo
                 previousElement.setAttribute("disabled", "disabled");
             }
             fetchPost("/api/search/fullTextSearchBlock", {
-                query: inputValue,
+                query: config.query,
                 method: config.method,
                 types: config.types,
                 paths: config.idPath || [],
@@ -1324,6 +1340,7 @@ const onSearch = (data: IBlock[], edit: Protyle, element: Element, config: Confi
     let newData;
     data.forEach((item) => {
         const title = getNotebookName(item.box) + getDisplayName(item.hPath, false);
+        let countHTML = "";
         if (item.children) {
             resultHTML += `<div class="b3-list-item">
 <span class="b3-list-item__toggle b3-list-item__toggle--hl">
@@ -1341,12 +1358,16 @@ ${unicode2Emoji(getNotebookIcon(item.box) || window.siyuan.storage[Constants.LOC
                         newData = childItem;
                     }
                 }
+                if (childItem.refCount) {
+                    countHTML = `<span class="popover__block counter b3-tooltips b3-tooltips__w" aria-label="${window.siyuan.languages.ref}">${childItem.refCount}</span>`;
+                }
                 resultHTML += `<div style="padding-left: 36px" data-type="search-item" class="b3-list-item" data-node-id="${childItem.id}" data-root-id="${childItem.rootID}">
 <svg class="b3-list-item__graphic popover__block" data-id="${childItem.id}"><use xlink:href="#${getIconByType(childItem.type)}"></use></svg>
 ${unicode2Emoji(childItem.ial.icon, "b3-list-item__graphic", true)}
 <span class="b3-list-item__text">${childItem.content}</span>
 ${getAttr(childItem)}
-${childItem.tag ? `<span class="b3-list-item__meta b3-list-item__meta--ellipsis">${childItem.tag.split("# #").map(tag => `${tag.replace("#", "")}`).join(" ").replace("#", "")}</span>` : ""}
+${childItem.tag ? `<span class="b3-list-item__meta b3-list-item__meta--ellipsis">${childItem.tag.replace(/#/g, "")}</span>` : ""}
+${countHTML}
 </div>`;
             });
             resultHTML += "</div>";
@@ -1359,13 +1380,17 @@ ${childItem.tag ? `<span class="b3-list-item__meta b3-list-item__meta--ellipsis"
                     newData = item;
                 }
             }
+            if (item.refCount) {
+                countHTML = `<span class="popover__block counter b3-tooltips b3-tooltips__w" aria-label="${window.siyuan.languages.ref}">${item.refCount}</span>`;
+            }
             resultHTML += `<div data-type="search-item" class="b3-list-item" data-node-id="${item.id}" data-root-id="${item.rootID}">
 <svg class="b3-list-item__graphic popover__block" data-id="${item.id}"><use xlink:href="#${getIconByType(item.type)}"></use></svg>
 ${unicode2Emoji(item.ial.icon, "b3-list-item__graphic", true)}
 <span class="b3-list-item__text">${item.content}</span>
 ${getAttr(item)}
-${item.tag ? `<span class="b3-list-item__meta b3-list-item__meta--ellipsis">${item.tag.split("# #").map(tag => `${tag.replace("#", "")}`).join(" ").replace("#", "")}</span>` : ""}
+${item.tag ? `<span class="b3-list-item__meta b3-list-item__meta--ellipsis">${item.tag.replace(/#/g, "")}</span>` : ""}
 <span class="b3-list-item__meta b3-list-item__meta--ellipsis ariaLabel" aria-label="${escapeAriaLabel(title)}">${escapeGreat(title)}</span>
+${countHTML}
 </div>`;
         }
     });
@@ -1411,7 +1436,11 @@ ${item.tag ? `<span class="b3-list-item__meta b3-list-item__meta--ellipsis">${it
         const currentList = element.querySelector(`[data-node-id="${currentData.id}"]`) as HTMLElement;
         if (currentList) {
             currentList.classList.add("b3-list-item--focus");
-            currentList.scrollIntoView();
+            if (!currentList.previousElementSibling && currentList.parentElement.previousElementSibling) {
+                currentList.parentElement.previousElementSibling.scrollIntoView();
+            } else {
+                currentList.scrollIntoView();
+            }
         }
     }
 };

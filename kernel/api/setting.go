@@ -79,6 +79,7 @@ func setConfSnippet(c *gin.Context) {
 	model.Conf.Save()
 
 	ret.Data = snippet
+	util.BroadcastByType("main", "setSnippet", 0, "", snippet)
 }
 
 func addVirtualBlockRefExclude(c *gin.Context) {
@@ -309,6 +310,13 @@ func setEditor(c *gin.Context) {
 		editor.KaTexMacros = "{}"
 	}
 
+	if 1 > editor.HistoryRetentionDays {
+		editor.HistoryRetentionDays = 30
+	}
+	if 3650 < editor.HistoryRetentionDays {
+		editor.HistoryRetentionDays = 3650
+	}
+
 	oldVirtualBlockRef := model.Conf.Editor.VirtualBlockRef
 	oldVirtualBlockRefInclude := model.Conf.Editor.VirtualBlockRefInclude
 	oldVirtualBlockRefExclude := model.Conf.Editor.VirtualBlockRefExclude
@@ -418,6 +426,7 @@ func setFiletree(c *gin.Context) {
 	model.Conf.Save()
 
 	util.UseSingleLineSave = model.Conf.FileTree.UseSingleLineSave
+	util.LargeFileWarningSize = model.Conf.FileTree.LargeFileWarningSize
 
 	ret.Data = model.Conf.FileTree
 }
@@ -527,6 +536,7 @@ func setAppearance(c *gin.Context) {
 	}
 
 	model.Conf.Appearance = appearance
+	util.StatusBarCfg = model.Conf.Appearance.StatusBar
 	model.Conf.Lang = appearance.Lang
 	oldLang := util.Lang
 	util.Lang = model.Conf.Lang
@@ -539,6 +549,7 @@ func setAppearance(c *gin.Context) {
 	}
 
 	ret.Data = model.Conf.Appearance
+	util.BroadcastByType("main", "setAppearance", 0, "", model.Conf.Appearance)
 }
 
 func setPublish(c *gin.Context) {
@@ -654,7 +665,12 @@ func setEmoji(c *gin.Context) {
 	argEmoji := arg["emoji"].([]interface{})
 	var emoji []string
 	for _, ae := range argEmoji {
-		emoji = append(emoji, ae.(string))
+		e := ae.(string)
+		if strings.Contains(e, ".") {
+			// XSS through emoji name https://github.com/siyuan-note/siyuan/issues/15034
+			e = util.FilterUploadEmojiFileName(e)
+		}
+		emoji = append(emoji, e)
 	}
 
 	model.Conf.Editor.Emoji = emoji

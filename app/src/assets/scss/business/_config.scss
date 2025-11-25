@@ -41,6 +41,10 @@
       margin-top: -16px;
       height: calc(100% + 16px);
     }
+
+    textarea.b3-text-field {
+      resize: vertical;
+    }
   }
 
   &__panel > .b3-tab-bar {
@@ -74,8 +78,8 @@
       &__graphic {
         margin-right: 0;
         padding: 0 10px 0 5px;
-        height: 16px;
-        width: 16px;
+        height: 14px;
+        width: 14px;
       }
     }
   }

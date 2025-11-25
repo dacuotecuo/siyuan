@@ -132,16 +132,15 @@ func ListItem2Doc(srcListItemID, targetBoxID, targetPath, previousPath string) (
 	if "" != previousPath {
 		box.addSort(previousPath, newTree.ID)
 	} else {
-		box.addMinSort(path.Dir(newTargetPath), newTree.ID)
+		box.setSortByConf(path.Dir(newTargetPath), newTree.ID)
 	}
 	if err = indexWriteTreeUpsertQueue(newTree); err != nil {
 		return "", "", err
 	}
 	IncSync()
-	RefreshBacklink(srcTree.ID)
-	RefreshBacklink(newTree.ID)
 	go func() {
-		sql.FlushQueue()
+		RefreshBacklink(srcTree.ID)
+		RefreshBacklink(newTree.ID)
 		ResetVirtualBlockRefCache()
 	}()
 	return
