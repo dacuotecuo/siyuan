@@ -8,6 +8,10 @@ import {clipboard, ipcRenderer} from "electron";
 import {processSYLink} from "../../editor/openLink";
 /// #endif
 
+export const isPhablet = () => {
+    return /Android|webOS|iPod|BlackBerry|IEMobile|Opera Mini|Mobile|Tablet/i.test(navigator.userAgent) || isIPhone() || isIPad();
+};
+
 export const encodeBase64 = (text: string): string => {
     if (typeof Buffer !== "undefined") {
         return Buffer.from(text, "utf8").toString("base64");
@@ -118,13 +122,13 @@ export const readText = () => {
 /// #if !BROWSER
 export const getLocalFiles = async () => {
     // 不再支持 PC 浏览器 https://github.com/siyuan-note/siyuan/issues/7206
-    let localFiles: string[] = [];
+    let localFiles: ILocalFiles[] = [];
     if ("darwin" === window.siyuan.config.system.os) {
         const xmlString = clipboard.read("NSFilenamesPboardType");
         const domParser = new DOMParser();
         const xmlDom = domParser.parseFromString(xmlString, "application/xml");
         Array.from(xmlDom.getElementsByTagName("string")).forEach(item => {
-            localFiles.push(item.childNodes[0].nodeValue);
+            localFiles.push({path: item.childNodes[0].nodeValue, size: null});
         });
     } else {
         const xmlString = await fetchSyncPost("/api/clipboard/readFilePaths", {});
@@ -236,9 +240,9 @@ export const writeText = (text: string) => {
     }
 };
 
-export const copyPlainText = async (text: string) => {
+export const copyPlainText = (text: string) => {
     text = text.replace(new RegExp(Constants.ZWSP, "g"), ""); // `复制纯文本` 时移除所有零宽空格 https://github.com/siyuan-note/siyuan/issues/6674
-    await writeText(text);
+    writeText(text);
 };
 
 // 用户 iPhone 点击延迟/需要双击的处理
@@ -436,7 +440,8 @@ export const getLocalStorage = (cb: () => void) => {
             removeAssets: true,
             keepFold: false,
             mergeSubdocs: false,
-            watermark: false
+            watermark: false,
+            paged: true
         };
         defaultStorage[Constants.LOCAL_EXPORTIMG] = {
             keepFold: false,

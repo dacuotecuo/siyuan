@@ -85,7 +85,7 @@ type RiffCard struct {
 
 func (block *Block) IsContainerBlock() bool {
 	switch block.Type {
-	case "NodeDocument", "NodeBlockquote", "NodeList", "NodeListItem", "NodeSuperBlock":
+	case "NodeDocument", "NodeBlockquote", "NodeList", "NodeListItem", "NodeSuperBlock", "NodeCallout":
 		return true
 	}
 	return false
@@ -244,7 +244,20 @@ func GetBlockSiblingID(id string) (parent, previous, next string) {
 		}
 
 		parent = listParent2.ID
-		previous, next = getPreNext(listParent)
+		if nil == listParent.Previous {
+			if nil != listParent2.Previous {
+				previous = listParent2.Previous.ID
+			}
+		} else {
+			previous = listParent.Previous.ID
+		}
+		if nil == listParent.Next {
+			if nil != listParent2.Next {
+				next = listParent2.Next.ID
+			}
+		} else {
+			next = listParent.Next.ID
+		}
 		return
 	}
 
@@ -1015,8 +1028,45 @@ func GetBlockKramdown(id, mode string) (ret string) {
 		ret = treenode.ExportNodeStdMd(root, luteEngine)
 	} else {
 		tree.Root = root
-		formatRenderer := render.NewFormatRenderer(tree, luteEngine.RenderOptions)
+		formatRenderer := render.NewFormatRenderer(tree, luteEngine.RenderOptions, luteEngine.ParseOptions)
 		ret = string(formatRenderer.Render())
+	}
+	return
+}
+
+func GetBlockKramdowns(ids []string, mode string) (ret map[string]string) {
+	ret = map[string]string{}
+	if 0 == len(ids) {
+		return
+	}
+
+	luteEngine := NewLute()
+	if "md" == mode {
+		// `/api/block/getBlockKramdown` link/image URLs are no longer encoded with spaces https://github.com/siyuan-note/siyuan/issues/15611
+		luteEngine.SetPreventEncodeLinkSpace(true)
+	}
+
+	trees := filesys.LoadTrees(ids)
+	for id, tree := range trees {
+		node := treenode.GetNodeInTree(tree, id)
+		if nil == node {
+			continue
+		}
+
+		addBlockIALNodes(tree, false)
+		root := &ast.Node{Type: ast.NodeDocument}
+		root.AppendChild(node.Next) // IAL
+		root.PrependChild(node)
+
+		var kramdown string
+		if "md" == mode {
+			kramdown = treenode.ExportNodeStdMd(root, luteEngine)
+		} else {
+			tree.Root = root
+			formatRenderer := render.NewFormatRenderer(tree, luteEngine.RenderOptions, luteEngine.ParseOptions)
+			kramdown = string(formatRenderer.Render())
+		}
+		ret[id] = kramdown
 	}
 	return
 }

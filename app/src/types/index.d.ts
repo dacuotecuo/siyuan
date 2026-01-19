@@ -286,12 +286,17 @@ interface Window {
     destroyTheme(): Promise<void>;
 }
 
+interface ILocalFiles {
+    path: string,
+    size: number
+}
+
 interface IClipboardData {
     textHTML?: string,
     textPlain?: string,
     siyuanHTML?: string,
     files?: File[],
-    localFiles?: string[]
+    localFiles?: ILocalFiles[],
 }
 
 interface IRefDefs {
@@ -552,7 +557,7 @@ interface ISiyuan {
 interface IOperation {
     action: TOperation, // move， delete 不需要传 data
     id?: string,
-    context?: IObject,
+    context?: IObject,  // focusId, message, ignoreProcess, setRange
     blockID?: string,
     isTwoWay?: boolean, // 是否双向关联
     backRelationKeyID?: string, // 双向关联的目标关联列 ID
@@ -619,9 +624,9 @@ interface ILayoutJSON extends ILayoutOptions {
 interface ICommand {
     langKey: string, // 用于区分不同快捷键的 key, 同时作为 i18n 的字段名
     langText?: string, // 显示的文本, 指定后不再使用 langKey 对应的 i18n 文本
-    hotkey: string,
+    hotkey?: string, // 快捷键，默认为空字符串
     customHotkey?: string,
-    callback?: () => void   // 其余回调存在时将不会触
+    callback?: () => void   // 其余回调存在时将不会触发
     globalCallback?: () => void // 焦点不在应用内时执行的回调
     fileTreeCallback?: (file: import("../layout/dock/Files").Files) => void // 焦点在文档树上时执行的回调
     editorCallback?: (protyle: IProtyle) => void     // 焦点在编辑器上时执行的回调
@@ -705,6 +710,7 @@ interface IWebSocketData {
     msg: string;
     code: number;
     sid?: string;
+    context?: any;
 }
 
 interface IGraphCommon {
@@ -842,6 +848,7 @@ interface IBazaarItem {
     incompatible?: boolean;  // 仅 plugin
     enabled: boolean;
     preferredName: string;
+    minAppVersion: string;
     preferredDesc: string;
     preferredReadme: string;
     iconURL: string;
@@ -849,6 +856,7 @@ interface IBazaarItem {
     author: string;
     updated: string;
     downloads: string;
+    disallowInstall: boolean;
     current: false;
     installed: false;
     outdated: false;
@@ -866,6 +874,8 @@ interface IBazaarItem {
     hInstallDate: string;
     hUpdated: string;
     preferredFunding: string;
+    disallowUpdate: boolean;
+    updateRequiredMinAppVer: string;
 }
 
 interface IAV {
@@ -936,11 +946,11 @@ interface IAVFilter {
     operator: TAVFilterOperator,
     quantifier?: string,
     value: IAVCellValue,
-    relativeDate?: relativeDate
-    relativeDate2?: relativeDate
+    relativeDate?: IAVRelativeDate
+    relativeDate2?: IAVRelativeDate
 }
 
-interface relativeDate {
+interface IAVRelativeDate {
     count: number;   // 数量
     unit: number;    // 单位：0: 天、1: 周、2: 月、3: 年
     direction: number;   // 方向：-1: 前、0: 现在、1: 后

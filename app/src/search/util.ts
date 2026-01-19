@@ -47,6 +47,7 @@ import {saveKeyList, toggleAssetHistory, toggleReplaceHistory, toggleSearchHisto
 import {highlightById} from "../util/highlightById";
 import {getSelectionOffset} from "../protyle/util/selection";
 import {electronUndo} from "../protyle/undo";
+import {getContenteditableElement} from "../protyle/wysiwyg/getBlock";
 
 export const openGlobalSearch = (app: App, text: string, replace: boolean, searchData?: Config.IUILayoutTabSearchConfig) => {
     text = text.trim();
@@ -930,17 +931,21 @@ export const openSearchEditor = (options: {
 }) => {
     let currentRange = (options.rootId === options.protyle.block.rootID && options.id === options.protyle.block.id) ?
         options.protyle.highlight.ranges[options.protyle.highlight.rangeIndex] : null;
+    if (options.protyle.block.scroll) {
+        currentRange = null;
+    }
     if (currentRange) {
         const rangeBlockElement = hasClosestBlock(currentRange.startContainer);
         if (rangeBlockElement) {
             options.id = rangeBlockElement.getAttribute("data-node-id");
-            const offset = getSelectionOffset(rangeBlockElement, null, options.protyle.highlight.ranges[options.protyle.highlight.rangeIndex]);
+            const offset = getSelectionOffset(getContenteditableElement(rangeBlockElement), null, options.protyle.highlight.ranges[options.protyle.highlight.rangeIndex]);
             const scrollAttr: IScrollAttr = {
                 rootId: options.protyle.block.rootID,
                 focusId: options.id,
                 focusStart: offset.start,
                 focusEnd: offset.end,
-                zoomInId: options.protyle.block.showAll ? options.protyle.block.id : undefined
+                zoomInId: options.protyle.block.showAll ? options.protyle.block.id : undefined,
+                scrollTop: options.protyle.contentElement.scrollTop,
             };
             window.siyuan.storage[Constants.LOCAL_FILEPOSITION][options.protyle.block.rootID] = scrollAttr;
             if (offset.start === offset.end) {
@@ -1141,9 +1146,6 @@ export const getArticle = (options: {
             if (articleId !== options.id) {
                 return;
             }
-            if (options.edit.protyle.options.render.title) {
-                options.edit.protyle.title.render(options.edit.protyle, response);
-            }
             fetchPost("/api/filetree/getDoc", {
                 id: options.id,
                 query: options.value || null,
@@ -1167,43 +1169,47 @@ export const getArticle = (options: {
                     data: getResponse,
                     protyle: options.edit.protyle,
                     action: zoomIn ? [Constants.CB_GET_ALL, Constants.CB_GET_HTML] : [Constants.CB_GET_HTML],
-                });
-
-                const contentRect = options.edit.protyle.contentElement.getBoundingClientRect();
-                if (isSupportCSSHL()) {
-                    let observer: ResizeObserver;
-                    searchMarkRender(options.edit.protyle, getResponse.data.keywords, options.id, () => {
-                        const highlightKeys = () => {
-                            const currentRange = options.edit.protyle.highlight.ranges[options.edit.protyle.highlight.rangeIndex];
-                            if (options.edit.protyle.highlight.ranges.length > 0 && currentRange) {
-                                if (!currentRange.toString()) {
-                                    highlightById(options.edit.protyle, options.id, "center");
-                                } else {
-                                    scrollToCurrent(options.edit.protyle.contentElement, currentRange, contentRect);
+                    afterCB() {
+                        const contentRect = options.edit.protyle.contentElement.getBoundingClientRect();
+                        if (isSupportCSSHL()) {
+                            let observer: ResizeObserver;
+                            searchMarkRender(options.edit.protyle, getResponse.data.keywords, options.id, () => {
+                                const highlightKeys = () => {
+                                    const currentRange = options.edit.protyle.highlight.ranges[options.edit.protyle.highlight.rangeIndex];
+                                    if (options.edit.protyle.highlight.ranges.length > 0 && currentRange) {
+                                        if (!currentRange.toString()) {
+                                            highlightById(options.edit.protyle, options.id, "center");
+                                        } else {
+                                            scrollToCurrent(options.edit.protyle.contentElement, currentRange, contentRect);
+                                        }
+                                    } else {
+                                        highlightById(options.edit.protyle, options.id, "center");
+                                    }
+                                };
+                                if (observer) {
+                                    observer.disconnect();
                                 }
-                            } else {
-                                highlightById(options.edit.protyle, options.id, "center");
+                                highlightKeys();
+                                observer = new ResizeObserver(() => {
+                                    highlightKeys();
+                                });
+                                observer.observe(options.edit.protyle.wysiwyg.element);
+                                setTimeout(() => {
+                                    observer.disconnect();
+                                }, Constants.TIMEOUT_COUNT);
+                            });
+                        } else {
+                            const matchElements = options.edit.protyle.wysiwyg.element.querySelectorAll('span[data-type~="search-mark"]');
+                            if (matchElements.length === 0) {
+                                return;
                             }
-                        };
-                        if (observer) {
-                            observer.disconnect();
+                            matchElements[0].classList.add("search-mark--hl");
+                            options.edit.protyle.contentElement.scrollTop = options.edit.protyle.contentElement.scrollTop + matchElements[0].getBoundingClientRect().top - contentRect.top - contentRect.height / 2;
                         }
-                        highlightKeys();
-                        observer = new ResizeObserver(() => {
-                            highlightKeys();
-                        });
-                        observer.observe(options.edit.protyle.wysiwyg.element);
-                        setTimeout(() => {
-                            observer.disconnect();
-                        }, Constants.TIMEOUT_COUNT);
-                    });
-                } else {
-                    const matchElements = options.edit.protyle.wysiwyg.element.querySelectorAll('span[data-type~="search-mark"]');
-                    if (matchElements.length === 0) {
-                        return;
                     }
-                    matchElements[0].classList.add("search-mark--hl");
-                    options.edit.protyle.contentElement.scrollTop = options.edit.protyle.contentElement.scrollTop + matchElements[0].getBoundingClientRect().top - contentRect.top - contentRect.height / 2;
+                });
+                if (options.edit.protyle.options.render.title) {
+                    options.edit.protyle.title.render(options.edit.protyle, response);
                 }
             });
         });

@@ -170,6 +170,10 @@
       color: var(--b3-callout-note);
     }
 
+    .callout-icon:empty {
+      display: none;
+    }
+
     &[data-subtype="WARNING"] {
       &::before {
         background-color: var(--b3-callout-warning);
@@ -213,6 +217,7 @@
     &-info {
       display: flex;
       align-items: center;
+      user-select: none;
     }
 
     &-icon {
@@ -221,6 +226,8 @@
       text-align: center;
       height: 1.2em;
       line-height: 1.2em;
+      padding: 4px;
+      border-radius: var(--b3-border-radius);
     }
 
     &-img {

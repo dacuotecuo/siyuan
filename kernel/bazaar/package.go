@@ -130,19 +130,22 @@ type Package struct {
 	PreviewURLThumb string `json:"previewURLThumb"`
 	IconURL         string `json:"iconURL"`
 
-	Installed    bool   `json:"installed"`
-	Outdated     bool   `json:"outdated"`
-	Current      bool   `json:"current"`
-	Updated      string `json:"updated"`
-	Stars        int    `json:"stars"`
-	OpenIssues   int    `json:"openIssues"`
-	Size         int64  `json:"size"`
-	HSize        string `json:"hSize"`
-	InstallSize  int64  `json:"installSize"`
-	HInstallSize string `json:"hInstallSize"`
-	HInstallDate string `json:"hInstallDate"`
-	HUpdated     string `json:"hUpdated"`
-	Downloads    int    `json:"downloads"`
+	Installed               bool   `json:"installed"`
+	Outdated                bool   `json:"outdated"`
+	Current                 bool   `json:"current"`
+	Updated                 string `json:"updated"`
+	Stars                   int    `json:"stars"`
+	OpenIssues              int    `json:"openIssues"`
+	Size                    int64  `json:"size"`
+	HSize                   string `json:"hSize"`
+	InstallSize             int64  `json:"installSize"`
+	HInstallSize            string `json:"hInstallSize"`
+	HInstallDate            string `json:"hInstallDate"`
+	HUpdated                string `json:"hUpdated"`
+	Downloads               int    `json:"downloads"`
+	DisallowInstall         bool   `json:"disallowInstall"`
+	DisallowUpdate          bool   `json:"disallowUpdate"`
+	UpdateRequiredMinAppVer string `json:"updateRequiredMinAppVer"`
 
 	Incompatible bool `json:"incompatible"`
 }
@@ -240,15 +243,21 @@ func getPreferredReadme(readme *Readme) string {
 			ret = readme.ZhCN
 		}
 	}
-	if "" == strings.TrimSpace(ret) {
-		defaultReadme := strings.TrimSpace(readme.Default)
-		if defaultReadme != "" {
-			ret = defaultReadme
-		} else {
-			ret = "README.md"
-		}
+	if "" != strings.TrimSpace(ret) {
+		return ret
 	}
-	return ret
+
+	defaultReadme := strings.TrimSpace(readme.Default)
+	if "" != defaultReadme {
+		return defaultReadme
+	}
+
+	enUSReadme := strings.TrimSpace(readme.EnUS)
+	if "" != enUSReadme {
+		return enUSReadme
+	}
+
+	return "README.md"
 }
 
 func GetPreferredName(pkg *Package) string {
@@ -319,15 +328,21 @@ func GetPreferredName(pkg *Package) string {
 			ret = pkg.DisplayName.ZhCN
 		}
 	}
-	if "" == strings.TrimSpace(ret) {
-		defaultName := strings.TrimSpace(pkg.DisplayName.Default)
-		if defaultName != "" {
-			ret = defaultName
-		} else {
-			ret = pkg.Name
-		}
+	if "" != strings.TrimSpace(ret) {
+		return ret
 	}
-	return ret
+
+	defaultName := strings.TrimSpace(pkg.DisplayName.Default)
+	if "" != defaultName {
+		return defaultName
+	}
+
+	enUSName := strings.TrimSpace(pkg.DisplayName.EnUS)
+	if "" != enUSName {
+		return enUSName
+	}
+
+	return pkg.Name
 }
 
 func getPreferredDesc(desc *Description) string {
@@ -398,13 +413,21 @@ func getPreferredDesc(desc *Description) string {
 			ret = desc.ZhCN
 		}
 	}
-	if "" == strings.TrimSpace(ret) {
-		defaultDesc := strings.TrimSpace(desc.Default)
-		if defaultDesc != "" {
-			ret = defaultDesc
-		}
+	if "" != strings.TrimSpace(ret) {
+		return ret
 	}
-	return ret
+
+	defaultDesc := strings.TrimSpace(desc.Default)
+	if "" != defaultDesc {
+		return defaultDesc
+	}
+
+	enUSDesc := strings.TrimSpace(desc.EnUS)
+	if "" != enUSDesc {
+		return enUSDesc
+	}
+
+	return ""
 }
 
 func getPreferredFunding(funding *Funding) string {
@@ -552,7 +575,7 @@ func getStageIndex(pkgType string) (ret *StageIndex, err error) {
 	defer stageIndexLock.Unlock()
 
 	now := time.Now().Unix()
-	if 3600 >= now-stageIndexCacheTime && nil != cachedStageIndex[pkgType] {
+	if util.RhyCacheDuration >= now-stageIndexCacheTime && nil != cachedStageIndex[pkgType] {
 		ret = cachedStageIndex[pkgType]
 		return
 	}
@@ -970,7 +993,7 @@ func getBazaarIndex() map[string]*bazaarPackage {
 // Add marketplace package config item `minAppVersion` https://github.com/siyuan-note/siyuan/issues/8330
 const defaultMinAppVersion = "2.9.0"
 
-func disallowDisplayBazaarPackage(pkg *Package) bool {
+func disallowInstallBazaarPackage(pkg *Package) bool {
 	if "" == pkg.MinAppVersion {
 		pkg.MinAppVersion = defaultMinAppVersion
 	}

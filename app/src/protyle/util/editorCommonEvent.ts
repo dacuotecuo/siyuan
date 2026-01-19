@@ -60,7 +60,7 @@ const moveTo = async (protyle: IProtyle, sourceElements: Element[], targetElemen
     for (let index = sourceElements.length - 1; index >= 0; index--) {
         const item = sourceElements[index];
         const id = item.getAttribute("data-node-id");
-        const parentID = item.parentElement.getAttribute("data-node-id") || protyle.block.parentID || protyle.block.rootID;
+        const parentID = getParentBlock(item).getAttribute("data-node-id") || protyle.block.parentID || protyle.block.rootID;
         if (item.getAttribute("data-type") === "NodeListItem" && !newListId && !isSameLi) {
             newListId = Lute.NewNodeID();
             newListElement = document.createElement("div");
@@ -426,7 +426,8 @@ const dragSb = async (protyle: IProtyle, sourceElements: Element[], targetElemen
             protyle,
             selectsElement: newSourceParentElement.reverse(),
             type: "BlocksMergeSuperBlock",
-            level: "row"
+            level: "row",
+            unfocus: true,
         });
     }
     if (document.contains(sourceElements[0])) {
@@ -515,7 +516,8 @@ const dragSame = async (protyle: IProtyle, sourceElements: Element[], targetElem
             protyle,
             selectsElement: newSourceParentElement.reverse(),
             type: "BlocksMergeSuperBlock",
-            level: "row"
+            level: "row",
+            unfocus: true,
         });
     }
     if (document.contains(sourceElements[0])) {
@@ -1147,9 +1149,12 @@ export const dropEvent = (protyle: IProtyle, editorElement: HTMLElement) => {
             if (!avElement) {
                 focusByRange(getRangeByPoint(event.clientX, event.clientY));
                 if (event.dataTransfer.types[0] === "Files" && !isBrowser()) {
-                    const files: string[] = [];
+                    const files: ILocalFiles[] = [];
                     for (let i = 0; i < event.dataTransfer.files.length; i++) {
-                        files.push(webUtils.getPathForFile(event.dataTransfer.files[i]));
+                        files.push({
+                            path: webUtils.getPathForFile(event.dataTransfer.files[i]),
+                            size: event.dataTransfer.files[i].size
+                        });
                     }
                     uploadLocalFiles(files, protyle, !event.altKey);
                 } else {
@@ -1160,9 +1165,12 @@ export const dropEvent = (protyle: IProtyle, editorElement: HTMLElement) => {
                 const cellElement = hasClosestByClassName(event.target, "av__cell");
                 if (cellElement) {
                     if (getTypeByCellElement(cellElement) === "mAsset" && event.dataTransfer.types[0] === "Files" && !isBrowser()) {
-                        const files: string[] = [];
+                        const files: ILocalFiles[] = [];
                         for (let i = 0; i < event.dataTransfer.files.length; i++) {
-                            files.push(webUtils.getPathForFile(event.dataTransfer.files[i]));
+                            files.push({
+                                path: webUtils.getPathForFile(event.dataTransfer.files[i]),
+                                size: event.dataTransfer.files[i].size
+                            });
                         }
                         dragUpload(files, protyle, cellElement);
                         clearSelect(["cell"], avElement);
