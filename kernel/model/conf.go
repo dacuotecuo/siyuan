@@ -64,7 +64,7 @@ type AppConf struct {
 	User           *conf.User       `json:"-"`              // 社区用户内存结构，不持久化。不要直接使用，使用 GetUser() 和 SetUser() 方法
 	Account        *conf.Account    `json:"account"`        // 帐号配置
 	ReadOnly       bool             `json:"readonly"`       // 是否是以只读模式运行
-	LocalIPs       []string         `json:"localIPs"`       // 本地 IP 列表
+	ServerAddrs    []string         `json:"serverAddrs"`    // 本地服务器地址列表
 	AccessAuthCode string           `json:"accessAuthCode"` // 访问授权码
 	System         *conf.System     `json:"system"`         // 系统配置
 	Keymap         *conf.Keymap     `json:"keymap"`         // 快捷键配置
@@ -298,6 +298,12 @@ func InitConf() {
 	if 3650 < Conf.Editor.HistoryRetentionDays {
 		Conf.Editor.HistoryRetentionDays = 3650
 	}
+	if nil == Conf.Editor.FloatWindowDelay {
+		v := 620
+		Conf.Editor.FloatWindowDelay = &v
+	} else {
+		*Conf.Editor.FloatWindowDelay = max(0, min(2000, *Conf.Editor.FloatWindowDelay))
+	}
 	if conf.MinDynamicLoadBlocks > Conf.Editor.DynamicLoadBlocks {
 		Conf.Editor.DynamicLoadBlocks = conf.MinDynamicLoadBlocks
 	}
@@ -337,10 +343,11 @@ func InitConf() {
 			Conf.OpenHelp = true
 		}
 	} else {
-		if 0 < semver.Compare("v"+util.Ver, "v"+Conf.System.KernelVersion) {
+		cmp := semver.Compare("v"+util.Ver, "v"+Conf.System.KernelVersion)
+		if 0 < cmp {
 			logging.LogInfof("upgraded from version [%s] to [%s]", Conf.System.KernelVersion, util.Ver)
 			Conf.ShowChangelog = true
-		} else if 0 > semver.Compare("v"+util.Ver, "v"+Conf.System.KernelVersion) {
+		} else if 0 > cmp {
 			logging.LogInfof("downgraded from version [%s] to [%s]", Conf.System.KernelVersion, util.Ver)
 		}
 
@@ -365,10 +372,6 @@ func InitConf() {
 		Conf.System.DisabledFeatures = []string{}
 	}
 
-	if nil == Conf.Snippet {
-		Conf.Snippet = conf.NewSnpt()
-	}
-
 	Conf.System.AppDir = util.WorkingDir
 	Conf.System.ConfDir = util.ConfDir
 	Conf.System.HomeDir = util.HomeDir
@@ -381,6 +384,24 @@ func InitConf() {
 	}
 	Conf.System.OS = runtime.GOOS
 	Conf.System.OSPlatform = util.GetOSPlatform()
+
+	docxTemplate := util.RemoveInvalid(Conf.Export.DocxTemplate)
+	if "" != docxTemplate {
+		params := util.RemoveInvalid(Conf.Export.PandocParams)
+		if gulu.File.IsExist(docxTemplate) && !strings.Contains(params, "--reference-doc") && !Conf.System.IsMicrosoftStore {
+			if !strings.HasPrefix(docxTemplate, "\"") {
+				docxTemplate = "\"" + docxTemplate + "\""
+			}
+			params += " --reference-doc " + docxTemplate
+			Conf.Export.PandocParams = strings.TrimSpace(params)
+		}
+		Conf.Export.DocxTemplate = ""
+		Conf.Save()
+	}
+
+	if nil == Conf.Snippet {
+		Conf.Snippet = conf.NewSnpt()
+	}
 
 	if "" != Conf.UserData {
 		Conf.SetUser(loadUserFromConf())
@@ -576,8 +597,6 @@ func InitConf() {
 	}
 	Conf.AccessAuthCode = strings.TrimSpace(Conf.AccessAuthCode)
 	Conf.AccessAuthCode = util.RemoveInvalid(Conf.AccessAuthCode)
-
-	Conf.LocalIPs = util.GetLocalIPs()
 
 	if 1 == Conf.DataIndexState {
 		// 上次未正常完成数据索引
@@ -784,6 +803,7 @@ func Close(force, setCurrentWorkspace bool, execInstallPkg int) (exitCode int) {
 		}
 	}
 
+	util.BroadcastByType("main", "exit", 0, "", nil)
 	util.UnlockWorkspace()
 
 	time.Sleep(500 * time.Millisecond)
@@ -794,7 +814,9 @@ func Close(force, setCurrentWorkspace bool, execInstallPkg int) (exitCode int) {
 			time.Sleep(30 * time.Second)
 		}
 	}
+
 	closeSyncWebSocket()
+
 	go func() {
 		time.Sleep(500 * time.Millisecond)
 		logging.LogInfof("exited kernel")
@@ -1002,8 +1024,6 @@ func IsSubscriber() bool {
 }
 
 func IsPaidUser() bool {
-	// S3/WebDAV data sync and backup are available for a fee https://github.com/siyuan-note/siyuan/issues/8780
-
 	if IsSubscriber() {
 		return true
 	}
@@ -1020,9 +1040,12 @@ const (
 	MaskedAccessAuthCode = "*******"
 )
 
+// GetMaskedConf 获取脱敏后的 Conf
 func GetMaskedConf() (ret *AppConf, err error) {
-	// 脱敏处理
-	data, err := gulu.JSON.MarshalIndentJSON(Conf, "", "  ")
+	// 序列化时持锁，避免与 loadThemes/LoadIcons 等写操作并发导致 slice 在编码过程中被改写而 panic https://github.com/siyuan-note/siyuan/issues/16978
+	Conf.m.Lock()
+	data, err := gulu.JSON.MarshalJSON(Conf)
+	Conf.m.Unlock()
 	if err != nil {
 		logging.LogErrorf("marshal conf failed: %s", err)
 		return
@@ -1040,13 +1063,13 @@ func GetMaskedConf() (ret *AppConf, err error) {
 	return
 }
 
-// REF: https://github.com/siyuan-note/siyuan/issues/11364
 // HideConfSecret 隐藏设置中的秘密信息
+// REF: https://github.com/siyuan-note/siyuan/issues/11364
 func HideConfSecret(c *AppConf) {
 	c.AI = &conf.AI{}
 	c.Api = &conf.API{}
 	c.Flashcard = &conf.Flashcard{}
-	c.LocalIPs = []string{}
+	c.ServerAddrs = []string{}
 	c.Publish = &conf.Publish{}
 	c.Repo = &conf.Repo{}
 	c.Sync = &conf.Sync{}
@@ -1233,17 +1256,21 @@ func closeUserGuide() {
 		}
 
 		msgId := util.PushMsg(Conf.language(233), 30000)
-		evt := util.NewCmdResult("unmount", 0, util.PushModeBroadcast)
-		evt.Data = map[string]interface{}{
-			"box": boxID,
-		}
-		util.PushEvent(evt)
 
 		unindex(boxID)
 
 		sql.FlushQueue()
-		if removeErr := filelock.Remove(boxDirPath); nil != removeErr {
-			logging.LogErrorf("remove corrupted user guide box [%s] failed: %s", boxDirPath, removeErr)
+
+		if removeErr := RemoveBox(boxID); nil == removeErr {
+			evt := util.NewCmdResult("removeBox", 0, util.PushModeBroadcast)
+			evt.Data = map[string]interface{}{
+				"box": boxID,
+			}
+			util.PushEvent(evt)
+		} else {
+			logging.LogErrorf("close user guide box [%s] failed: %s", boxID, removeErr)
+			util.PushClearMsg(msgId)
+			continue
 		}
 
 		util.PushClearMsg(msgId)
@@ -1259,6 +1286,16 @@ func subscribeConfEvents() {
 	eventbus.Subscribe(util.EvtConfPandocInitialized, func() {
 		logging.LogInfof("pandoc initialized, set pandoc bin to [%s]", util.PandocBinPath)
 		Conf.Export.PandocBin = util.PandocBinPath
+
+		params := util.RemoveInvalid(Conf.Export.PandocParams)
+		if !strings.Contains(params, "--reference-doc") && "" != util.PandocTemplatePath && !Conf.System.IsMicrosoftStore {
+			params += " --reference-doc"
+			params += " \"" + util.PandocTemplatePath + "\""
+			Conf.Export.PandocParams = strings.TrimSpace(params)
+		}
+
+		logging.LogInfof("pandoc params set to [%s]", Conf.Export.PandocParams)
+		logging.LogInfof("pandoc resources [%s, %s]", util.PandocTemplatePath, util.PandocColorFilterPath)
 		Conf.Save()
 	})
 }

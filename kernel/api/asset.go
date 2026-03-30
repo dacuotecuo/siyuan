@@ -52,15 +52,14 @@ func statAsset(c *gin.Context) {
 			return
 		}
 
-	} else if strings.HasPrefix(path, "file://") {
-		p = strings.TrimPrefix(path, "file://")
-		if strings.Contains(p, ":") {
-			p = strings.TrimPrefix(p, "/")
-		}
-		if strings.Contains(p, "?") {
-			p = p[:strings.Index(p, "?")]
-		}
+	} else if localPath := util.FileURLToLocalPath(path); localPath != "" {
+		p = localPath
 	} else {
+		ret.Code = 1
+		return
+	}
+
+	if !util.IsAbsPathInWorkspace(p) {
 		ret.Code = 1
 		return
 	}
@@ -214,6 +213,14 @@ func getDocImageAssets(c *gin.Context) {
 		ret.Msg = err.Error()
 		return
 	}
+	if model.IsReadOnlyRoleContext(c) {
+		publishAccess := model.GetPublishAccess()
+		if !model.CheckBlockIdAccessableByPublishAccess(c, publishAccess, id) {
+			ret.Code = -1
+			ret.Msg = fmt.Sprintf(model.Conf.Language(15), id)
+			return
+		}
+	}
 	ret.Data = assets
 }
 
@@ -232,6 +239,14 @@ func getDocAssets(c *gin.Context) {
 		ret.Code = -1
 		ret.Msg = err.Error()
 		return
+	}
+	if model.IsReadOnlyRoleContext(c) {
+		publishAccess := model.GetPublishAccess()
+		if !model.CheckBlockIdAccessableByPublishAccess(c, publishAccess, id) {
+			ret.Code = -1
+			ret.Msg = fmt.Sprintf(model.Conf.Language(15), id)
+			return
+		}
 	}
 	ret.Data = assets
 }
@@ -339,7 +354,7 @@ func getUnusedAssets(c *gin.Context) {
 	ret := gulu.Ret.NewResult()
 	defer c.JSON(http.StatusOK, ret)
 
-	unusedAssets := model.UnusedAssets()
+	unusedAssets := model.UnusedAssets(true)
 	total := len(unusedAssets)
 
 	// List only 512 unreferenced assets https://github.com/siyuan-note/siyuan/issues/13075
@@ -349,9 +364,7 @@ func getUnusedAssets(c *gin.Context) {
 		util.PushMsg(fmt.Sprintf(model.Conf.Language(251), total, maxUnusedAssets), 5000)
 	}
 
-	ret.Data = map[string]interface{}{
-		"unusedAssets": unusedAssets,
-	}
+	ret.Data = unusedAssets
 }
 
 func getMissingAssets(c *gin.Context) {
@@ -359,9 +372,7 @@ func getMissingAssets(c *gin.Context) {
 	defer c.JSON(http.StatusOK, ret)
 
 	missingAssets := model.MissingAssets()
-	ret.Data = map[string]interface{}{
-		"missingAssets": missingAssets,
-	}
+	ret.Data = missingAssets
 }
 
 func resolveAssetPath(c *gin.Context) {
@@ -422,7 +433,7 @@ func uploadCloudByAssetsPaths(c *gin.Context) {
 
 	if nil == arg["paths"] {
 		ret.Code = -1
-		ret.Msg = "paths is required"
+		ret.Msg = "[paths] is required"
 		return
 	}
 

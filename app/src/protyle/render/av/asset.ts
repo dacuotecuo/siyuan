@@ -7,7 +7,7 @@ import {uploadFiles} from "../../upload";
 import {pathPosix} from "../../../util/pathName";
 import {openMenu} from "../../../menus/commonMenuItem";
 import {MenuItem} from "../../../menus/Menu";
-import {copyPNGByLink, exportAsset} from "../../../menus/util";
+import {copyAsset, copyPNGByLink, exportAsset} from "../../../menus/util";
 import {setPosition} from "../../../util/setPosition";
 import {previewAttrViewImages} from "../../preview/image";
 import {genAVValueHTML} from "./blockAttr";
@@ -21,7 +21,7 @@ import {renameAsset} from "../../../editor/rename";
 import * as dayjs from "dayjs";
 import {getColId} from "./col";
 import {getFieldIdByCellElement} from "./row";
-import {getCompressURL, removeCompressURL} from "../../../util/image";
+import {base64ToURL, getCompressURL, removeCompressURL} from "../../../util/image";
 import {confirmDialog} from "../../../dialog/confirmDialog";
 import {filesize} from "filesize";
 
@@ -201,11 +201,17 @@ export const editAssetItem = (options: {
 }) => {
     const linkAddress = removeCompressURL(options.content);
     const type = options.type as "image" | "file";
-    const menu = new Menu(Constants.MENU_AV_ASSET_EDIT, () => {
-        if ((!textElements[1] && textElements[0].value === linkAddress) ||
-            (textElements[1] && textElements[0].value === linkAddress && textElements[1].value === options.name)) {
+    const menu = new Menu(Constants.MENU_AV_ASSET_EDIT, async () => {
+        let currentLink = textElements[0].value;
+        if ((!textElements[1] && currentLink === linkAddress) ||
+            (textElements[1] && currentLink === linkAddress && textElements[1].value === options.name)) {
             return;
         }
+        if (type === "image" && currentLink.startsWith("data:image/")) {
+            const base64Src = await base64ToURL([currentLink]);
+            currentLink = base64Src[0];
+        }
+
         updateAssetCell({
             protyle: options.protyle,
             cellElements: options.cellElements,
@@ -213,7 +219,7 @@ export const editAssetItem = (options: {
             updateValue: {
                 index: options.index,
                 value: {
-                    content: textElements[0].value,
+                    content: currentLink,
                     name: textElements[1] ? textElements[1].value : "",
                     type
                 }
@@ -234,17 +240,13 @@ export const editAssetItem = (options: {
     <span data-action="copy" class="block__icon block__icon--show b3-tooltips b3-tooltips__e fn__flex-center" aria-label="${window.siyuan.languages.copy}">
         <svg><use xlink:href="#iconCopy"></use></svg>
     </span>   
-</div>
-<textarea rows="1" style="margin:4px 0;width: ${isMobile() ? "200" : "360"}px;resize: vertical;" class="b3-text-field"></textarea>
-<div class="fn__hr"></div>
-<div class="fn__flex">
+</div><textarea rows="1" style="margin:4px 0;width: ${isMobile() ? "100%" : "360px"};resize: vertical;" class="b3-text-field"></textarea><div class="fn__hr"></div><div class="fn__flex">
     <span class="fn__flex-center">${window.siyuan.languages.title}</span>
     <span class="fn__space"></span>
     <span data-action="copy" class="block__icon block__icon--show b3-tooltips b3-tooltips__e fn__flex-center" aria-label="${window.siyuan.languages.copy}">
         <svg><use xlink:href="#iconCopy"></use></svg>
     </span>   
-</div>
-<textarea style="width: ${isMobile() ? "200" : "360"}px;margin: 4px 0;resize: vertical;" rows="1" class="b3-text-field"></textarea>`,
+</div><textarea style="width: ${isMobile() ? "100%" : "360px"};margin: 4px 0;resize: vertical;" rows="1" class="b3-text-field"></textarea>`,
             bind(element) {
                 element.addEventListener("click", (event) => {
                     let target = event.target as HTMLElement;
@@ -279,8 +281,7 @@ export const editAssetItem = (options: {
     <span data-action="copy" class="block__icon block__icon--show b3-tooltips b3-tooltips__e fn__flex-center" aria-label="${window.siyuan.languages.copy}">
         <svg><use xlink:href="#iconCopy"></use></svg>
     </span>   
-</div>
-<textarea rows="1" style="margin:4px 0;width: ${isMobile() ? "200" : "360"}px;resize: vertical;" class="b3-text-field"></textarea>`,
+</div><textarea rows="1" style="margin:4px 0;width: ${isMobile() ? "100%" : "360px"};resize: vertical;" class="b3-text-field"></textarea>`,
             bind(element) {
                 element.addEventListener("click", (event) => {
                     let target = event.target as HTMLElement;
@@ -351,7 +352,7 @@ export const editAssetItem = (options: {
                     linkAddress,
                     options.blockElement.getAttribute("data-av-id"),
                     options.blockElement.getAttribute(Constants.CUSTOM_SY_AV_VIEW),
-                    (options.blockElement.querySelector('[data-type="av-search"]') as HTMLInputElement)?.value.trim() || ""
+                    options.blockElement.querySelector('[data-type="av-search"]')?.textContent.trim() || ""
                 );
             }
         });
@@ -366,14 +367,23 @@ export const editAssetItem = (options: {
     }
     if (linkAddress?.startsWith("assets/")) {
         window.siyuan.menus.menu.append(new MenuItem(exportAsset(linkAddress)).element);
+        /// #if !BROWSER
+        if (["windows", "darwin"].includes(window.siyuan.config.system.os)) {
+            window.siyuan.menus.menu.append(new MenuItem(copyAsset(linkAddress)).element);
+        }
+        /// #endif
     }
     const rect = options.rect;
+    /// #if MOBILE
+    menu.fullscreen();
+    /// #else
     menu.open({
         x: rect.right,
         y: rect.top,
         w: rect.width,
         h: rect.height,
     });
+    /// #endif
     const textElements = menu.element.querySelectorAll("textarea");
     textElements[0].value = linkAddress;
     textElements[0].focus();

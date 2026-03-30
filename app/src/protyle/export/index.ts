@@ -11,7 +11,7 @@ import {getThemeMode, setInlineStyle} from "../../util/assets";
 import {fetchPost, fetchSyncPost} from "../../util/fetch";
 import {Dialog} from "../../dialog";
 import {replaceLocalPath} from "../../editor/rename";
-import {getScreenWidth, isInAndroid, isInHarmony, isInIOS, setStorageVal} from "../util/compatibility";
+import {getScreenWidth, isInMobileApp, setStorageVal} from "../util/compatibility";
 import {getFrontend} from "../../util/functions";
 
 const getPluginStyle = async () => {
@@ -509,6 +509,7 @@ ${getIconScript(servePath)}
           config: {
             appearance: { mode: 0, codeBlockThemeDark: "${window.siyuan.config.appearance.codeBlockThemeDark}", codeBlockThemeLight: "${window.siyuan.config.appearance.codeBlockThemeLight}" },
             editor: { 
+              allowSVGScriptTip: ${window.siyuan.config.editor.allowSVGScript},
               allowHTMLBLockScript: ${window.siyuan.config.editor.allowHTMLBLockScript},
               fontSize: ${window.siyuan.config.editor.fontSize},
               codeLineWrap: true,
@@ -734,8 +735,8 @@ const getExportPath = (option: IExportOptions, removeAssets?: boolean, mergeSubd
             }, exportResponse => {
                 if (option.type === "word") {
                     if (exportResponse.code === 1) {
-                        showMessage(exportResponse.msg, undefined, "error");
                         hideMessage(msgId);
+                        showMessage(exportResponse.msg, 0, "error");
                         return;
                     }
                     afterExport(exportResponse.data.path, msgId);
@@ -761,7 +762,7 @@ export const onExport = async (data: IWebSocketData, filePath: string, servePath
         themeStyle = `<link rel="stylesheet" type="text/css" id="themeStyle" href="${servePath}appearance/themes/${themeName}/theme.css?${Constants.SIYUAN_VERSION}"/>`;
     }
     const screenWidth = getScreenWidth();
-    const isInMobile = isInAndroid() || isInHarmony() || isInIOS();
+    const isInMobile = isInMobileApp();
     const mobileHtml = isInMobile ? {
         js: `document.body.style.minWidth = "${screenWidth}px";`,
         css: `@page { size: A4; margin: 10mm 0 10mm 0; background-color: var(--b3-theme-background); }
