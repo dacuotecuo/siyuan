@@ -1,4 +1,4 @@
-git fetch origin && git merge origin/master
+git switch dev &&git fetch origin && git merge origin/master
 
 cd kernel
 
