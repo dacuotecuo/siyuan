@@ -44,7 +44,7 @@ import (
 var Mode = "prod"
 
 const (
-	Ver       = "3.6.3"
+	Ver       = "3.6.5"
 	IsInsider = false
 )
 
@@ -114,8 +114,8 @@ func Boot() {
 	ServerPort = *port
 	ReadOnly, _ = strconv.ParseBool(*readOnly)
 	AccessAuthCode = *accessAuthCode
-	AccessAuthCode = strings.TrimSpace(AccessAuthCode)
 	AccessAuthCode = RemoveInvalid(AccessAuthCode)
+	AccessAuthCode = strings.TrimSpace(AccessAuthCode)
 	Container = ContainerStd
 	if RunInContainer {
 		Container = ContainerDocker
@@ -261,6 +261,9 @@ func initWorkspaceDir(workspaceArg string) {
 		if userProfile := os.Getenv("USERPROFILE"); "" != userProfile {
 			defaultWorkspaceDir = filepath.Join(userProfile, "SiYuan")
 		}
+	} else if gulu.OS.IsDarwin() {
+		// Change the initial workspace path to ~/Library/Application Support/SiYuan on macOS https://github.com/siyuan-note/siyuan/issues/17095
+		defaultWorkspaceDir = filepath.Join(HomeDir, "Library", "Application Support", "SiYuan")
 	}
 
 	var workspacePaths []string
@@ -428,18 +431,18 @@ func initPathDir() {
 
 	plugins := filepath.Join(DataDir, "plugins")
 	if err := os.MkdirAll(plugins, 0755); err != nil && !os.IsExist(err) {
-		logging.LogFatalf(logging.ExitCodeInitWorkspaceErr, "create data plugins folder [%s] failed: %s", widgets, err)
+		logging.LogFatalf(logging.ExitCodeInitWorkspaceErr, "create data plugins folder [%s] failed: %s", plugins, err)
 	}
 
 	emojis := filepath.Join(DataDir, "emojis")
 	if err := os.MkdirAll(emojis, 0755); err != nil && !os.IsExist(err) {
-		logging.LogFatalf(logging.ExitCodeInitWorkspaceErr, "create data emojis folder [%s] failed: %s", widgets, err)
+		logging.LogFatalf(logging.ExitCodeInitWorkspaceErr, "create data emojis folder [%s] failed: %s", emojis, err)
 	}
 
 	// Support directly access `data/public/*` contents via URL link https://github.com/siyuan-note/siyuan/issues/8593
 	public := filepath.Join(DataDir, "public")
 	if err := os.MkdirAll(public, 0755); err != nil && !os.IsExist(err) {
-		logging.LogFatalf(logging.ExitCodeInitWorkspaceErr, "create data public folder [%s] failed: %s", widgets, err)
+		logging.LogFatalf(logging.ExitCodeInitWorkspaceErr, "create data public folder [%s] failed: %s", public, err)
 	}
 }
 

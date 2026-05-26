@@ -241,12 +241,13 @@ func Serve(fastMode bool, cookieKey string) {
 		// 反代服务器启动失败不影响核心服务器启动
 	}()
 
+	httpHandler := ginServer.Handler()
 	util.HttpServer = &http.Server{
-		Handler: ginServer,
+		Handler: httpHandler,
 	}
 
 	if useTLS && (util.FixedPort == util.ServerPort || util.IsPortOpen(util.FixedPort)) {
-		if err = util.ServeMultiplexed(ln, ginServer, certPath, keyPath, util.HttpServer); err != nil {
+		if err = util.ServeMultiplexed(ln, httpHandler, certPath, keyPath, util.HttpServer); err != nil {
 			if errors.Is(err, http.ErrServerClosed) || errors.Is(err, cmux.ErrListenerClosed) {
 				return
 			}
@@ -318,6 +319,11 @@ func serveExport(ginServer *gin.Engine) {
 		}
 
 		fullPath := filepath.Join(exportBaseDir, decodedPath)
+		if !gulu.File.IsSubPath(exportBaseDir, fullPath) {
+			c.Status(http.StatusUnauthorized)
+			return
+		}
+
 		if util.IsSensitivePath(fullPath) {
 			logging.LogErrorf("refuse to export sensitive file [%s]", c.Request.URL.Path)
 			c.Status(http.StatusForbidden)
@@ -444,7 +450,7 @@ func serveAppearance(ginServer *gin.Engine) {
 	}
 	siyuan.GET("/appearance/*filepath", func(c *gin.Context) {
 		filePath := filepath.Join(appearancePath, strings.TrimPrefix(c.Request.URL.Path, "/appearance/"))
-		if !util.IsSubPath(appearancePath, filePath) {
+		if !gulu.File.IsSubPath(appearancePath, filePath) {
 			c.Status(http.StatusUnauthorized)
 			return
 		}
@@ -468,7 +474,7 @@ func serveAppearance(ginServer *gin.Engine) {
 					util.ReportFileSysFatalError(err)
 					return
 				}
-				enUSMap := map[string]interface{}{}
+				enUSMap := map[string]any{}
 				if err = gulu.JSON.UnmarshalJSON(enUSData, &enUSMap); err != nil {
 					logging.LogErrorf("unmarshal en_US.json [%s] failed: %s", enUSFilePath, err)
 					util.ReportFileSysFatalError(err)
@@ -482,7 +488,7 @@ func serveAppearance(ginServer *gin.Engine) {
 						return
 					}
 
-					langMap := map[string]interface{}{}
+					langMap := map[string]any{}
 					if err = gulu.JSON.UnmarshalJSON(data, &langMap); err != nil {
 						logging.LogErrorf("unmarshal json [%s] failed: %s", filePath, err)
 						c.JSON(200, enUSMap)
@@ -528,12 +534,12 @@ func serveAuthPage(c *gin.Context) {
 	keymapHideWindow := "⌥M"
 	if nil != (*model.Conf.Keymap)["general"] {
 		switch (*model.Conf.Keymap)["general"].(type) {
-		case map[string]interface{}:
-			keymapGeneral := (*model.Conf.Keymap)["general"].(map[string]interface{})
+		case map[string]any:
+			keymapGeneral := (*model.Conf.Keymap)["general"].(map[string]any)
 			if nil != keymapGeneral["toggleWin"] {
 				switch keymapGeneral["toggleWin"].(type) {
-				case map[string]interface{}:
-					toggleWin := keymapGeneral["toggleWin"].(map[string]interface{})
+				case map[string]any:
+					toggleWin := keymapGeneral["toggleWin"].(map[string]any)
 					if nil != toggleWin["custom"] {
 						keymapHideWindow = toggleWin["custom"].(string)
 					}
@@ -544,7 +550,7 @@ func serveAuthPage(c *gin.Context) {
 			keymapHideWindow = "⌥M"
 		}
 	}
-	model := map[string]interface{}{
+	model := map[string]any{
 		"l0":                     model.Conf.Language(173),
 		"l1":                     model.Conf.Language(174),
 		"l2":                     template.HTML(model.Conf.Language(172)),
@@ -788,7 +794,7 @@ func serveWebSocket(ginServer *gin.Engine) {
 			return
 		}
 
-		request := map[string]interface{}{}
+		request := map[string]any{}
 		if err := gulu.JSON.UnmarshalJSON(msg, &request); err != nil {
 			result := util.NewResult()
 			result.Code = -1
@@ -808,7 +814,7 @@ func serveWebSocket(ginServer *gin.Engine) {
 
 		cmdStr := request["cmd"].(string)
 		cmdId := request["reqId"].(float64)
-		param := request["param"].(map[string]interface{})
+		param := request["param"].(map[string]any)
 		command := cmd.NewCommand(cmdStr, cmdId, param, s)
 		if nil == command {
 			result := util.NewResult()

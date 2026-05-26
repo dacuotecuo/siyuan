@@ -359,14 +359,14 @@ func GetAbsPathInWorkspace(relPath string) (string, error) {
 		return absPath, nil
 	}
 
-	if IsSubPath(WorkspaceDir, absPath) {
+	if gulu.File.IsSubPath(WorkspaceDir, absPath) {
 		return absPath, nil
 	}
 	return "", os.ErrPermission
 }
 
 func IsAbsPathInWorkspace(absPath string) bool {
-	return IsSubPath(WorkspaceDir, absPath)
+	return gulu.File.IsSubPath(WorkspaceDir, absPath)
 }
 
 // IsWorkspaceDir 判断指定目录是否是工作空间目录。
@@ -456,6 +456,11 @@ func IsSensitivePath(p string) bool {
 	// 工作空间/conf 目录（小写比较）
 	workspaceConfPrefix := strings.ToLower(filepath.Join(WorkspaceDir, "conf"))
 	if strings.HasPrefix(toCheckPathLower, workspaceConfPrefix) {
+		return true
+	}
+
+	// *.db/*.log
+	if strings.HasSuffix(p, ".db") || strings.HasSuffix(p, ".log") {
 		return true
 	}
 

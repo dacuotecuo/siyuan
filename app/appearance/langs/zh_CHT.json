@@ -1,4 +1,6 @@
 {
+  "hyperlink": "超鏈接",
+  "copyDoc": "複製全文",
   "position": "位置",
   "insertColumnLeft1": "在左側插入 ${x} 欄",
   "insertColumnRight1": "在右側插入 ${x} 欄",

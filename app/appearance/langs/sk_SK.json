@@ -1,4 +1,6 @@
 {
+  "hyperlink": "Hypertextový odkaz",
+  "copyDoc": "Kopírovať celý dokument",
   "position": "Pozícia",
   "insertColumnLeft1": "Vložiť ${x} stĺpec/stĺpce doľava",
   "insertColumnRight1": "Vložiť ${x} stĺpec/stĺpce doprava",
