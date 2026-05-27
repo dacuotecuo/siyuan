@@ -1,6 +1,21 @@
 ## 如何编译
 
 [参考](./.github/CONTRIBUTING_zh_CN.md)
+
+### 一键编译（直接运行 build.sh 对应的命令）
+在项目根目录下依次执行以下命令，等同于运行 `build.sh`：
+
+```bash
+# 切换到 dev 分支并同步
+git switch dev && git fetch origin && git merge origin/master
+
+# 编译内核
+cd kernel && go build --tags "fts5" -o ../app/kernel/SiYuan-Kernel && cd ..
+
+# 安装依赖并编译客户端
+cd app && pnpm install && pnpm rebuild && pnpm run build && pnpm run dist && cd ..
+```
+
 ### 运行内核
 在`kernel`目录下运行`go run`命令可以将kernel内容运行起来
 ``` bash
