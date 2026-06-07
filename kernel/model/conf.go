@@ -609,6 +609,8 @@ func InitConf() {
 			embeddingProvider.APIModel)
 	}
 
+	Conf.AI.Normalize()
+
 	Conf.ReadOnly = util.ReadOnly
 
 	if "" != util.AccessAuthCode {
