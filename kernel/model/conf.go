@@ -771,6 +771,8 @@ func Close(force, setCurrentWorkspace bool, execInstallPkg int) (exitCode int) {
 	FlushTxQueue()
 
 	if !force {
+		cancelPurge()
+
 		// Stop kernel plugins early in shutdown
 		if OnKernelPluginsStop != nil {
 			OnKernelPluginsStop()
