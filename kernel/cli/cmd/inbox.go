@@ -242,7 +242,7 @@ func parseShorthandIDs(s string) []string {
 		return nil
 	}
 	raw := make([]string, 0, 4)
-	for p := range strings.SplitSeq(s, ",") {
+	for _, p := range strings.Split(s, ",") {
 		p = strings.TrimSpace(p)
 		if p != "" {
 			raw = append(raw, p)
