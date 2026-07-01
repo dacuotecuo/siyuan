@@ -243,10 +243,6 @@ export const selectRow = (checkElement: Element, type: "toggle" | "select" | "un
                 const rowItemElement = hasClosestByClassName(item, "av__row");
                 if (rowItemElement) {
                     rowItemElement.classList.add("av__row--select");
-                    const id = rowItemElement.getAttribute("data-id");
-                    if (id) {
-                        allRowIds.push(id);
-                    }
                 }
             });
             const allRowIds: string[] = [];
