@@ -432,6 +432,28 @@ export class AgentChat extends Model {
     // 初始化思考强度原生 select：填充 4 个选项并绑定 change，模式与 initModelSelect 一致。
     private initReasoningEffortSelect() {
         const L = window.siyuan.languages;
+        let label = L.reasoningEffortDefault || "Default";
+        if (this.selectedReasoningEffort === "low") {
+            label = L.reasoningEffortLow || "Low";
+        } else if (this.selectedReasoningEffort === "medium") {
+            label = L.reasoningEffortMedium || "Medium";
+        } else if (this.selectedReasoningEffort === "high") {
+            label = L.reasoningEffortHigh || "High";
+        }
+        this.reasoningEffortLabel.textContent = label;
+    }
+
+    // 弹出思考强度单选菜单，参照 topBar 主题切换的 toggle 弹层模式（全局 Menu 单例 + data-name 幂等）。
+    private showReasoningEffortMenu(target: HTMLElement) {
+        const L = window.siyuan.languages;
+        const menuName = "agent-reasoning-effort";
+        if (!window.siyuan.menus.menu.element.classList.contains("fn__none") &&
+            window.siyuan.menus.menu.element.getAttribute("data-name") === menuName) {
+            window.siyuan.menus.menu.remove();
+            return;
+        }
+        window.siyuan.menus.menu.remove();
+        window.siyuan.menus.menu.element.setAttribute("data-name", menuName);
         const options: Array<{ value: string; label: string }> = [
             {value: "", label: L.reasoningEffortDefault || "Default"},
             {value: "low", label: L.reasoningEffortLow || "Low"},
