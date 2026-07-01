@@ -10,6 +10,7 @@ import {listActions, lookupAction} from "./frontendActions";
 import {AgentSession, SessionStore} from "./SessionStore";
 import {AgentSessionPanel} from "./AgentSessionPanel";
 import {getDockByType} from "../../tabUtil";
+import {MenuItem} from "../../../menus/Menu";
 import {updateHotkeyAfterTip} from "../../../protyle/util/compatibility";
 import {getAgentLute} from "../../../protyle/render/setLute";
 import {setPanelFocus} from "../../util";
@@ -625,6 +626,10 @@ export class AgentChat extends Model {
             } else {
                 this.showTokenBreakdownPopup();
             }
+        });
+        this.reasoningEffortBtn.addEventListener("click", (e: MouseEvent) => {
+            e.stopPropagation();
+            this.showReasoningEffortMenu(e.currentTarget as HTMLElement);
         });
         this.sendBtn.addEventListener("click", (e: MouseEvent) => {
             e.stopPropagation();
