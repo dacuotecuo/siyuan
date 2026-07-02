@@ -146,6 +146,11 @@ const registerAiEmbeddingGroup = (tab: SettingTabBuilder) => {
         desc: window.siyuan.languages.apiDimensionsTip,
         min: 0,
     });
+    group.number("ai.embedding.dimensions", {
+        title: window.siyuan.languages.apiDimensions,
+        desc: window.siyuan.languages.apiDimensionsTip,
+        min: 0,
+    });
     group.number("ai.embedding.timeout", {
         title: window.siyuan.languages.apiTimeout,
         desc: window.siyuan.languages.apiTimeoutTip,
