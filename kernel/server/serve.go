@@ -1103,7 +1103,6 @@ func serveWebSocket(ginServer *gin.Engine) {
 
 	util.WebSocketServer.HandleMessage(func(s *melody.Session, msg []byte) {
 		start := time.Now()
-		util.RefreshActivity()
 		logging.LogTracef("request [%s]", shortReqMsg(msg))
 
 		if util.IsAuthSession(s) {
