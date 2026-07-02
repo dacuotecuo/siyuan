@@ -363,7 +363,6 @@ func reconnectMCP() bool {
 // ReconnectMCPAsync 用最新的 server 配置异步重连，不阻塞调用方（如 setAI 配置保存）。
 // 适用于配置变更（开关切换、编辑、增删 server）后让连接立即跟上，而非等下次 Agent 请求。
 func ReconnectMCPAsync(servers []conf.MCPServer) {
-	logging.LogInfof("mcp: ReconnectMCPAsync triggered, %d servers", len(servers))
 	mcpMu.Lock()
 	mcpServers = servers
 	mcpConnecting = true
@@ -384,7 +383,6 @@ func ReconnectMCPAsync(servers []conf.MCPServer) {
 			return
 		}
 		mcpConns = conns
-		logging.LogInfof("mcp: reconnect done, %d conns", len(conns))
 		mcpMu.Unlock()
 	}()
 }
