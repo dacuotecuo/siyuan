@@ -26,6 +26,7 @@ type StatusBar struct {
 
 var StatusBarCfg *StatusBar
 
+<<<<<<< HEAD:kernel/util/appearance.go
 // Notifications 外观通知开关配置。https://github.com/siyuan-note/siyuan/issues/17797
 <<<<<<< HEAD:kernel/util/appearance.go
 // Appearance.Notifications 为 nil 时表示旧配置尚未迁移，整体按默认启用处理。
@@ -45,6 +46,9 @@ func NewNotifications() *Notifications {
 		BrowserCompatibility: true,
 	}
 =======
+=======
+// Notifications 外观通知开关配置。https://github.com/siyuan-note/siyuan/issues/11109
+>>>>>>> 468cb93a7 (:art: Improve comments):kernel/util/statusbar.go
 type Notifications struct {
 	MsgDocTreeMaxListDisabled       bool `json:"msgDocTreeMaxListDisabled"`
 	MsgTagMaxListDisabled           bool `json:"msgTagMaxListDisabled"`
