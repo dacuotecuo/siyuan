@@ -27,6 +27,7 @@ type StatusBar struct {
 var StatusBarCfg *StatusBar
 
 // Notifications 外观通知开关配置。https://github.com/siyuan-note/siyuan/issues/17797
+<<<<<<< HEAD:kernel/util/appearance.go
 // Appearance.Notifications 为 nil 时表示旧配置尚未迁移，整体按默认启用处理。
 type Notifications struct {
 	DocTreeMaxList       bool `json:"docTreeMaxList"`       // 文档面板展开上限提示，默认启用
@@ -43,6 +44,13 @@ func NewNotifications() *Notifications {
 		WorkspaceNotSSD:      true,
 		BrowserCompatibility: true,
 	}
+=======
+type Notifications struct {
+	MsgDocTreeMaxListDisabled       bool `json:"msgDocTreeMaxListDisabled"`
+	MsgTagMaxListDisabled           bool `json:"msgTagMaxListDisabled"`
+	MsgWorkspaceNotSSDDisabled      bool `json:"msgWorkspaceNotSSDDisabled"`
+	MsgBrowserCompatibilityDisabled bool `json:"msgBrowserCompatibilityDisabled"`
+>>>>>>> 3f72a4585 (:art: Support setting notification switch https://github.com/siyuan-note/siyuan/issues/11109):kernel/util/statusbar.go
 }
 
 var NotificationsCfg *Notifications

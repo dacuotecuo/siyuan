@@ -325,6 +325,14 @@ declare namespace Config {
         msgTaskHistoryGenerateFileDisabled: boolean;
     }
 
+    /** 外观通知开关配置 */
+    export interface IAppearanceNotifications {
+        msgDocTreeMaxListDisabled: boolean;
+        msgTagMaxListDisabled: boolean;
+        msgWorkspaceNotSSDDisabled: boolean;
+        msgBrowserCompatibilityDisabled: boolean;
+    }
+
     /**
      * 外观通知开关配置。Appearance.Notifications 为 undefined 时表示旧配置尚未迁移，整体按默认启用处理。
      */
