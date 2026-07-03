@@ -411,6 +411,12 @@ const updateBlock = (updateElements: Element[], protyle: IProtyle, operation: IO
             item.getAttribute("data-subtype") === "echarts" ? protyle.lute.SpinBlockDOM(operation.data) : operation.data);
         item = item.nextElementSibling;
         item.previousElementSibling.remove();
+        if (tableScrollLeft > 0) {
+            (item.firstElementChild as HTMLElement).scrollLeft = tableScrollLeft;
+        }
+        if (tableScrollTop > 0) {
+            item.querySelector("table").scrollTop = tableScrollTop;
+        }
 
         const wbrElement = item.querySelector("wbr");
         if (isRangeBlock && isUndo) {
