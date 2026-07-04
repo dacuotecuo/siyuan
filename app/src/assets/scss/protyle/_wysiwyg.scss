@@ -650,10 +650,6 @@
 
       user-select: none;
 
-      iframe {
-        user-select: none;
-      }
-
       &--drag {
         .iframe-content::after {
           content: "";
