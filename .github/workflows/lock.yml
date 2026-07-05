@@ -9,6 +9,10 @@ permissions:
   issues: write
   pull-requests: write
 
+concurrency:
+  group: lock-threads
+  cancel-in-progress: false # 不取消正在跑的，避免回扫中途中断
+
 jobs:
   lock:
     runs-on: ubuntu-latest
