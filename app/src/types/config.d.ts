@@ -1229,6 +1229,9 @@ declare namespace Config {
         recentClosed: IKey;
         move: IKey;
         selectOpen1: IKey;
+        switchLeftDock: IKey;
+        switchRightDock: IKey;
+        switchBottomDock: IKey;
         toggleDock: IKey;
         splitLR: IKey;
         splitMoveR: IKey;
