@@ -2113,6 +2113,12 @@ func processSyncMergeResult(exit, byHand bool, mergeResult *dejavu.MergeResult, 
 			needUnindexBoxes[boxID] = true
 			needIndexBoxes[boxID] = true
 		}
+		if strings.HasSuffix(file.Path, "/.siyuan/boxDoc.json") {
+			needReloadFiletree = true
+			boxID := strings.TrimSuffix(strings.TrimPrefix(file.Path, "/"), "/.siyuan/boxDoc.json")
+			needUnindexBoxes[boxID] = true
+			needIndexBoxes[boxID] = true
+		}
 
 		if file.Path == "/.siyuan/notebook-crypto-backup.json" {
 			needRestoreNotebookCrypto = true
@@ -2173,6 +2179,12 @@ func processSyncMergeResult(exit, byHand bool, mergeResult *dejavu.MergeResult, 
 			needReloadFiletree = true
 			boxID := strings.TrimSuffix(strings.TrimPrefix(file.Path, "/"), "/.siyuan/conf.json")
 			needUnindexBoxes[boxID] = true
+		}
+		if strings.HasSuffix(file.Path, "/.siyuan/boxDoc.json") {
+			needReloadFiletree = true
+			boxID := strings.TrimSuffix(strings.TrimPrefix(file.Path, "/"), "/.siyuan/boxDoc.json")
+			needUnindexBoxes[boxID] = true
+			needIndexBoxes[boxID] = true
 		}
 
 		if strings.HasPrefix(file.Path, "/storage/petal/") {
@@ -2262,6 +2274,9 @@ func processSyncMergeResult(exit, byHand bool, mergeResult *dejavu.MergeResult, 
 	}
 	for boxID := range needIndexBoxes {
 		if box := Conf.GetBox(boxID); nil != box {
+			if _, err := EnsureBoxDoc(boxID); nil != err {
+				logging.LogErrorf("ensure box document [%s] after sync failed: %s", boxID, err)
+			}
 			box.Index()
 		}
 	}
