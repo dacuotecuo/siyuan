@@ -44,6 +44,13 @@ const maxVisibleBlockIDs = 50;
 
 type EntryBase = { id?: string };
 type AgentReference = { id: string; title: string };
+type UserEntry = EntryBase & {
+    type: "user";
+    content: string;
+    blockHTML?: string;
+    references?: AgentReference[];
+    timestamp?: number
+};
 
 type UserEntry = EntryBase & { type: "user"; content: string; blockHTML?: string; timestamp?: number };
 
@@ -1982,12 +1989,27 @@ export class AgentChat extends Model {
             e.stopPropagation();
             edit(true);
         });
-        el.querySelector(".agent-chat__body")?.addEventListener("click", () => edit());
+        body.addEventListener("click", (event) => {
+            const target = event.target as HTMLElement;
+            if (!target.closest('[data-type~="a"], [data-type~="block-ref"], ' +
+                '[data-type~="file-annotation-ref"], [data-type~="tag"], [data-subtype], a[href], img')) {
+                edit();
+            }
+        });
         return el;
     }
 
-    private appendUserMessage(text: string, timestamp?: number, entryId?: string) {
-        const el = this.createUserMessage(text, timestamp, entryId);
+    private renderUserMessage(el: HTMLElement) {
+        const body = el.querySelector(".agent-chat__body") as HTMLElement;
+        postRender(el, this.app);
+        this.composer?.renderBlockHTML(body, () => {
+            disabledWYSIWYG(body);
+        });
+        disabledWYSIWYG(body);
+    }
+
+    private appendUserMessage(text: string, timestamp?: number, entryId?: string, blockHTML?: string) {
+        const el = this.createUserMessage(text, timestamp, entryId, blockHTML);
         this.messagesContainer.appendChild(el);
         postRender(el, this.app);
         this.composer?.renderBlockHTML(bodyElement, () => {
@@ -2001,11 +2023,7 @@ export class AgentChat extends Model {
         if (this.editingUserEntryID || this.isStreaming || this.mirrorLocked) {
             return;
         }
-        const entry = this.entries.find((item): item is EntryBase & {
-            type: "user";
-            content: string;
-            timestamp?: number
-        } => item.type === "user" && item.id === entryID);
+        const entry = this.entries.find((item): item is UserEntry => item.type === "user" && item.id === entryID);
         if (!entry) {
             return;
         }
@@ -2033,7 +2051,9 @@ export class AgentChat extends Model {
             if (this.pendingEditDraft?.entryID === entryID) {
                 this.pendingEditDraft = null;
             }
-            el.replaceWith(this.createUserMessage(entry.content, entry.timestamp, entry.id));
+            const replacement = this.createUserMessage(entry.content, entry.timestamp, entry.id, entry.blockHTML);
+            el.replaceWith(replacement);
+            this.renderUserMessage(replacement);
         };
         cancel.addEventListener("click", restore);
         submit.addEventListener("click", async () => {
@@ -2468,7 +2488,11 @@ export class AgentChat extends Model {
             content: editedContent,
         };
         if (editedContent !== undefined) {
+            const contentChanged = editedContent !== targetEntry.content;
             targetEntry.content = editedContent;
+            if (contentChanged) {
+                targetEntry.blockHTML = undefined;
+            }
             const references = filterAgentReferencesForContent(targetEntry.references || [], editedContent);
             targetEntry.references = references.length > 0 ? references : undefined;
         }
@@ -2484,7 +2508,10 @@ export class AgentChat extends Model {
                 sibling = next;
             }
             if (editedContent !== undefined) {
-                targetEl.replaceWith(this.createUserMessage(targetEntry.content, targetEntry.timestamp, targetEntry.id));
+                const replacement = this.createUserMessage(targetEntry.content, targetEntry.timestamp, targetEntry.id,
+                    targetEntry.blockHTML);
+                targetEl.replaceWith(replacement);
+                this.renderUserMessage(replacement);
             }
         }
         this.currentAIElement = null;
