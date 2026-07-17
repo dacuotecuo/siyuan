@@ -426,6 +426,7 @@ func AgentChat(ctx context.Context, client *openai.Client, model string, session
 		default:
 		}
 
+		rawUserMessage := userMessage
 		// 变量（非敏感）在用户消息注入对话时解析，让 LLM 看到实际值；密钥不进上下文。
 		// 在此统一解析一次，后续 checkpoint 与消息重建均使用解析后的值，保证全链路一致。
 		userMessage = kernelModel.Conf.Variables.Resolve(userMessage)
@@ -508,6 +509,9 @@ func AgentChat(ctx context.Context, client *openai.Client, model string, session
 		if regenerate {
 			turn.Mode = "regenerate"
 			turn.TargetUserEntryID = userEntryID
+			turn.UserContent = rawUserMessage
+			userReferences := append([]Reference(nil), references...)
+			turn.UserReferences = &userReferences
 		}
 		select {
 		case <-ctx.Done():
