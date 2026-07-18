@@ -521,6 +521,12 @@ declare namespace Config {
          */
         displayNetImgMark: boolean;
         /**
+         * Default state of database attributes
+         * - `0`: Expanded
+         * - `1`: Collapsed
+         */
+        databaseAttrViewMode: number;
+        /**
          * The number of blocks loaded each time they are dynamically loaded
          */
         dynamicLoadBlocks: number;
