@@ -865,11 +865,11 @@ var exitLock = sync.Mutex{}
 //
 // setCurrentWorkspace：是否将当前工作空间放到工作空间列表的最后一个
 //
-// execInstallPkg：是否执行新版本安装包
+// execInstallPkg：是否返回新版本安装包
 //
 //	0：默认按照设置项 System.DownloadInstallPkg 检查并推送提示
-//	1：不执行新版本安装
-//	2：执行新版本安装
+//	1：不返回新版本安装包
+//	2：返回新版本安装包路径并退出，由桌面宿主执行安装
 //
 // 返回值 exitCode：
 //
@@ -877,8 +877,9 @@ var exitLock = sync.Mutex{}
 //	1：同步执行失败
 //	2：提示新安装包
 //
-// 当 force 为 true（强制退出）并且 execInstallPkg 为 0（默认检查更新）并且同步失败并且新版本安装版已经准备就绪时，执行新版本安装 https://github.com/siyuan-note/siyuan/issues/10288
-func Close(force, setCurrentWorkspace bool, execInstallPkg int) (exitCode int) {
+// 当 force 为 true（强制退出）并且 execInstallPkg 为 0（默认检查更新）并且新版本安装包已经准备就绪时，将安装包路径返回给桌面宿主
+// https://github.com/siyuan-note/siyuan/issues/10288
+func Close(force, setCurrentWorkspace bool, execInstallPkg int) (exitCode int, installPkgPath string) {
 	exitLock.Lock()
 	defer exitLock.Unlock()
 
@@ -899,6 +900,9 @@ func Close(force, setCurrentWorkspace bool, execInstallPkg int) (exitCode int) {
 			syncData(true, false)
 			if 0 != ExitSyncSucc {
 				exitCode = 1
+				if 1 != execInstallPkg && !skipNewVerInstallPkg() {
+					installPkgPath = getNewVerInstallPkgPath()
+				}
 				return
 			}
 		}
@@ -911,16 +915,13 @@ func Close(force, setCurrentWorkspace bool, execInstallPkg int) (exitCode int) {
 	sql.FlushQueue()
 
 	util.IsExiting.Store(true)
-	waitSecondForExecInstallPkg := false
 	newVerInstallPkgPath := getNewVerInstallPkgPath()
 	if !skipNewVerInstallPkg() && "" != newVerInstallPkgPath {
-		if 2 == execInstallPkg || (force && 0 == execInstallPkg) { // 执行新版本安装
-			waitSecondForExecInstallPkg = true
-			if gulu.OS.IsWindows() {
-				util.PushMsg(Conf.Language(130), 1000*30)
-			}
-			go execNewVerInstallPkg(newVerInstallPkgPath)
+		if 2 == execInstallPkg || (force && 0 == execInstallPkg) { // 将新版本安装包交给桌面宿主执行
+			installPkgPath = newVerInstallPkgPath
+			logging.LogInfof("the new version install pkg is ready for the desktop host [%s]", newVerInstallPkgPath)
 		} else if 0 == execInstallPkg { // 新版本安装包已经准备就绪
+			installPkgPath = newVerInstallPkgPath
 			exitCode = 2
 			logging.LogInfof("the new version install pkg is ready [%s], waiting for the user's next instruction", newVerInstallPkgPath)
 			return
@@ -940,7 +941,7 @@ func Close(force, setCurrentWorkspace bool, execInstallPkg int) (exitCode int) {
 	sql.CloseDatabase()
 	closePushQueue()
 	util.SaveAssetsTexts()
-	clearWorkspaceTemp()
+	clearWorkspaceTemp("" != installPkgPath)
 	clearCorruptedNotebooks()
 	clearPortJSON()
 
@@ -961,14 +962,6 @@ func Close(force, setCurrentWorkspace bool, execInstallPkg int) (exitCode int) {
 	util.UnlockWorkspace()
 
 	time.Sleep(500 * time.Millisecond)
-	if waitSecondForExecInstallPkg {
-		// 桌面端退出拉起更新安装时有时需要重启两次 https://github.com/siyuan-note/siyuan/issues/6544
-		// 这里多等待一段时间，等待安装程序启动
-		if gulu.OS.IsWindows() {
-			time.Sleep(30 * time.Second)
-		}
-	}
-
 	closeSyncWebSocket()
 
 	go func() {
@@ -1326,7 +1319,7 @@ func clearCorruptedNotebooks() {
 	}
 }
 
-func clearWorkspaceTemp() {
+func clearWorkspaceTemp(preserveInstallPkgs bool) {
 	os.RemoveAll(filepath.Join(util.TempDir, "bazaar"))
 	os.RemoveAll(filepath.Join(util.TempDir, "export"))
 	os.RemoveAll(filepath.Join(util.TempDir, "import"))
@@ -1338,7 +1331,7 @@ func clearWorkspaceTemp() {
 
 	// 退出时自动删除超过 7 天的安装包 https://github.com/siyuan-note/siyuan/issues/6128
 	install := filepath.Join(util.TempDir, "install")
-	if gulu.File.IsDir(install) {
+	if !preserveInstallPkgs && gulu.File.IsDir(install) {
 		monthAgo := time.Now().Add(-time.Hour * 24 * 7)
 		entries, err := os.ReadDir(install)
 		if err != nil {
@@ -1347,8 +1340,9 @@ func clearWorkspaceTemp() {
 			for _, entry := range entries {
 				info, _ := entry.Info()
 				if nil != info && !info.IsDir() && info.ModTime().Before(monthAgo) {
-					if err = os.RemoveAll(filepath.Join(install, entry.Name())); err != nil {
-						logging.LogErrorf("remove old install pkg [%s] failed: %s", filepath.Join(install, entry.Name()), err)
+					installPkgPath := filepath.Join(install, entry.Name())
+					if err = os.RemoveAll(installPkgPath); err != nil {
+						logging.LogErrorf("remove old install pkg [%s] failed: %s", installPkgPath, err)
 					}
 				}
 			}
