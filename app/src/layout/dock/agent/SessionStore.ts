@@ -54,6 +54,15 @@ export interface AgentSession {
         type: "user" | "thinking" | "assistant" | "confirm" | "question" | "snapshot" | "rollback";
         content?: string;
         blockHTML?: string;
+        references?: Array<{id: string; title: string}>;
+        editorContext?: {
+            activeDocID?: string;
+            activeDocTitle?: string;
+            notebookID?: string;
+            focusedBlockID?: string;
+            selectedBlockIDs?: string[];
+            visibleBlockIDs?: string[];
+        };
         // thinking step：新格式只含 reasoning/reasoningContent/toolNames/content；
         // text/toolCalls 仅为读取老数据而保留为可选（渲染时归一化）。
         steps?: Array<{
