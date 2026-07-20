@@ -1326,7 +1326,8 @@ export const turnsIntoTransaction = (options: {
     type: TTurnInto,
     level?: number,
     isContinue?: boolean,
-    range?: Range
+    range?: Range,
+    unfocus?: boolean,
 }) => {
     // https://github.com/siyuan-note/siyuan/issues/14505
     options.protyle.observerLoad?.disconnect();
@@ -1488,10 +1489,12 @@ export const turnsIntoTransaction = (options: {
     highlightRender(options.protyle.wysiwyg.element);
     avRender(options.protyle.wysiwyg.element, options.protyle);
     blockRender(options.protyle, options.protyle.wysiwyg.element);
-    if (range || options.range) {
-        focusByWbr(options.protyle.wysiwyg.element, range || options.range);
-    } else {
-        focusBlock(options.protyle.wysiwyg.element.querySelector(`[data-node-id="${selectsElement[0].getAttribute("data-node-id")}"]`));
+    if (!options.unfocus) {
+        if (range || options.range) {
+            focusByWbr(options.protyle.wysiwyg.element, range || options.range);
+        } else {
+            focusBlock(options.protyle.wysiwyg.element.querySelector(`[data-node-id="${selectsElement[0].getAttribute("data-node-id")}"]`));
+        }
     }
     hideElements(["gutter"], options.protyle);
 };
