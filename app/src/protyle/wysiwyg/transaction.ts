@@ -34,6 +34,11 @@ import {scrollCenter} from "../../util/highlightById";
 import {setFold} from "../util/blockFold";
 import {isEncryptedBox} from "../../util/pathName";
 import {queueTransaction} from "../util/transactionQueue";
+import {
+    cleanHeadingNumberHTML,
+    cleanHeadingNumberOperations,
+    queueHeadingNumberRefresh
+} from "../util/headingNumber";
 
 const removeTopElement = (updateElement: Element, protyle: IProtyle) => {
     // 移动到其他文档中，该块需移除
@@ -431,6 +436,7 @@ const promiseTransaction = (options: {
                 blockRender(protyle, item);
             }
         });
+        queueHeadingNumberRefresh(protyle, response.data[0].doOperations);
         options.callback?.();
     }));
 };
@@ -1160,6 +1166,7 @@ export const onTransaction = (protyle: IProtyle, operations: IOperation[], isUnd
             return;
         }
     });
+    queueHeadingNumberRefresh(protyle, operations);
 };
 
 export const turnsIntoOneTransaction = async (options: {
@@ -1613,6 +1620,8 @@ export const transaction = (protyle: IProtyle, doOperations: IOperation[], undoO
     if (doOperations.length === 0) {
         return;
     }
+    cleanHeadingNumberOperations(doOperations);
+    cleanHeadingNumberOperations(undoOperations);
     if (!protyle) {
         // 文档树中点开属性->数据库后的变更操作 & 文档树添加到数据库
         fetchPost("/api/transactions", {
@@ -1738,8 +1747,9 @@ const processFold = (operation: IOperation, protyle: IProtyle) => {
 
 export const updateTransaction = (protyle: IProtyle, element: Element, oldHTML: string, undoContext?: Record<string, string>) => {
     const id = element.getAttribute("data-node-id");
-    const newHTML = element.outerHTML;
-    if (newHTML === oldHTML.replace("<wbr>", "")) {
+    const newHTML = cleanHeadingNumberHTML(element.outerHTML);
+    const cleanOldHTML = cleanHeadingNumberHTML(oldHTML);
+    if (newHTML === cleanOldHTML.replace("<wbr>", "")) {
         return;
     }
     element.setAttribute(Constants.ATTRIBUTE_EDITING, "true");
@@ -1749,7 +1759,7 @@ export const updateTransaction = (protyle: IProtyle, element: Element, oldHTML: 
         action: "update"
     }], [{
         id,
-        data: oldHTML,
+        data: cleanOldHTML,
         action: "update",
         context: undoContext,
     }]);
@@ -1766,14 +1776,14 @@ export const updateBatchTransaction = (nodeElements: Element[], protyle: IProtyl
         undoOperations.push({
             action: "update",
             id,
-            data: element.outerHTML
+            data: cleanHeadingNumberHTML(element.outerHTML)
         });
         cb(element as HTMLElement);
         element.setAttribute(Constants.ATTRIBUTE_EDITING, "true");
         operations.push({
             action: "update",
             id,
-            data: element.outerHTML
+            data: cleanHeadingNumberHTML(element.outerHTML)
         });
     });
     transaction(protyle, operations, undoOperations);
