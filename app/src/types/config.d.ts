@@ -484,6 +484,10 @@ declare namespace Config {
          */
         backlinkContainChildren: boolean;
         /**
+         * Whether to show backlinks at the bottom of the document
+         */
+        backlinkShowBottom: boolean;
+        /**
          * Backlink sort mode
          */
         backlinkSort: number;
