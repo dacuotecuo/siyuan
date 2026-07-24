@@ -675,6 +675,7 @@ func InitConf() {
 		Conf.AI.DecryptAPIKeys()
 	}
 	Conf.AI.Normalize()
+	Conf.AI.ReconcileModelIDs()
 
 	if nil == Conf.Secrets {
 		Conf.Secrets = conf.NewSecrets()
