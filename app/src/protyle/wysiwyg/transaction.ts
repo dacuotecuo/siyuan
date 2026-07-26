@@ -1975,10 +1975,11 @@ export const updateTransaction = (protyle: IProtyle, element: Element, oldHTML: 
     }]);
 };
 
-export const updateBatchTransaction = (nodeElements: Element[], protyle: IProtyle, cb: (e: HTMLElement) => void) => {
+export const updateBatchTransaction = (nodeElements: Element[], protyle: IProtyle, cb: (e: HTMLElement) => void,
+                                       focusContext?: Record<string, string>) => {
     const operations: IOperation[] = [];
     const undoOperations: IOperation[] = [];
-    nodeElements.forEach((element) => {
+    nodeElements.forEach((element, index) => {
         const id = element.getAttribute("data-node-id");
         element.classList.remove("protyle-wysiwyg--select");
         element.removeAttribute("select-start");
@@ -1986,14 +1987,16 @@ export const updateBatchTransaction = (nodeElements: Element[], protyle: IProtyl
         undoOperations.push({
             action: "update",
             id,
-            data: cleanHeadingNumberHTML(element.outerHTML)
+            data: cleanHeadingNumberHTML(element.outerHTML),
+            context: index === 0 ? focusContext : undefined,
         });
         cb(element as HTMLElement);
         element.setAttribute(Constants.ATTRIBUTE_EDITING, "true");
         operations.push({
             action: "update",
             id,
-            data: cleanHeadingNumberHTML(element.outerHTML)
+            data: cleanHeadingNumberHTML(element.outerHTML),
+            context: index === 0 ? focusContext : undefined,
         });
     });
     transaction(protyle, operations, undoOperations);
