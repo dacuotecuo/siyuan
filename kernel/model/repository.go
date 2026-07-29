@@ -575,8 +575,8 @@ func DiffRepoSnapshots(left, right string) (ret *LeftRightDiff, err error) {
 	}
 	luteEngine := NewLute()
 	for _, removeRight := range diff.RemovesRight {
-		title, _, parseErr := parseTitleInSnapshot(removeRight.ID, repo, luteEngine)
-		if "" == title || nil != parseErr {
+		title, _, _ := parseTitleInSnapshot(removeRight.ID, repo, luteEngine)
+		if "" == title {
 			continue
 		}
 
@@ -593,8 +593,8 @@ func DiffRepoSnapshots(left, right string) (ret *LeftRightDiff, err error) {
 	}
 
 	for _, addLeft := range diff.AddsLeft {
-		title, _, parseErr := parseTitleInSnapshot(addLeft.ID, repo, luteEngine)
-		if "" == title || nil != parseErr {
+		title, _, _ := parseTitleInSnapshot(addLeft.ID, repo, luteEngine)
+		if "" == title {
 			continue
 		}
 
@@ -611,8 +611,8 @@ func DiffRepoSnapshots(left, right string) (ret *LeftRightDiff, err error) {
 	}
 
 	for _, updateLeft := range diff.UpdatesLeft {
-		title, _, parseErr := parseTitleInSnapshot(updateLeft.ID, repo, luteEngine)
-		if "" == title || nil != parseErr {
+		title, _, _ := parseTitleInSnapshot(updateLeft.ID, repo, luteEngine)
+		if "" == title {
 			continue
 		}
 
@@ -629,8 +629,8 @@ func DiffRepoSnapshots(left, right string) (ret *LeftRightDiff, err error) {
 	}
 
 	for _, updateRight := range diff.UpdatesRight {
-		title, _, parseErr := parseTitleInSnapshot(updateRight.ID, repo, luteEngine)
-		if "" == title || nil != parseErr {
+		title, _, _ := parseTitleInSnapshot(updateRight.ID, repo, luteEngine)
+		if "" == title {
 			continue
 		}
 
