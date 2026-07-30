@@ -434,6 +434,9 @@ func InitConf() {
 	if nil == Conf.Editor.Markdown {
 		Conf.Editor.Markdown = &util.Markdown{}
 	}
+	if nil == Conf.Editor.Markdown.CodeBlockMiddleDot {
+		Conf.Editor.Markdown.CodeBlockMiddleDot = defaultEditor.Markdown.CodeBlockMiddleDot
+	}
 	util.MarkdownSettings = Conf.Editor.Markdown
 
 	if nil == Conf.Export {
