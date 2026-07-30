@@ -817,6 +817,7 @@ declare namespace Config {
          * Whether to close all tabs when starting
          */
         closeTabsOnStart: boolean;
+        tabStartupMode: 0 | 1 | 2;
         /**
          * The storage path of the new document
          */
