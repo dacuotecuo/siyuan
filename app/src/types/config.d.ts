@@ -1116,6 +1116,7 @@ declare namespace Config {
         copyHPath: IKey;
         copyID: IKey;
         copyPlainText: IKey;
+        copyRichText: IKey;
         copyProtocol: IKey;
         copyProtocolInMd: IKey;
         copyText: IKey;
