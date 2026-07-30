@@ -2436,6 +2436,10 @@ export class WYSIWYG {
                                 }
                             }).element);
                             window.siyuan.menus.menu.append(new MenuItem({
+                                id: "deleteRowsSeparator",
+                                type: "separator",
+                            }).element);
+                            window.siyuan.menus.menu.append(new MenuItem({
                                 id: "clear",
                                 label: window.siyuan.languages.clear,
                                 icon: "iconTrashcan",
@@ -2460,12 +2464,6 @@ export class WYSIWYG {
                             });
                             const rowSelection = getTableFullRowSelection(tableElement, selectedCellElements);
                             const columnSelection = getTableFullColumnSelection(tableElement, selectedCellElements);
-                            if (rowSelection.indexes.length > 0 || columnSelection.indexes.length > 0) {
-                                window.siyuan.menus.menu.append(new MenuItem({
-                                    id: "deleteRowsSeparator",
-                                    type: "separator",
-                                }).element);
-                            }
                             if (rowSelection.indexes.length > 0) {
                                 window.siyuan.menus.menu.append(new MenuItem({
                                     id: "deleteRows",
