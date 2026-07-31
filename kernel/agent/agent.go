@@ -648,11 +648,19 @@ func AgentChat(ctx context.Context, client *openai.Client, model string, context
 		modelRound := 0
 		toolCallRounds := 0
 		overflowRetryPending := false
+		imageInputDisabled := imageInputUnsupportedCached(imageCapabilityKey)
+		projectImageMessages := func(source []openai.ChatCompletionMessage) ([]openai.ChatCompletionMessage, bool) {
+			if imageInputDisabled {
+				return downgradeImageInput(source)
+			}
+			return source, false
+		}
 		compactionErrorMessage := func(err error) string {
 			if errors.Is(err, errContextCannotBeCompacted) || isContextOverflow(err) {
 				return kernelModel.Conf.Language(352)
 			}
-			return getAgentRequestErrorMessage(err, messages)
+			requestMessages, _ := projectImageMessages(messages)
+			return getAgentRequestErrorMessage(err, requestMessages)
 		}
 
 		compactContext := func(requestTools []openai.Tool, force bool) (bool, error) {
@@ -666,7 +674,8 @@ func AgentChat(ctx context.Context, client *openai.Client, model string, context
 			if inputBudget <= 0 {
 				return false, fmt.Errorf("%w: no input budget remains", errContextCannotBeCompacted)
 			}
-			if !force && estimateChatRequestTokens(model, messages, requestTools) <= inputBudget {
+			estimatedMessages, _ := projectImageMessages(messages)
+			if !force && estimateChatRequestTokens(model, estimatedMessages, requestTools) <= inputBudget {
 				return false, nil
 			}
 
@@ -689,6 +698,7 @@ func AgentChat(ctx context.Context, client *openai.Client, model string, context
 				candidate := candidates[i]
 				candidateCheckpointMsgs := checkpointMessagesAfterCompaction(sessionEntries, candidate, tail)
 				candidateMessages := checkpointMessagesToOpenAIWithSummary(candidateCheckpointMsgs, language, pluginActions, nil)
+				candidateMessages, _ = projectImageMessages(candidateMessages)
 				baseTokens := estimateChatRequestTokens(model, candidateMessages, requestTools)
 				return compactionSummaryMinTokens <= inputBudget-baseTokens-compactionSummaryOverhead
 			})
@@ -699,7 +709,8 @@ func AgentChat(ctx context.Context, client *openai.Client, model string, context
 			selectedCheckpointMsgs := checkpointMessagesAfterCompaction(sessionEntries, selectedEntryCount, tail)
 			selectedMessages := checkpointMessagesToOpenAIWithSummary(
 				selectedCheckpointMsgs, language, pluginActions, nil)
-			baseTokens := estimateChatRequestTokens(model, selectedMessages, requestTools)
+			estimatedSelectedMessages, _ := projectImageMessages(selectedMessages)
+			baseTokens := estimateChatRequestTokens(model, estimatedSelectedMessages, requestTools)
 			summaryMaxTokens := min(
 				compactionSummaryMaxTokens, inputBudget-baseTokens-compactionSummaryOverhead)
 
@@ -729,7 +740,8 @@ func AgentChat(ctx context.Context, client *openai.Client, model string, context
 			}
 			nextMessages := checkpointMessagesToOpenAIWithSummary(
 				selectedCheckpointMsgs, language, pluginActions, nextCompaction)
-			if estimateChatRequestTokens(model, nextMessages, requestTools) > inputBudget {
+			estimatedNextMessages, _ := projectImageMessages(nextMessages)
+			if estimateChatRequestTokens(model, estimatedNextMessages, requestTools) > inputBudget {
 				return false, fmt.Errorf("%w: compacted context still exceeds the input budget", errContextCannotBeCompacted)
 			}
 			if err := saveRuntimeCompaction(sessionID, nextCompaction); err != nil {
@@ -783,7 +795,15 @@ func AgentChat(ctx context.Context, client *openai.Client, model string, context
 				ReasoningEffort: reasoningEffort,
 			}
 
-			stream, firstResp, roundCancel, streamErr := createStreamWithRetry(ctx, client, req, maxRetries, requestTimeout, streamIdleTimeout, delayForCategory, ch)
+			stream, firstResp, roundCancel, requestMessages, imageDowngraded, imageUnsupportedDetected, streamErr :=
+				createImageCompatibleStream(ctx, client, req, imageCapabilityKey, imageInputDisabled, maxRetries,
+					requestTimeout, streamIdleTimeout, delayForCategory, ch)
+			if imageUnsupportedDetected {
+				imageInputDisabled = true
+			}
+			if imageDowngraded {
+				logging.LogDebugf("agent image input downgraded for model [%s]", model)
+			}
 			if streamErr != nil {
 				if isContextOverflow(streamErr) && !overflowRetryPending {
 					compacted, err := compactContext(requestTools, true)
@@ -808,7 +828,7 @@ func AgentChat(ctx context.Context, client *openai.Client, model string, context
 					sendCriticalEvent(ctx, ch, AgentEvent{Type: "error", Error: kernelModel.Conf.Language(352)})
 					return
 				}
-				sendCriticalEvent(ctx, ch, AgentEvent{Type: "error", Error: getAgentRequestErrorMessage(streamErr, messages)})
+				sendCriticalEvent(ctx, ch, AgentEvent{Type: "error", Error: getAgentRequestErrorMessage(streamErr, requestMessages)})
 				return
 			}
 			overflowRetryPending = false
@@ -1236,7 +1256,7 @@ func AgentChat(ctx context.Context, client *openai.Client, model string, context
 				Content:          content,
 				ReasoningContent: reasoningBuilder.String(),
 			})
-			turn.TokenBreakdown = computeBreakdownIfNeeded(model, messages, tools, lastPromptTokens)
+			turn.TokenBreakdown = computeBreakdownIfNeeded(model, requestMessages, requestTools, lastPromptTokens)
 			if !saveTurn("finished") {
 				return
 			}
