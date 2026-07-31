@@ -2285,7 +2285,7 @@ func processSyncMergeResult(exit, byHand bool, mergeResult *dejavu.MergeResult, 
 			needIndexBoxes[boxID] = true
 		}
 
-		if file.Path == "/.siyuan/notebook-crypto-backup.json" {
+		if file.Path == "/.siyuan/data-crypto-backup.json" {
 			needRestoreNotebookCrypto = true
 		}
 
