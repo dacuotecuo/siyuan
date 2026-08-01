@@ -1416,6 +1416,7 @@ export class WYSIWYG {
                 const headerTop = headerRect.top;
                 const guideHeight = Math.round(headerRect.height);
                 let newWidth: number;
+                let resizeSnapped: boolean;
                 let resizeGuide: HTMLElement;
                 let resizeTip: HTMLElement;
                 let pendingResize: { width: number, snapped: boolean } | undefined;
@@ -1455,11 +1456,15 @@ export class WYSIWYG {
                     }
                     const currentResize = pendingResize;
                     pendingResize = undefined;
+                    if (newWidth === currentResize.width && resizeSnapped === currentResize.snapped) {
+                        return;
+                    }
                     newWidth = currentResize.width;
+                    resizeSnapped = currentResize.snapped;
                     columnElements.forEach(columnElement => {
                         columnElement.style.width = newWidth + "px";
                     });
-                    updateResizePreview(currentResize.snapped);
+                    updateResizePreview(resizeSnapped);
                 };
                 documentSelf.onmousemove = (moveEvent: MouseEvent) => {
                     pendingResize = getAVColumnResizeWidth(
