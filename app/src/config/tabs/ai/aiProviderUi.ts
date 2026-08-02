@@ -466,6 +466,14 @@ const openProviderDetail = (root: HTMLElement, providerId?: string, preset?: IPr
     let availableModelContextLengths: Record<string, number> = {};
     let hasFetchedModels = false;
     let fetchingModels = false;
+    const validateAPIKey = () => {
+        if (!requiresAPIKey(draft) || draft.apiKey.trim() !== "") {
+            return true;
+        }
+        view.querySelector<HTMLInputElement>("[data-provider-field='apiKey']")?.focus();
+        showMessage(window.siyuan.languages.apiKeyRequired, undefined, "error");
+        return false;
+    };
     const getAvailableModelContextLength = (name: string) =>
         availableModelContextLengths[name] || availableModelContextLengths[name.toLowerCase()] || 0;
     const updateModelActionButtons = () => {
@@ -501,9 +509,7 @@ const openProviderDetail = (root: HTMLElement, providerId?: string, preset?: IPr
             showMessage(window.siyuan.languages.apiBaseURLTip, undefined, "error");
             return;
         }
-        if (requiresAPIKey(draft) && !draft.apiKey.trim()) {
-            view.querySelector<HTMLInputElement>("[data-provider-field='apiKey']")?.focus();
-            showMessage(window.siyuan.languages.apiKeyRequired, undefined, "error");
+        if (!validateAPIKey()) {
             return;
         }
         hasFetchedModels = true;
@@ -664,7 +670,10 @@ const openProviderDetail = (root: HTMLElement, providerId?: string, preset?: IPr
             return;
         }
         if (action === "addModel") {
-            if (!hasFetchedModels && (!requiresAPIKey(draft) || draft.apiKey.trim() !== "")) {
+            if (!validateAPIKey()) {
+                return;
+            }
+            if (!hasFetchedModels) {
                 const modelCount = draft.models.length;
                 fetchModels(() => {
                     if (draft.models.length === modelCount) {
@@ -697,9 +706,7 @@ const openProviderDetail = (root: HTMLElement, providerId?: string, preset?: IPr
                 showMessage(window.siyuan.languages.apiBaseURLTip, undefined, "error");
                 return;
             }
-            if (requiresAPIKey(draft) && !draft.apiKey.trim()) {
-                view.querySelector<HTMLInputElement>("[data-provider-field='apiKey']")?.focus();
-                showMessage(window.siyuan.languages.apiKeyRequired, undefined, "error");
+            if (!validateAPIKey()) {
                 return;
             }
             if (!model.name.trim()) {
