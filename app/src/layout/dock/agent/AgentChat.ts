@@ -7,7 +7,7 @@ import {disabledWYSIWYG} from "../../../protyle/util/disabledWYSIWYG";
 import {getAllEditor} from "../../getAll";
 import "./frontendActions";
 import {listActions, lookupAction} from "./frontendActions";
-import {AgentSession, SessionStore} from "./SessionStore";
+import {AgentPermissionMode, AgentSession, SessionStore} from "./SessionStore";
 import {AgentSessionPanel} from "./AgentSessionPanel";
 import {updateHotkeyAfterTip} from "../../../protyle/util/compatibility";
 import {getAgentLute} from "../../../protyle/render/setLute";
@@ -174,6 +174,8 @@ export class AgentChat extends Model {
     // 推理努力度（iconBrain + 菜单），仅实例记忆，刷新后回到默认。
     private reasoningEffortButton: HTMLButtonElement;
     private selectedReasoningEffort = "";
+    private permissionButton: HTMLButtonElement;
+    private permissionMode: AgentPermissionMode = "confirm";
     private userScrolledUp = false;
     private programmaticScroll = false;
     private stickResizeObserver: ResizeObserver | null = null;
@@ -303,6 +305,9 @@ export class AgentChat extends Model {
             '<div class="agent-chat__composer-host"></div>' +
             '<div class="agent-chat__buttons">' +
             '<div class="agent-chat__button-options">' +
+            '<button class="b3-select b3-select--noborder agent-chat__permission ariaLabel" data-menu="true" data-position="n" type="button">' +
+            '<svg class="agent-chat__permission-icon"><use xlink:href="#iconHand"></use></svg>' +
+            '<span class="agent-chat__permission-label"></span></button>' +
             '<span class="fn__flex-1"></span>' +
             '<span class="agent-chat__tokens fn__none b3-button b3-button--icon b3-button--cancel" aria-label="' + (L.tokenUsage || "Context Usage") + '">' +
             '<svg viewBox="0 0 24 24">' +
@@ -333,6 +338,8 @@ export class AgentChat extends Model {
         this.tokenDisplayEl = panel.querySelector(".agent-chat__tokens") as HTMLElement;
         this.modelSelect = panel.querySelector('[data-type="groupedModelPicker"]') as HTMLButtonElement;
         this.reasoningEffortButton = panel.querySelector(".agent-chat__reasoning-effort") as HTMLButtonElement;
+        this.permissionButton = panel.querySelector(".agent-chat__permission") as HTMLButtonElement;
+        this.initPermissionMenu();
         this.initReasoningEffortMenu();
         this.scrollBottomBtn = panel.querySelector(".agent-chat__scroll-bottom") as HTMLElement;
         this.messagesContainer.addEventListener("scroll", () => {
@@ -518,6 +525,75 @@ export class AgentChat extends Model {
 
     private getSelectedModel(): string {
         return this.selectedModel;
+    }
+
+    // 会话权限菜单显示后端当前状态，并允许在当前轮次中即时切换后续操作的确认策略。
+    private permissionLabel(mode = this.permissionMode) {
+        const L = window.siyuan.languages;
+        return mode === "allowSession" ?
+            (L.agentPermissionAllowSession || "Automatically allow") :
+            (L.agentPermissionConfirm || "Require confirmation");
+    }
+
+    private applyPermissionMode(mode: AgentPermissionMode) {
+        this.permissionMode = mode;
+        const label = this.permissionLabel();
+        const labelElement = this.permissionButton.querySelector(".agent-chat__permission-label");
+        if (labelElement) {
+            labelElement.textContent = label;
+        }
+        const L = window.siyuan.languages;
+        this.permissionButton.setAttribute("aria-label", mode === "allowSession" ?
+            (L.agentConfirmAlwaysDesc || label) : `${L.agentPermission || "Permission"} ${label}`);
+    }
+
+    private async changePermissionMode(mode: AgentPermissionMode) {
+        if (mode === this.permissionMode) {
+            return;
+        }
+        const sessionID = this.sessionId;
+        if (this.entries.length === 0) {
+            this.applyPermissionMode(mode);
+            return;
+        }
+        this.permissionButton.disabled = true;
+        try {
+            const persistedMode = await SessionStore.setPermission(sessionID, mode);
+            if (this.sessionId === sessionID) {
+                this.applyPermissionMode(persistedMode);
+            }
+        } catch (e) {
+            console.error("update agent session permission failed:", e);
+            showMessage(window.siyuan.languages._kernel[28], 3000, "error");
+        } finally {
+            if (this.sessionId === sessionID) {
+                this.permissionButton.disabled = false;
+            }
+        }
+    }
+
+    private initPermissionMenu() {
+        this.applyPermissionMode(this.permissionMode);
+        this.permissionButton.addEventListener("click", (event: MouseEvent) => {
+            event.stopPropagation();
+            const menu = new Menu("agent-chat-permission");
+            if (menu.isOpen) {
+                return;
+            }
+            (["confirm", "allowSession"] as AgentPermissionMode[]).forEach(mode => {
+                menu.addItem({
+                    iconHTML: "",
+                    label: escapeHtml(this.permissionLabel(mode)),
+                    current: mode === this.permissionMode,
+                    click: () => {
+                        void this.changePermissionMode(mode);
+                    },
+                });
+            });
+            const rect = this.permissionButton.getBoundingClientRect();
+            menu.element.style.minWidth = `${Math.max(rect.width, 160)}px`;
+            menu.open({x: rect.left, y: rect.bottom, h: rect.height, w: rect.width});
+        });
     }
 
     // 初始化思考强度菜单：提供各供应商使用的标准档位，选择结果仅在当前实例中生效。
@@ -820,6 +896,7 @@ export class AgentChat extends Model {
         this.sessionTitle = this.defaultTitle;
         this.pendingSessionTitle = null;
         this.entries = [];
+        this.applyPermissionMode("confirm");
         this.showWelcome();
         this.scrollToBottom(true);
     }
@@ -845,6 +922,7 @@ export class AgentChat extends Model {
             updatedAt: Date.now(),
             messageHistory: this.composer?.getHistory() || [],
             model: this.getSelectedModel(),
+            permissionMode: this.permissionMode,
         };
         if (turnID) {
             session.commitTurnID = turnID;
@@ -878,6 +956,7 @@ export class AgentChat extends Model {
     //   只包含已完成历史和交互卡片，不会把半截 assistant 文本当成最终结果。
     // - streamEnd：后端 eventCh 关闭（流结束），只解除占位锁定；已提交内容由 saveSession 的 update
     //   同步，未提交内容由后端紧随其后的恢复 update 同步。
+    // - permission：只刷新当前会话权限，不重绘正在流式生成的消息。
     // - delete：当前会话被删除则清空视图。
     private onWsMessage(data: IWebSocketData) {
         if (!data || data.cmd !== "agentSessionChanged") {
@@ -891,6 +970,14 @@ export class AgentChat extends Model {
         this.sessionPanel?.refresh();
         // 只处理当前会话；其他会话的变化仅体现在列表刷新里。
         if (payload.sessionID !== this.sessionId) {
+            return;
+        }
+        if (payload.action === "permission") {
+            void SessionStore.load(payload.sessionID).then(session => {
+                if (session && this.sessionId === payload.sessionID) {
+                    this.applyPermissionMode(session.permissionMode || "confirm");
+                }
+            });
             return;
         }
         // 发起者自身流式中忽略（它走 SSE 自渲染）。
@@ -1099,6 +1186,7 @@ export class AgentChat extends Model {
         if (session.model) {
             this.applySessionModelIfValid(session.model);
         }
+        this.applyPermissionMode(session.permissionMode || "confirm");
         this.titleElement.textContent = this.sessionTitle;
         this.updateTokenDisplay();
     }
@@ -1131,6 +1219,7 @@ export class AgentChat extends Model {
         this.sessionCreatedAt = Date.now();
         this.sessionTitle = this.defaultTitle;
         this.pendingSessionTitle = null;
+        this.applyPermissionMode("confirm");
         this.pendingRecoverySessionIDs.delete(deletedSessionID);
         this.recoveryCommitTurnIDs.delete(deletedSessionID);
         this.hasTitled = false;
@@ -1197,6 +1286,7 @@ export class AgentChat extends Model {
         if (session.model) {
             this.applySessionModelIfValid(session.model);
         }
+        this.applyPermissionMode(session.permissionMode || "confirm");
         if (this.tokenDisplayEl) {
             this.updateTokenDisplay();
         }
@@ -1508,6 +1598,7 @@ export class AgentChat extends Model {
         this.sessionTitle = this.defaultTitle;
         this.pendingSessionTitle = null;
         this.entries = [];
+        this.applyPermissionMode("confirm");
         this.hasTitled = false;
         this.currentAIElement = null;
         this.currentContent = "";
@@ -1887,6 +1978,9 @@ export class AgentChat extends Model {
                 case "confirm":
                     this.setToolCallRunning(event.name, false);
                     this.appendConfirm(event.name, event.arguments, event.confirmID, event.effects);
+                    break;
+                case "permission":
+                    this.applyPermissionMode(event.permissionMode);
                     break;
                 case "tool_result":
                     {
@@ -3241,6 +3335,9 @@ export class AgentChat extends Model {
             this.pendingConfirms.find(e => e.id === confirmEntryID)) as {status?: string} | undefined;
         if (entry) {
             entry.status = always ? "always" : (approved ? "approved" : "rejected");
+        }
+        if (always) {
+            this.applyPermissionMode("allowSession");
         }
         try {
             await this.saveSession();
