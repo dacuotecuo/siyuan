@@ -669,7 +669,10 @@ func writeSSE(c *gin.Context, event agent.AgentEvent) error {
 	case "content":
 		return writeSSEEvent(c, "content", map[string]string{"token": event.Token})
 	case "thinking":
-		return writeSSEEvent(c, "thinking", map[string]string{"reasoning": event.Reasoning})
+		return writeSSEEvent(c, "thinking", map[string]string{
+			"reasoning": event.Reasoning,
+			"roundID":   event.RoundID,
+		})
 	case "reasoning":
 		return writeSSEEvent(c, "reasoning", map[string]string{"token": event.Token})
 	case "confirm":
@@ -686,12 +689,16 @@ func writeSSE(c *gin.Context, event agent.AgentEvent) error {
 	case "tool_call":
 		return writeSSEEvent(c, "tool_call", map[string]any{
 			"name":      event.Name,
+			"callID":    event.ToolCallID,
+			"roundID":   event.RoundID,
 			"arguments": event.Arguments,
 		})
 	case "tool_result":
 		return writeSSEEvent(c, "tool_result", map[string]string{
-			"name":   event.Name,
-			"result": event.Result,
+			"name":    event.Name,
+			"callID":  event.ToolCallID,
+			"roundID": event.RoundID,
+			"result":  event.Result,
 		})
 	case "error":
 		return writeSSEEvent(c, "error", map[string]string{"message": event.Error})
