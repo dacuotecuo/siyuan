@@ -1197,6 +1197,8 @@ declare namespace Config {
         refresh: IKey;
         refTab: IKey;
         rename: IKey;
+        selectToPageEnd: IKey;
+        selectToPageStart: IKey;
         showInFolder: IKey;
         spaceRepetition: IKey;
         switchReadonly: IKey;
