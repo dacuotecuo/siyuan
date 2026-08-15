@@ -30,6 +30,7 @@ import {
 } from "./AgentHistory";
 import {
     bindThinkingCardToggle,
+    copyAgentText,
     createThinkingCardElement,
     postRender,
     renderQuestionCardHTML,
@@ -2231,11 +2232,7 @@ export class AgentChat extends Model {
         el.insertAdjacentHTML("beforeend", actionsHTML);
         el.querySelector(".agent-chat__msg-actions .block__icon")?.addEventListener("click", (e) => {
             e.stopPropagation();
-            navigator.clipboard.writeText(text).then(() => {
-                showMessage(window.siyuan.languages.copied, 2000);
-            }).catch(() => {
-                showMessage(window.siyuan.languages.copied, 2000);
-            });
+            void copyAgentText(text);
         });
         const edit = (force = false) => {
             const selection = window.getSelection();
@@ -2734,11 +2731,7 @@ export class AgentChat extends Model {
         copyBtn.innerHTML = '<svg><use xlink:href="#iconCopy"></use></svg>';
         copyBtn.addEventListener("click", (e: Event) => {
             e.stopPropagation();
-            navigator.clipboard.writeText(content).then(() => {
-                showMessage(window.siyuan.languages.copied, 2000);
-            }).catch(() => {
-                showMessage(window.siyuan.languages.copied, 2000);
-            });
+            void copyAgentText(content);
         });
         actions.appendChild(copyBtn);
 
