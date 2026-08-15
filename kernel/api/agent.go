@@ -388,7 +388,7 @@ func agentChatTitle(c *gin.Context) {
 	}
 	client := util.NewOpenAIClientWithModel(selectedProvider.APIKey, selectedProvider.BaseURL, selectedModel.Name)
 
-	title := agent.GenerateTitle(client, selectedModel.Name, req.Message, req.Language)
+	title := agent.GenerateTitle(client, selectedProvider.Protocol, selectedModel.Name, req.Message, req.Language)
 	ret := gulu.Ret.NewResult()
 	ret.Data = title
 	c.JSON(http.StatusOK, ret)

@@ -95,6 +95,8 @@ type SessionEntry =
     type: "assistant";
     content?: string;
     reasoningContent?: string;
+    responseOutput?: Array<Record<string, unknown>>;
+    responseOutputTokens?: number;
     roundID?: string;
     toolCalls?: Array<{
         id?: string;
