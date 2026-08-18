@@ -1742,11 +1742,23 @@ func IsSyncingFile(rootID string) (ret bool) {
 	return
 }
 
-func pushSyncDataSnapshotStatus(elapsed time.Duration) {
-	if util.StatusBarCfg.MsgSyncDataSnapshotDisabled {
+func syncStatusBarDisabled() bool {
+	return util.StatusBarCfg.MsgDataSyncDisabled
+}
+
+func pushSyncStatusBar(msg string) {
+	if syncStatusBarDisabled() {
 		return
 	}
-	util.PushStatusBar(fmt.Sprintf(Conf.Language(149), elapsed.Seconds()))
+	util.PushStatusBar(msg)
+}
+
+func newSyncContext() map[string]any {
+	pushTarget := eventbus.CtxPushMsgToStatusBar
+	if syncStatusBarDisabled() {
+		pushTarget = eventbus.CtxPushMsgToNone
+	}
+	return map[string]any{eventbus.CtxPushMsg: pushTarget}
 }
 
 func syncRepoDownload() (err error) {
@@ -1754,7 +1766,7 @@ func syncRepoDownload() (err error) {
 		planSyncAfter(fixSyncInterval)
 
 		msg := Conf.Language(26)
-		util.PushStatusBar(msg)
+		pushSyncStatusBar(msg)
 		util.PushErrMsg(msg, 0)
 		err = errors.New(msg)
 		return
@@ -1766,7 +1778,7 @@ func syncRepoDownload() (err error) {
 
 		msg := fmt.Sprintf("sync repo failed: %s", err)
 		logging.LogError(msg)
-		util.PushStatusBar(msg)
+		pushSyncStatusBar(msg)
 		util.PushErrMsg(msg, 0)
 		return
 	}
@@ -1783,14 +1795,14 @@ func syncRepoDownload() (err error) {
 		msg := fmt.Sprintf(Conf.Language(80), formatRepoErrorMsg(err))
 		Conf.Sync.Stat = msg
 		Conf.Save()
-		util.PushStatusBar(msg)
+		pushSyncStatusBar(msg)
 		util.PushErrMsg(msg, 0)
 		return
 	}
 
 	beforeSyncPetals := getPetals()
 
-	syncContext := map[string]any{eventbus.CtxPushMsg: eventbus.CtxPushMsgToStatusBar}
+	syncContext := newSyncContext()
 	cloudStart := time.Now()
 	mergeResult, trafficStat, err := repo.SyncDownload(syncContext)
 	cloudElapsed := time.Since(cloudStart)
@@ -1809,12 +1821,12 @@ func syncRepoDownload() (err error) {
 		}
 		Conf.Sync.Stat = msg
 		Conf.Save()
-		util.PushStatusBar(msg)
+		pushSyncStatusBar(msg)
 		util.PushErrMsg(msg, 0)
 		return
 	}
 
-	pushSyncDataSnapshotStatus(elapsed)
+	pushSyncStatusBar(fmt.Sprintf(Conf.Language(149), elapsed.Seconds()))
 	Conf.Sync.Synced = util.CurrentTimeMillis()
 	msg := fmt.Sprintf(Conf.Language(150), trafficStat.UploadFileCount, trafficStat.DownloadFileCount, trafficStat.UploadChunkCount, trafficStat.DownloadChunkCount, humanize.BytesCustomCeil(uint64(trafficStat.UploadBytes), 2), humanize.BytesCustomFloor(uint64(trafficStat.DownloadBytes+trafficStat.PeerDownloadBytes), 2))
 	msg = appendLANSyncTrafficStat(msg, trafficStat)
@@ -1836,7 +1848,7 @@ func syncRepoUpload() (err error) {
 		planSyncAfter(fixSyncInterval)
 
 		msg := Conf.Language(26)
-		util.PushStatusBar(msg)
+		pushSyncStatusBar(msg)
 		util.PushErrMsg(msg, 0)
 		err = errors.New(msg)
 		return
@@ -1848,7 +1860,7 @@ func syncRepoUpload() (err error) {
 
 		msg := fmt.Sprintf("sync repo failed: %s", err)
 		logging.LogError(msg)
-		util.PushStatusBar(msg)
+		pushSyncStatusBar(msg)
 		util.PushErrMsg(msg, 0)
 		return
 	}
@@ -1865,12 +1877,12 @@ func syncRepoUpload() (err error) {
 		msg := fmt.Sprintf(Conf.Language(80), formatRepoErrorMsg(err))
 		Conf.Sync.Stat = msg
 		Conf.Save()
-		util.PushStatusBar(msg)
+		pushSyncStatusBar(msg)
 		util.PushErrMsg(msg, 0)
 		return
 	}
 
-	syncContext := map[string]any{eventbus.CtxPushMsg: eventbus.CtxPushMsgToStatusBar}
+	syncContext := newSyncContext()
 	cloudStart := time.Now()
 	trafficStat, err := repo.SyncUpload(syncContext)
 	cloudElapsed := time.Since(cloudStart)
@@ -1889,12 +1901,12 @@ func syncRepoUpload() (err error) {
 		}
 		Conf.Sync.Stat = msg
 		Conf.Save()
-		util.PushStatusBar(msg)
+		pushSyncStatusBar(msg)
 		util.PushErrMsg(msg, 0)
 		return
 	}
 
-	pushSyncDataSnapshotStatus(elapsed)
+	pushSyncStatusBar(fmt.Sprintf(Conf.Language(149), elapsed.Seconds()))
 	Conf.Sync.Synced = util.CurrentTimeMillis()
 	msg := fmt.Sprintf(Conf.Language(150), trafficStat.UploadFileCount, trafficStat.DownloadFileCount, trafficStat.UploadChunkCount, trafficStat.DownloadChunkCount, humanize.BytesCustomCeil(uint64(trafficStat.UploadBytes), 2), humanize.BytesCustomCeil(uint64(trafficStat.DownloadBytes+trafficStat.PeerDownloadBytes), 2))
 	msg = appendLANSyncTrafficStat(msg, trafficStat)
@@ -1919,7 +1931,7 @@ func bootSyncRepo() (err error) {
 		planSyncAfter(fixSyncInterval)
 
 		msg := Conf.Language(26)
-		util.PushStatusBar(msg)
+		pushSyncStatusBar(msg)
 		util.PushErrMsg(msg, 0)
 		err = errors.New(msg)
 		return
@@ -1932,7 +1944,7 @@ func bootSyncRepo() (err error) {
 
 		msg := fmt.Sprintf("sync repo failed: %s", html.EscapeString(err.Error()))
 		logging.LogError(msg)
-		util.PushStatusBar(msg)
+		pushSyncStatusBar(msg)
 		util.PushErrMsg(msg, 0)
 		return
 	}
@@ -1954,7 +1966,7 @@ func bootSyncRepo() (err error) {
 		defer logging.Recover()
 
 		start := time.Now()
-		syncContext := map[string]any{eventbus.CtxPushMsg: eventbus.CtxPushMsgToStatusBar}
+		syncContext := newSyncContext()
 		cloudLatest, cloudLatestErr = repo.GetCloudLatestFast(syncContext)
 		if nil != cloudLatestErr && !errors.Is(cloudLatestErr, cloud.ErrCloudObjectNotFound) {
 			logging.LogErrorf("download cloud latest failed: %s", cloudLatestErr)
@@ -1973,7 +1985,7 @@ func bootSyncRepo() (err error) {
 	var prefetchTraffic *dejavu.DownloadTrafficStat
 	if nil == err {
 		start := time.Now()
-		syncContext := map[string]any{eventbus.CtxPushMsg: eventbus.CtxPushMsgToStatusBar}
+		syncContext := newSyncContext()
 		fetchedFiles, prefetchTraffic, err = repo.GetSyncCloudFilesWithTraffic(cloudLatest, syncContext)
 		logging.LogInfof("boot get sync cloud files elapsed [%.2fs]", time.Since(start).Seconds())
 	}
@@ -1993,7 +2005,7 @@ func bootSyncRepo() (err error) {
 		}
 		Conf.Sync.Stat = msg
 		Conf.Save()
-		util.PushStatusBar(msg)
+		pushSyncStatusBar(msg)
 		util.PushErrMsg(msg, 0)
 		BootSyncSucc = 1
 		isBootSyncing.Store(false)
@@ -2047,7 +2059,7 @@ func syncRepo(exit, byHand bool) (dataChanged bool, err error) {
 		planSyncAfter(fixSyncInterval)
 
 		msg := Conf.Language(26)
-		util.PushStatusBar(msg)
+		pushSyncStatusBar(msg)
 		util.PushErrMsg(msg, 0)
 		err = errors.New(msg)
 		return
@@ -2060,7 +2072,7 @@ func syncRepo(exit, byHand bool) (dataChanged bool, err error) {
 
 		msg := fmt.Sprintf("sync repo failed: %s", err)
 		logging.LogError(msg)
-		util.PushStatusBar(msg)
+		pushSyncStatusBar(msg)
 		util.PushErrMsg(msg, 0)
 		return
 	}
@@ -2078,7 +2090,7 @@ func syncRepo(exit, byHand bool) (dataChanged bool, err error) {
 		msg := fmt.Sprintf(Conf.Language(80), formatRepoErrorMsg(err))
 		Conf.Sync.Stat = msg
 		Conf.Save()
-		util.PushStatusBar(msg)
+		pushSyncStatusBar(msg)
 		if 1 > autoSyncErrCount || byHand {
 			util.PushErrMsg(msg, 0)
 		}
@@ -2095,7 +2107,7 @@ func syncRepo(exit, byHand bool) (dataChanged bool, err error) {
 func syncIndexedRepo(repo *dejavu.Repo, exit, byHand bool, beforeIndex, afterIndex *entity.Index, start time.Time, indexElapsed time.Duration, skipCloudPreflight bool, prefetchTraffic *dejavu.DownloadTrafficStat) (dataChanged bool, err error) {
 	beforeSyncPetals := getPetals()
 
-	syncContext := map[string]any{eventbus.CtxPushMsg: eventbus.CtxPushMsgToStatusBar}
+	syncContext := newSyncContext()
 	if skipCloudPreflight {
 		// 启动同步已经读取过云端索引并预取了文件，锁内同步会再次校验最新版本。
 		syncContext["skipCloudPreflight"] = true
@@ -2119,7 +2131,7 @@ func syncIndexedRepo(repo *dejavu.Repo, exit, byHand bool, beforeIndex, afterInd
 		}
 		Conf.Sync.Stat = msg
 		Conf.Save()
-		util.PushStatusBar(msg)
+		pushSyncStatusBar(msg)
 		if 1 > autoSyncErrCount || byHand {
 			util.PushErrMsg(msg, 0)
 		}
@@ -2138,7 +2150,7 @@ func syncIndexedRepo(repo *dejavu.Repo, exit, byHand bool, beforeIndex, afterInd
 
 	dataChanged = nil == beforeIndex || beforeIndex.ID != afterIndex.ID || mergeResult.DataChanged()
 
-	pushSyncDataSnapshotStatus(elapsed)
+	pushSyncStatusBar(fmt.Sprintf(Conf.Language(149), elapsed.Seconds()))
 	Conf.Sync.Synced = util.CurrentTimeMillis()
 	msg := fmt.Sprintf(Conf.Language(150), trafficStat.UploadFileCount, trafficStat.DownloadFileCount, trafficStat.UploadChunkCount, trafficStat.DownloadChunkCount, humanize.BytesCustomCeil(uint64(trafficStat.UploadBytes), 2), humanize.BytesCustomCeil(uint64(trafficStat.DownloadBytes+trafficStat.PeerDownloadBytes), 2))
 	msg = appendLANSyncTrafficStat(msg, trafficStat)
@@ -2520,7 +2532,7 @@ func processSyncMergeResult(exit, byHand bool, mergeResult *dejavu.MergeResult, 
 		}
 
 		time.Sleep(2 * time.Second)
-		pushSyncDataSnapshotStatus(elapsed)
+		pushSyncStatusBar(fmt.Sprintf(Conf.Language(149), elapsed.Seconds()))
 
 		if 0 < len(mergeResult.Conflicts) {
 			syConflict := false
@@ -2628,8 +2640,7 @@ func indexRepoBeforeCloudSync(repo *dejavu.Repo) (beforeIndex, afterIndex *entit
 		checkChunks = false
 	}
 
-	afterIndex, err = repo.Index("[Sync] Cloud sync", checkChunks,
-		map[string]any{eventbus.CtxPushMsg: eventbus.CtxPushMsgToStatusBar})
+	afterIndex, err = repo.Index("[Sync] Cloud sync", checkChunks, newSyncContext())
 	if err != nil {
 		logging.LogErrorf("index data repo before cloud sync failed: %s", err)
 		return
@@ -2640,13 +2651,13 @@ func indexRepoBeforeCloudSync(repo *dejavu.Repo) (beforeIndex, afterIndex *entit
 		// 对新创建的快照需要更新备注，加入耗时统计
 		afterIndex.Memo = fmt.Sprintf("[Sync] Cloud sync, completed in %.2fs", elapsed.Seconds())
 		if err = repo.PutIndex(afterIndex); err != nil {
-			util.PushStatusBar("Save data snapshot for cloud sync failed")
+			pushSyncStatusBar("Save data snapshot for cloud sync failed")
 			logging.LogErrorf("put index into data repo before cloud sync failed: %s", err)
 			return
 		}
-		util.PushStatusBar(fmt.Sprintf(Conf.Language(147), elapsed.Seconds()))
+		pushSyncStatusBar(fmt.Sprintf(Conf.Language(147), elapsed.Seconds()))
 	} else {
-		util.PushStatusBar(fmt.Sprintf(Conf.Language(148), elapsed.Seconds()))
+		pushSyncStatusBar(fmt.Sprintf(Conf.Language(148), elapsed.Seconds()))
 	}
 
 	if Conf.Repo.SyncIndexTiming < elapsed.Milliseconds() {
