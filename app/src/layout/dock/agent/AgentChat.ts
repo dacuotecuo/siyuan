@@ -26,6 +26,7 @@ import {
     getAgentThinkingToolGroups,
     hasAgentExecutedToolsAfter,
     hasAgentModelSpecificContext,
+    isAgentAssistantContentFinalInTurn,
     isAgentRegenerateStateCurrent
 } from "./AgentHistory";
 import {
@@ -187,11 +188,9 @@ export class AgentChat extends Model {
         roundID?: string;
         toolNames?: string[];
         toolCallIDs?: string[];
-        content?: string
     }> = [];
     // 当前请求的思考耗时（秒）。持久化为 entry.duration，"已思考"文本不落盘。
     private currentThinkingDuration = 0;
-    private currentThinkingStepContent = "";
     private pendingConfirms: SessionEntry[] = [];
     private renderedToolNames: Record<string, boolean> = {};
     private hasInterveningCard = false;
@@ -997,12 +996,14 @@ export class AgentChat extends Model {
             case "streamStart":
                 // 标记处于其他实例流式中，reloadFromDisk 重绘后会据此保留占位条。
                 this.mirrorLocked = true;
+                this.updateRegenerateButtons();
                 // 立即拉取一次：发起者发消息时已 saveSession 写入 user 消息，让本轮新消息尽快可见。
                 void this.reloadFromDisk();
                 break;
             case "streamEnd":
                 // 流结束，解除占位锁定并移除占位条。不重绘——完整内容由随后的 update 广播驱动。
                 this.mirrorLocked = false;
+                this.updateRegenerateButtons();
                 this.removeMirrorPlaceholder();
                 this.restorePendingEditDraft();
                 break;
@@ -1079,7 +1080,6 @@ export class AgentChat extends Model {
             this.pendingConfirms = [];
             this.currentThinkingSteps = [];
             this.currentThinkingEntryId = "";
-            this.currentThinkingStepContent = "";
             this.currentThinkingText = "";
             this.currentThinkingReasoning = "";
             this.currentThinkingReasoningContent = "";
@@ -1323,7 +1323,7 @@ export class AgentChat extends Model {
         }, {once: true});
     }
 
-    private appendPersistedAssistant(content: string, timestamp?: number, entryId?: string) {
+    private appendPersistedAssistant(content: string, timestamp?: number, entryId?: string, showActions = true) {
         if (!content || !content.trim()) {
             return;
         }
@@ -1335,7 +1335,9 @@ export class AgentChat extends Model {
         el.innerHTML = '<div class="agent-chat__body b3-typography">' + (this.lute.ProtylePreviewStr("", content) || escapeHtml(content)) + "</div>";
         this.messagesContainer.appendChild(el);
         postRender(el, this.app, this.host.onNavigate);
-        this.addCopyButton(el, content, timestamp);
+        if (showActions) {
+            this.addCopyButton(el, content, timestamp);
+        }
     }
 
     private createTodoElement(result: string, entryId?: string) {
@@ -1359,7 +1361,7 @@ export class AgentChat extends Model {
         name: string;
         arguments: Record<string, unknown>;
         result?: string
-    }>, timestamp?: number, entryId?: string) {
+    }>, timestamp?: number, entryId?: string, showActions = true) {
         let hasRendered = false;
         for (let i = 0; i < toolCalls.length; i++) {
             const tc = toolCalls[i];
@@ -1371,7 +1373,7 @@ export class AgentChat extends Model {
             }
         }
         if (content && content.trim()) {
-            this.appendPersistedAssistant(content, timestamp, entryId);
+            this.appendPersistedAssistant(content, timestamp, entryId, showActions);
             hasRendered = true;
         }
         if (!hasRendered) {
@@ -1544,10 +1546,11 @@ export class AgentChat extends Model {
                         toolCalls?: Array<{ name: string; arguments: Record<string, unknown>; result?: string }>;
                         timestamp?: number
                     };
+                    const showActions = isAgentAssistantContentFinalInTurn(displayEntries, i);
                     if (a.toolCalls && a.toolCalls.length > 0) {
-                        this.appendPersistedToolCalls(a.content, a.toolCalls, a.timestamp, entryId);
+                        this.appendPersistedToolCalls(a.content, a.toolCalls, a.timestamp, entryId, showActions);
                     } else {
-                        this.appendPersistedAssistant(a.content, a.timestamp, entryId);
+                        this.appendPersistedAssistant(a.content, a.timestamp, entryId, showActions);
                     }
                     break;
                 }
@@ -1662,7 +1665,6 @@ export class AgentChat extends Model {
         }
         this.messagesContainer.innerHTML = "";
         this.currentThinkingSteps = [];
-        this.currentThinkingStepContent = "";
         this.pendingConfirms = [];
         this.rebuildNavMarkers();
         this.titleElement.textContent = this.defaultTitle;
@@ -2353,37 +2355,11 @@ export class AgentChat extends Model {
     private rafId = 0;
 
     private appendToken(token: string) {
-        this.currentContent += token;
-        this.fullContent += token;
-
-        const thinkBody = this.messagesContainer.querySelector(".agent-chat__msg--thinking:not(.agent-chat__msg--thinking-done) .agent-chat__thinking-body");
-        if (thinkBody) {
-            let chatEl = thinkBody.querySelector(".agent-chat__thinking-chat--streaming") as HTMLElement;
-            if (!chatEl) {
-                chatEl = document.createElement("div");
-                chatEl.className = "agent-chat__thinking-chat b3-typography agent-chat__thinking-chat--streaming";
-                thinkBody.appendChild(chatEl);
-            }
-            if (!this.pendingTokenUpdate) {
-                this.pendingTokenUpdate = true;
-                // 用 RAF 合并更新（与普通 AI 消息一致），减少重建频率。
-                // 流式期间用 textContent 写纯文本，富渲染推迟到完成时，避免每帧重解析整段 markdown。
-                this.rafId = requestAnimationFrame(() => {
-                    this.pendingTokenUpdate = false;
-                    chatEl.textContent = this.currentContent;
-                    const body = chatEl.closest(".agent-chat__thinking-body") as HTMLElement | null;
-                    if (body) {
-                        body.scrollTop = body.scrollHeight;
-                    }
-                    this.scrollToBottom();
-                });
-            }
-            return;
-        }
-
         if (!this.currentAIElement) {
             this.currentAIElement = this.createAIMessagePlaceholder();
         }
+        this.currentContent += token;
+        this.fullContent += token;
 
         if (!this.pendingTokenUpdate) {
             this.pendingTokenUpdate = true;
@@ -2404,17 +2380,6 @@ export class AgentChat extends Model {
         if (this.pendingTokenUpdate) {
             this.pendingTokenUpdate = false;
             cancelAnimationFrame(this.rafId);
-            // 思考卡片流式：更新 chatEl 并滚到底部（与 appendToken 思考分支一致）。
-            // 与 appendToken 一致用 textContent，富渲染由 finishResponse 完成时统一处理。
-            const thinkChat = this.messagesContainer.querySelector(".agent-chat__msg--thinking:not(.agent-chat__msg--thinking-done) .agent-chat__thinking-chat--streaming") as HTMLElement;
-            if (thinkChat) {
-                thinkChat.textContent = this.currentContent;
-                const thinkBody = thinkChat.parentElement;
-                if (thinkBody) {
-                    thinkBody.scrollTop = thinkBody.scrollHeight;
-                }
-                return;
-            }
             const bodyEl = this.currentAIElement?.querySelector(".agent-chat__body") as HTMLElement;
             if (bodyEl) {
                 bodyEl.textContent = this.currentContent;
@@ -2493,6 +2458,49 @@ export class AgentChat extends Model {
         this.hasInterveningCard = true;
     }
 
+    private finishVisibleRound() {
+        if (!this.currentContent.trim()) {
+            return;
+        }
+        this.flushTokenUpdate();
+        const content = this.currentContent;
+        const timestamp = Date.now();
+        const assistantEntryID = this.currentAssistantEntryId || SessionStore.newSessionId();
+        const roundID = this.currentRoundID || this.currentToolCalls[0]?.roundID;
+
+        // 新一轮思考开始前结束上一张思考卡片，使正文位于两轮思考之间，而不是回填进折叠区。
+        this.currentThinkingText = "";
+        this.finishActiveThinking();
+        this.flushThinkingStep();
+        if (this.currentAIElement) {
+            this.finalizeStreamingBody(content, timestamp, false);
+        } else {
+            this.appendPersistedAssistant(content, timestamp, assistantEntryID, false);
+        }
+        this.entries.push({
+            id: assistantEntryID,
+            type: "assistant",
+            content,
+            roundID,
+            toolCalls: this.currentToolCalls.length > 0
+                ? this.slimToolCallsForPersistence(this.currentToolCalls)
+                : undefined,
+            timestamp,
+        });
+
+        this.currentAIElement = null;
+        this.observeStickTarget(null);
+        this.currentAssistantEntryId = "";
+        this.currentContent = "";
+        this.fullContent = "";
+        this.currentToolCalls = [];
+        this.currentRoundID = "";
+        this.lastStepToolCount = 0;
+        this.renderedToolNames = {};
+        this.currentThinkingDuration = 0;
+        this.requestStartTime = Date.now();
+    }
+
     private appendThinking(reasoning: string, roundID: string) {
         const L = window.siyuan.languages;
         if (this.currentThinkingText) {
@@ -2513,6 +2521,7 @@ export class AgentChat extends Model {
             });
             this.lastStepToolCount = this.currentToolCalls.length;
         }
+        this.finishVisibleRound();
         // 工具名只在当前思考步骤内去重，新步骤仍需显示同名工具调用。
         this.renderedToolNames = {};
         this.currentThinkingText = "";
@@ -2542,29 +2551,6 @@ export class AgentChat extends Model {
             }
         }
 
-        if (reasoning === "processing" && this.currentAIElement) {
-            if (this.currentContent) {
-                const bodyEl = this.currentAIElement.querySelector(".agent-chat__body") as HTMLElement;
-                if (bodyEl) {
-                    bodyEl.classList.remove("agent-chat__body--streaming");
-                }
-                this.attachStepContent(this.currentContent);
-                this.currentAIElement.remove();
-            } else {
-                this.currentAIElement.remove();
-            }
-            this.currentAIElement = null;
-            this.currentAssistantEntryId = "";
-            this.currentContent = "";
-        } else if (reasoning === "processing" && this.currentContent) {
-            this.attachStepContent(this.currentContent);
-            this.currentContent = "";
-            const streamingEl = this.messagesContainer.querySelector(".agent-chat__msg--thinking:not(.agent-chat__msg--thinking-done) .agent-chat__thinking-chat--streaming") as HTMLElement;
-            if (streamingEl) {
-                streamingEl.classList.remove("agent-chat__thinking-chat--streaming");
-            }
-        }
-
         if (reasoning === "processing" && this.hasInterveningCard) {
             // 与 finishActiveThinking 对齐：先把本张思考卡片的耗时算出来，
             // 既用于 DOM 显示「已思考 Xs」，也用于落盘 entry.duration（重载后仍能显示正确耗时）。
@@ -2581,10 +2567,6 @@ export class AgentChat extends Model {
                 if (txtEl) {
                     txtEl.textContent = doneText;
                 }
-            }
-            if (this.currentThinkingStepContent && this.currentThinkingSteps.length > 0) {
-                this.currentThinkingSteps[this.currentThinkingSteps.length - 1].content = this.currentThinkingStepContent;
-                this.currentThinkingStepContent = "";
             }
             if (this.currentThinkingSteps.length > 0) {
                 this.entries.push({
@@ -2732,7 +2714,7 @@ export class AgentChat extends Model {
         actions.appendChild(copyBtn);
 
         const regenBtn = document.createElement("span");
-        regenBtn.className = "block__icon block__icon--show ariaLabel";
+        regenBtn.className = "block__icon block__icon--show ariaLabel agent-chat__regenerate";
         regenBtn.setAttribute("data-position", "north");
         regenBtn.setAttribute("aria-label", L.agentRegenerate);
         regenBtn.innerHTML = '<svg><use xlink:href="#iconRefresh"></use></svg>';
@@ -2741,8 +2723,16 @@ export class AgentChat extends Model {
             this.regenerateResponse(this.findUserEntryIDBeforeElement(el));
         });
         actions.appendChild(regenBtn);
+        regenBtn.classList.toggle("fn__none", this.isStreaming || this.mirrorLocked);
 
         el.appendChild(actions);
+    }
+
+    private updateRegenerateButtons() {
+        const hidden = this.isStreaming || this.mirrorLocked;
+        this.messagesContainer.querySelectorAll(".agent-chat__regenerate").forEach((element) => {
+            element.classList.toggle("fn__none", hidden);
+        });
     }
 
     private findUserEntryIDBeforeElement(el: HTMLElement): string | undefined {
@@ -2842,7 +2832,6 @@ export class AgentChat extends Model {
         this.renderedToolNames = {};
         this.hasInterveningCard = false;
         this.currentThinkingSteps = [];
-        this.currentThinkingStepContent = "";
         this.currentThinkingText = "";
         this.currentThinkingReasoning = "";
         this.currentThinkingReasoningContent = "";
@@ -2897,7 +2886,7 @@ export class AgentChat extends Model {
 
     // 流式结束时把 currentAIElement 的 body 从纯文本一次性转为富渲染（Lute + postRender）。
     // 由 finishResponse（正常结束）与 error 路径（中断）共用，保证流式期轻渲染后仍得到完整富文本。
-    private finalizeStreamingBody(content: string, ts: number) {
+    private finalizeStreamingBody(content: string, ts: number, showActions = true) {
         if (!this.currentAIElement) {
             return;
         }
@@ -2910,7 +2899,9 @@ export class AgentChat extends Model {
             // 富渲染只在此处执行一次，避免流式期间每帧 O(n²) 重建带来的卡顿。
             bodyEl.innerHTML = this.lute.ProtylePreviewStr("", content) || escapeHtml(content);
             postRender(bodyEl, this.app, this.host.onNavigate);
-            this.addCopyButton(this.currentAIElement, undefined, ts);
+            if (showActions) {
+                this.addCopyButton(this.currentAIElement, undefined, ts);
+            }
             this.scrollToBottom(true);
         }
     }
@@ -3029,16 +3020,6 @@ export class AgentChat extends Model {
         }
     }
 
-    // 把上一轮在思考卡片内显示过的 content 归属到刚 push 的最后一个 step，
-    // 并清空 currentThinkingStepContent。这样每个 step 的 content 都能正确归属到自己的轮次，
-    // 而不会被 flushThinkingStep 错挂到下一轮的 step（导致重载后 content 位置错位）。
-    private attachStepContent(content: string) {
-        if (content && this.currentThinkingSteps.length > 0) {
-            this.currentThinkingSteps[this.currentThinkingSteps.length - 1].content = content;
-        }
-        this.currentThinkingStepContent = "";
-    }
-
     private flushThinkingStep() {
         if (this.currentThinkingText) {
             const toolNames = this.currentToolCalls.slice(this.lastStepToolCount).map(function (t) {
@@ -3052,11 +3033,9 @@ export class AgentChat extends Model {
                 roundID: this.currentRoundID || undefined,
                 toolNames: toolNames.length > 0 ? toolNames : undefined,
                 toolCallIDs: toolCallIDs.length > 0 ? toolCallIDs : undefined,
-                content: this.currentThinkingStepContent || undefined,
             });
             this.lastStepToolCount = this.currentToolCalls.length;
             this.currentThinkingText = "";
-            this.currentThinkingStepContent = "";
         }
         if (this.currentThinkingSteps.length > 0) {
             this.entries.push({
@@ -3122,7 +3101,6 @@ export class AgentChat extends Model {
     private appendRetry(attempt: number, maxRetries: number) {
         this.finishActiveThinking();
         this.currentThinkingSteps = [];
-        this.currentThinkingStepContent = "";
         this.renderedToolNames = {};
         this.clearThinking();
         const el = document.createElement("div");
@@ -3461,7 +3439,7 @@ export class AgentChat extends Model {
         const timestamp = Date.now();
         if (this.currentAIElement) {
             if (content.trim()) {
-                this.finalizeStreamingBody(content, timestamp);
+                this.finalizeStreamingBody(content, timestamp, false);
             } else {
                 this.currentAIElement.remove();
             }
@@ -3472,6 +3450,7 @@ export class AgentChat extends Model {
                 content,
                 timestamp,
                 this.currentAssistantEntryId || SessionStore.newSessionId(),
+                false,
             );
         }
         this.currentAssistantEntryId = "";
@@ -3933,6 +3912,7 @@ export class AgentChat extends Model {
 
     private setStreaming(streaming: boolean) {
         this.isStreaming = streaming;
+        this.updateRegenerateButtons();
         this.host.onStatusChange?.(streaming ? "running" : "idle");
         this.sendBtn.classList.toggle("fn__none", streaming);
         this.stopBtn.classList.toggle("fn__none", !streaming);
