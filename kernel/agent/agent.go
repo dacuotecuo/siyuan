@@ -1022,6 +1022,8 @@ func AgentChat(ctx context.Context, client *openai.Client, model string, context
 						}
 						if tcd.ID != "" {
 							aggregatedToolCalls[idx].ID = tcd.ID
+						}
+						if tcd.Type != "" {
 							aggregatedToolCalls[idx].Type = tcd.Type
 						}
 						if tcd.Function.Name != "" {
@@ -1064,6 +1066,9 @@ func AgentChat(ctx context.Context, client *openai.Client, model string, context
 				filtered := make([]openai.ToolCall, 0, len(aggregatedToolCalls))
 				for _, tc := range aggregatedToolCalls {
 					if tc.Function.Name != "" {
+						if tc.Type == "" {
+							tc.Type = openai.ToolTypeFunction
+						}
 						filtered = append(filtered, tc)
 					}
 				}
