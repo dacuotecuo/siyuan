@@ -518,7 +518,8 @@ declare namespace Config {
         codeBlockMiddleDot: boolean;
     }
 
-    export type TAssetOpenAction = "follow-tab" | "current" | "right" | "new-window" | "app" | "folder";
+    export type TAssetOpenAction = "follow-tab" | "current" | "right" | "bottom" | "background" |
+        "new-window" | "app" | "folder";
 
     export interface IAssetOpen {
         click: TAssetOpenAction;
