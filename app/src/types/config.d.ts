@@ -1233,6 +1233,8 @@ declare namespace Config {
         insertBefore: IKey;
         insertBottom: IKey;
         insertRight: IKey;
+        insertSuperBlockLeft: IKey;
+        insertSuperBlockRight: IKey;
         jumpToParentNext: IKey;
         moveToDown: IKey;
         moveToUp: IKey;
