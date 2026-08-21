@@ -396,9 +396,7 @@ func InitConf() {
 	if "" == Conf.Appearance.CodeBlockThemeLight {
 		Conf.Appearance.CodeBlockThemeLight = "github"
 	}
-	if nil == Conf.Appearance.StatusBar {
-		Conf.Appearance.StatusBar = &util.StatusBar{}
-	}
+	Conf.Appearance.StatusBar = util.NormalizeStatusBar(Conf.Appearance.StatusBar, util.IsMobileContainer())
 	util.StatusBarCfg = Conf.Appearance.StatusBar
 	if nil == Conf.Appearance.Notifications {
 		Conf.Appearance.Notifications = util.NewNotifications()
