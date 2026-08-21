@@ -2303,7 +2303,7 @@ func processSyncMergeResult(exit, byHand bool, mergeResult *dejavu.MergeResult, 
 	var upserts, removes []string
 	var upsertTrees int
 	// 可能需要重新加载部分功能
-	var needReloadFlashcard, needReloadOcrTexts, needReloadPlugin, needReloadSnippet bool
+	var needReloadFlashcard, needReloadInlineStyles, needReloadOcrTexts, needReloadPlugin, needReloadSnippet bool
 	reloadPluginSet := hashset.New()     // 插件代码变更 data/plugins/
 	dataChangePluginSet := hashset.New() // 插件存储数据变更 data/storage/petal/
 	needUnindexBoxes, needIndexBoxes := map[string]bool{}, map[string]bool{}
@@ -2363,6 +2363,10 @@ func processSyncMergeResult(exit, byHand bool, mergeResult *dejavu.MergeResult, 
 
 		if file.Path == "/snippets/conf.json" {
 			needReloadSnippet = true
+		}
+
+		if isInlineStylesRepoPath(file.Path) {
+			needReloadInlineStyles = true
 		}
 
 		if strings.Contains(file.Path, "/storage/av/") && strings.HasSuffix(file.Path, ".json") {
@@ -2440,6 +2444,10 @@ func processSyncMergeResult(exit, byHand bool, mergeResult *dejavu.MergeResult, 
 			needReloadSnippet = true
 		}
 
+		if isInlineStylesRepoPath(file.Path) {
+			needReloadInlineStyles = true
+		}
+
 		if strings.Contains(file.Path, "/storage/av/") && strings.HasSuffix(file.Path, ".json") {
 			cache.RemoveAVData(strings.TrimSuffix(filepath.Base(file.Path), ".json"))
 		}
@@ -2478,6 +2486,10 @@ func processSyncMergeResult(exit, byHand bool, mergeResult *dejavu.MergeResult, 
 
 	syncingFiles = sync.Map{}
 	syncingStorages.Store(false)
+	if needReloadInlineStyles && !exit {
+		util.BroadcastByType("main", "reloadInlineStyles", 0, "", nil)
+		util.ReloadPublishServiceSessions()
+	}
 	removedEncryptedBox := false
 	for boxID := range removedBoxConfs {
 		if IsEncryptedBox(boxID) || removedBoxCryptoBackups[boxID] {
