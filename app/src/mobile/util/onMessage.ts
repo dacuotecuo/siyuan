@@ -47,7 +47,7 @@ export const onMessage = (app: App, data: IWebSocketData) => {
                 }
                 break;
             case "setAppearance":
-                window.location.reload();
+                appearanceConfigApi.apply(data.data);
                 break;
             case "reloadInlineStyles":
                 void reloadInlineStyles();
