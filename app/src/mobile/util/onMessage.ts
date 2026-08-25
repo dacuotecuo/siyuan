@@ -1,5 +1,6 @@
 import {openMobileFileById} from "../editor";
 import {
+    forceQuit,
     processSync,
     progressLoading,
     setDefRefCount,
@@ -19,6 +20,8 @@ import {renderMobileBottomBar} from "./mobileBottomBar";
 import {Constants} from "../../constants";
 import {MOBILE_SIDE_PANEL_CONFIG_CHANGE_EVENT} from "./mobileSidePanelConfig";
 import {applyCloudUserState} from "../../config/tabs/accountUi";
+import {isInMobileApp} from "../../protyle/util/compatibility";
+import {handleMobileKernelExit} from "./kernelExit";
 
 let statusTimeout: number;
 const statusElement = document.querySelector("#status") as HTMLElement;
@@ -159,6 +162,15 @@ export const onMessage = (app: App, data: IWebSocketData) => {
                 break;
             case "openFileById":
                 openMobileFileById(app, data.data.id);
+                break;
+            case "exit":
+                handleMobileKernelExit({
+                    inMobileApp: isInMobileApp(),
+                    forceQuit,
+                    redirectBrowser: () => {
+                        window.location.href = "about:blank";
+                    },
+                });
                 break;
             case "filetreeSortChanged":
                 window.siyuan.mobile.docks.file?.onFiletreeSortChanged(data.data);
