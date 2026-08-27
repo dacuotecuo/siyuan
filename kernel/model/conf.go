@@ -402,9 +402,7 @@ func InitConf() {
 		Conf.Appearance.Notifications = util.NewNotifications()
 	}
 	util.NotificationsCfg = Conf.Appearance.Notifications
-	if nil == Conf.FileTree {
-		Conf.FileTree = conf.NewFileTree()
-	}
+	Conf.FileTree = normalizeFileTreeDefaultIcon(Conf.FileTree, confFileExists)
 	if 1 > Conf.FileTree.MaxListCount {
 		Conf.FileTree.MaxListCount = 512
 	}
@@ -891,6 +889,21 @@ func InitConf() {
 
 	go util.InitPandoc(Conf.Export.PandocBin)
 	go util.InitTesseract()
+}
+
+func normalizeFileTreeDefaultIcon(fileTree *conf.FileTree, confFileExists bool) *conf.FileTree {
+	if nil == fileTree {
+		fileTree = conf.NewFileTree()
+		if confFileExists {
+			fileTree.UseSVGDefaultIcon = new(bool)
+		}
+		return fileTree
+	}
+	if nil == fileTree.UseSVGDefaultIcon {
+		useSVGDefaultIcon := !confFileExists
+		fileTree.UseSVGDefaultIcon = &useSVGDefaultIcon
+	}
+	return fileTree
 }
 
 func readCookieKey() (cookieKey string) {
