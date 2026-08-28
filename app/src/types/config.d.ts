@@ -1262,6 +1262,8 @@ declare namespace Config {
         refresh: IKey;
         refTab: IKey;
         rename: IKey;
+        scrollPageDownWithoutMovingCaret: IKey;
+        scrollPageUpWithoutMovingCaret: IKey;
         selectToPageEnd: IKey;
         selectToPageStart: IKey;
         showInFolder: IKey;
