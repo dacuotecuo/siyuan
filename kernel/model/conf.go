@@ -554,9 +554,6 @@ func InitConf() {
 	if nil == Conf.Onboarding {
 		Conf.Onboarding = &conf.Onboarding{State: conf.OnboardingCompleted}
 	}
-	if boxes, listErr := ListNotebooks(); listErr == nil {
-		prepareOnboardingForEmptyWorkspace(Conf.Onboarding, util.ReadOnly, len(boxes))
-	}
 	if nil == Conf.System.NetworkProxy {
 		Conf.System.NetworkProxy = &conf.NetworkProxy{}
 	}
@@ -658,6 +655,9 @@ func InitConf() {
 
 	if util.ContainerDocker == util.Container {
 		Conf.Sync.Perception = false
+	}
+	if boxes, listErr := ListNotebooks(); listErr == nil {
+		prepareOnboardingForEmptyWorkspace(Conf.Onboarding, util.ReadOnly, len(boxes))
 	}
 
 	if nil == Conf.Api {
