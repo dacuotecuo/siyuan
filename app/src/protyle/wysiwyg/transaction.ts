@@ -50,6 +50,7 @@ import {getPartialUpdateCleanupElements, shouldDeferCodeBlockCaretRestore} from 
 import {getMoveAffectedEmbedElements, shouldSyncMoveCopies} from "./transactionEmbed";
 import {cloneMoveElements, getVisibleMoveElements} from "./transactionMove";
 import {normalizeHTMLAssetIFrameBlockDOM} from "../../asset/html";
+import {sanitizeKernelHTML} from "../../util/hostCapabilities";
 import {disposeCustomBlocksInElement} from "../../plugin/customBlockRender";
 import {
     applyViewFoldStates,
@@ -1943,7 +1944,7 @@ const unfoldListHeadings = async (protyle: IProtyle, nodeElements: Element[]) =>
                 }],
             }]
         });
-        foldedHeading.insertAdjacentHTML("afterend", response.data[0].doOperations[0].retData);
+        foldedHeading.insertAdjacentHTML("afterend", normalizeHTMLAssetIFrameBlockDOM(response.data[0].doOperations[0].retData));
         foldOperations.push({
             action: "foldHeading",
             id: itemId
@@ -2083,7 +2084,7 @@ export const turnListsRecursively = async (options: {
     options.protyle.wysiwyg.element.querySelectorAll('[data-type~="block-ref"]').forEach(item => {
         if (item.textContent === "") {
             fetchPost("/api/block/getRefText", {id: item.getAttribute("data-id")}, (response) => {
-                item.innerHTML = response.data;
+                item.innerHTML = sanitizeKernelHTML(response.data);
             });
         }
     });
@@ -2186,7 +2187,7 @@ export const turnsOneInto = async (options: {
     options.protyle.wysiwyg.element.querySelectorAll('[data-type~="block-ref"]').forEach(item => {
         if (item.textContent === "") {
             fetchPost("/api/block/getRefText", {id: item.getAttribute("data-id")}, (response) => {
-                item.innerHTML = response.data;
+                item.innerHTML = sanitizeKernelHTML(response.data);
             });
         }
     });

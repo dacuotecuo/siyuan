@@ -22,6 +22,7 @@ import {MOBILE_SIDE_PANEL_CONFIG_CHANGE_EVENT} from "./mobileSidePanelConfig";
 import {applyCloudUserState} from "../../config/tabs/accountUi";
 import {isInMobileApp} from "../../protyle/util/compatibility";
 import {handleMobileKernelExit} from "./kernelExit";
+import {sanitizeKernelHTML} from "../../util/hostCapabilities";
 
 let statusTimeout: number;
 const statusElement = document.querySelector("#status") as HTMLElement;
@@ -45,7 +46,7 @@ export const onMessage = (app: App, data: IWebSocketData) => {
                     statusElement.style.bottom = "";
                 } else {
                     clearTimeout(statusTimeout);
-                    statusElement.innerHTML = `<div class="fn__flex">${data.data.tasks[0].action}<div class="fn__progress"><div></div></div>`;
+                    statusElement.innerHTML = `<div class="fn__flex">${sanitizeKernelHTML(data.data.tasks[0].action)}<div class="fn__progress"><div></div></div>`;
                     statusElement.style.bottom = "0";
                 }
                 break;
@@ -194,7 +195,7 @@ export const onMessage = (app: App, data: IWebSocketData) => {
                     return;
                 }
                 clearTimeout(statusTimeout);
-                statusElement.innerHTML = data.msg;
+                statusElement.innerHTML = sanitizeKernelHTML(data.msg);
                 statusElement.style.bottom = "var(--mobile-bottom-bar-safe-area)";
                 statusTimeout = window.setTimeout(() => {
                     statusElement.style.bottom = "";
