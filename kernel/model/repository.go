@@ -381,6 +381,7 @@ func RollbackRepoSnapshotFile(fileID string) (err error) {
 		if strings.Contains(file.Path, "/storage/av/") && strings.HasSuffix(file.Path, ".json") {
 			avID := strings.TrimSuffix(filepath.Base(file.Path), ".json")
 			cache.RemoveAVData(avID)
+			queueExternalAttributeViewRefIndexByRepoPath(file.Path)
 			ReloadAttrView(avID)
 		}
 
@@ -2305,6 +2306,7 @@ func processSyncMergeResult(exit, byHand bool, mergeResult *dejavu.MergeResult, 
 
 	// 有数据变更，需要重建索引
 	var upserts, removes []string
+	changedAttributeViewPaths := map[string]bool{}
 	var upsertTrees int
 	// 可能需要重新加载部分功能
 	var needReloadFlashcard, needReloadInlineStyles, needReloadOcrTexts, needReloadPlugin, needReloadSnippet bool
@@ -2375,6 +2377,7 @@ func processSyncMergeResult(exit, byHand bool, mergeResult *dejavu.MergeResult, 
 
 		if strings.Contains(file.Path, "/storage/av/") && strings.HasSuffix(file.Path, ".json") {
 			cache.RemoveAVData(strings.TrimSuffix(filepath.Base(file.Path), ".json"))
+			changedAttributeViewPaths[file.Path] = true
 		}
 	}
 
@@ -2456,6 +2459,7 @@ func processSyncMergeResult(exit, byHand bool, mergeResult *dejavu.MergeResult, 
 
 		if strings.Contains(file.Path, "/storage/av/") && strings.HasSuffix(file.Path, ".json") {
 			cache.RemoveAVData(strings.TrimSuffix(filepath.Base(file.Path), ".json"))
+			changedAttributeViewPaths[file.Path] = true
 		}
 	}
 
@@ -2542,6 +2546,9 @@ func processSyncMergeResult(exit, byHand bool, mergeResult *dejavu.MergeResult, 
 	}
 
 	upsertRootIDs, removeRootIDs := incReindex(upserts, removes)
+	for changedPath := range changedAttributeViewPaths {
+		queueExternalAttributeViewRefIndexByRepoPath(changedPath)
+	}
 	needReloadFiletree = !needReloadUI && (needReloadFiletree || 0 < len(upsertRootIDs) || 0 < len(removeRootIDs))
 	if needReloadFiletree {
 		ReloadFiletree()
