@@ -784,9 +784,11 @@ func AgentChat(ctx context.Context, client *openai.Client, model string, context
 				return false, fmt.Errorf("%w: current user turn not found", errContextCannotBeCompacted)
 			}
 
+			nativeResponsesCompaction := util.IsOpenAIResponsesProtocol(protocol) &&
+				util.SupportsOpenAIResponsesCompaction(ctx)
 			// 原生 compact 无法限制输出长度，覆盖所有已完成轮次，避免 opaque window 返回后仍超出预算。
 			selectedCandidateIndex := len(candidates) - 1
-			if !util.IsOpenAIResponsesProtocol(protocol) {
+			if !nativeResponsesCompaction {
 				selectedCandidateIndex = sort.Search(len(candidates), func(i int) bool {
 					candidate := candidates[i]
 					candidateCheckpointMsgs := checkpointMessagesAfterCompaction(sessionEntries, candidate, tail)
@@ -816,7 +818,7 @@ func AgentChat(ctx context.Context, client *openai.Client, model string, context
 			sendEvent(ch, AgentEvent{Type: "thinking", Reasoning: "compacting context"})
 			var nextCompaction *runtimeCompaction
 			var compactionStateErr error
-			if util.IsOpenAIResponsesProtocol(protocol) {
+			if nativeResponsesCompaction {
 				responseSource := entriesToAgentMessages(sessionEntries[coveredEntryCount:selectedEntryCount])
 				responseInput := checkpointMessagesToOpenAIResponseInput(
 					responseSource, language, capabilities, compaction, imageInputDisabled)
@@ -1550,9 +1552,10 @@ func AgentChat(ctx context.Context, client *openai.Client, model string, context
 	return ch
 }
 
-func GenerateTitle(client *openai.Client, protocol, model, userMsg, language string) string {
+func GenerateTitle(client *openai.Client, apiBaseURL, protocol, model, userMsg, language string) string {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
+	ctx = util.ContextWithOpenAIResponsesBaseURL(ctx, apiBaseURL)
 	resp, err := util.CreateOpenAICompletion(ctx, client, protocol, openai.ChatCompletionRequest{
 		Model: model,
 		Messages: []openai.ChatCompletionMessage{

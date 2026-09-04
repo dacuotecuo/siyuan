@@ -81,7 +81,7 @@ type OpenAIImageAdapter struct {
 	timeout time.Duration
 }
 
-func ChatGPT(msg string, contextMsgs []string, c *openai.Client, protocol, model string, maxTokens int,
+func ChatGPT(msg string, contextMsgs []string, c *openai.Client, apiBaseURL, protocol, model string, maxTokens int,
 	temperature float64, timeout int) (ret string, stop bool, err error) {
 	var reqMsgs []openai.ChatCompletionMessage
 
@@ -116,6 +116,7 @@ func ChatGPT(msg string, contextMsgs []string, c *openai.Client, protocol, model
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeout)*time.Second)
 	defer cancel()
+	ctx = ContextWithOpenAIResponsesBaseURL(ctx, apiBaseURL)
 	resp, err := CreateOpenAICompletion(ctx, c, protocol, req, nil)
 	if err != nil {
 		PushErrMsg("Requesting failed, please check kernel log for more details", 3000)
@@ -328,6 +329,7 @@ func TestModel(apiKey, apiBaseURL, protocol, model string, timeout int) (availab
 	client := NewOpenAIClient(apiKey, apiBaseURL)
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeout)*time.Second)
 	defer cancel()
+	ctx = ContextWithOpenAIResponsesBaseURL(ctx, apiBaseURL)
 
 	// 优先校验模型是否在可用清单中
 	list, listErr := client.ListModels(ctx)
@@ -340,23 +342,43 @@ func TestModel(apiKey, apiBaseURL, protocol, model string, timeout int) (availab
 				matched = true
 			}
 		}
-		if matched {
-			return
+		if !matched {
+			logging.LogInfof("model [%s] not found in available list, test with text completion", model)
 		}
-		logging.LogInfof("model [%s] not found in available list, fallback to text completion", model)
 	} else {
-		// ListModels 不可用时回退到极简文本生成请求验证连通性与鉴权。
-		logging.LogInfof("list models failed [%s], fallback to text completion: %s", apiBaseURL, listErr)
+		// ListModels 不可用时仍使用极简文本生成请求验证连通性与鉴权。
+		logging.LogInfof("list models failed [%s], test with text completion: %s", apiBaseURL, listErr)
 	}
 
 	messages := []openai.ChatCompletionMessage{{Role: "user", Content: "1"}}
-	_, err = CreateOpenAICompletion(ctx, client, protocol, openai.ChatCompletionRequest{
+	request := openai.ChatCompletionRequest{
 		Model:               model,
 		Messages:            messages,
 		MaxCompletionTokens: 1,
 		Temperature:         1,
-	}, nil)
+	}
+	if IsOpenAIResponsesProtocol(protocol) {
+		request.Stream = true
+		var stream *OpenAICompletionStream
+		stream, err = CreateOpenAICompletionStream(ctx, client, protocol, request, nil)
+		if err == nil {
+			defer stream.Close()
+			for {
+				_, receiveErr := stream.Recv()
+				if errors.Is(receiveErr, io.EOF) {
+					break
+				}
+				if receiveErr != nil {
+					err = receiveErr
+					break
+				}
+			}
+		}
+	} else {
+		_, err = CreateOpenAICompletion(ctx, client, protocol, request, nil)
+	}
 	if nil != err {
+		matched = false
 		logging.LogErrorf("test model [%s] failed: %s", model, err)
 		return
 	}
