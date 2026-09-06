@@ -1163,6 +1163,8 @@ func PurgeCloud() (err error) {
 	util.PushEndlessProgress(msg)
 	defer util.PushClearProgress()
 
+	handleCloudError := cloudRepoErrorHandler()
+	defer func() { handleCloudError(err) }()
 	repo, err := newRepositoryWithAssetSourceLocked()
 	if err != nil {
 		return
@@ -1455,6 +1457,8 @@ func DownloadCloudSnapshot(tag, id string) (err error) {
 		return
 	}
 
+	handleCloudError := cloudRepoErrorHandler()
+	defer func() { handleCloudError(err) }()
 	repo, err := newRepositoryWithAssetSourceLocked()
 	if err != nil {
 		return
@@ -1499,6 +1503,8 @@ func UploadCloudSnapshot(tag, id string) (err error) {
 		return
 	}
 
+	handleCloudError := cloudRepoErrorHandler()
+	defer func() { handleCloudError(err) }()
 	repo, err := newRepositoryWithAssetSourceLocked()
 	if err != nil {
 		return
@@ -1525,6 +1531,7 @@ func UploadCloudSnapshot(tag, id string) (err error) {
 			err = fmt.Errorf(Conf.Language(84), Conf.Language(154))
 			return
 		}
+		handleCloudError(err)
 		err = fmt.Errorf(Conf.Language(84), formatRepoErrorMsg(err))
 		return
 	}
@@ -1542,6 +1549,8 @@ func RemoveCloudRepoTag(tag string) (err error) {
 		return
 	}
 
+	handleCloudError := cloudRepoErrorHandler()
+	defer func() { handleCloudError(err) }()
 	repo, err := newRepositoryWithAssetSourceLocked()
 	if err != nil {
 		return
@@ -1568,13 +1577,17 @@ func RemoveCloudRepoTag(tag string) (err error) {
 }
 
 func GetCloudRepoTagSnapshots() (ret []*dejavu.Log, err error) {
+	assetDownloadSourceMu.RLock()
+	defer assetDownloadSourceMu.RUnlock()
 	ret = []*dejavu.Log{}
 	if 1 > len(Conf.Repo.Key) {
 		err = errors.New(Conf.Language(26))
 		return
 	}
 
-	repo, err := newRepository()
+	handleCloudError := cloudRepoErrorHandler()
+	defer func() { handleCloudError(err) }()
+	repo, err := newRepositoryWithAssetSourceLocked()
 	if err != nil {
 		return
 	}
@@ -1604,13 +1617,17 @@ func GetCloudRepoTagSnapshots() (ret []*dejavu.Log, err error) {
 }
 
 func GetCloudRepoSnapshots(page int) (ret []*dejavu.Log, pageCount, totalCount int, err error) {
+	assetDownloadSourceMu.RLock()
+	defer assetDownloadSourceMu.RUnlock()
 	ret = []*dejavu.Log{}
 	if 1 > len(Conf.Repo.Key) {
 		err = errors.New(Conf.Language(26))
 		return
 	}
 
-	repo, err := newRepository()
+	handleCloudError := cloudRepoErrorHandler()
+	defer func() { handleCloudError(err) }()
+	repo, err := newRepositoryWithAssetSourceLocked()
 	if err != nil {
 		return
 	}
@@ -1827,6 +1844,8 @@ func syncRepoDownload() (err error) {
 		return
 	}
 
+	handleCloudError := cloudRepoErrorHandler()
+	defer func() { handleCloudError(err) }()
 	repo, err := newSyncRepository()
 	if err != nil {
 		planSyncAfter(fixSyncInterval)
@@ -1910,6 +1929,8 @@ func syncRepoUpload() (err error) {
 		return
 	}
 
+	handleCloudError := cloudRepoErrorHandler()
+	defer func() { handleCloudError(err) }()
 	repo, err := newSyncRepository()
 	if err != nil {
 		planSyncAfter(fixSyncInterval)
@@ -1994,6 +2015,8 @@ func bootSyncRepo() (err error) {
 		return
 	}
 
+	handleCloudError := cloudRepoErrorHandler()
+	defer func() { handleCloudError(err) }()
 	repo, err := newSyncRepository()
 	if err != nil {
 		autoSyncErrCount++
@@ -2140,6 +2163,8 @@ func syncRepo(exit, byHand bool) (dataChanged bool, err error) {
 		return
 	}
 
+	handleCloudError := cloudRepoErrorHandler()
+	defer func() { handleCloudError(err) }()
 	repo, err := newSyncRepository()
 	if err != nil {
 		autoSyncErrCount++
@@ -2180,6 +2205,8 @@ func syncRepo(exit, byHand bool) (dataChanged bool, err error) {
 }
 
 func syncIndexedRepo(repo *dejavu.Repo, exit, byHand bool, beforeIndex, afterIndex *entity.Index, start time.Time, indexElapsed time.Duration, skipCloudPreflight bool, prefetchTraffic *dejavu.DownloadTrafficStat) (dataChanged bool, err error) {
+	handleCloudError := cloudRepoErrorHandler()
+	defer func() { handleCloudError(err) }()
 	if !exit {
 		defer finishAssetDownloadRecovery(repo, &err)
 	}
@@ -3278,7 +3305,11 @@ func GetCloudSpace() (s *Sync, b *Backup, hSize, hAssetSize, hTotalSize, hExchan
 }
 
 func getCloudSpace() (stat *cloud.Stat, err error) {
-	repo, err := newRepository()
+	assetDownloadSourceMu.RLock()
+	defer assetDownloadSourceMu.RUnlock()
+	handleCloudError := cloudRepoErrorHandler()
+	defer func() { handleCloudError(err) }()
+	repo, err := newRepositoryWithAssetSourceLocked()
 	if err != nil {
 		return
 	}
