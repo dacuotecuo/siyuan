@@ -408,8 +408,9 @@ func TestAgentChatRestoresCompleteAssistantContextAfterCommit(t *testing.T) {
 
 	firstTurnID := ""
 	events := AgentChat(
-		context.Background(), newTestOpenAIClient(server.URL), "test-model", "", 0, testSessionID, "user-1", 1,
-		"use the tool", "English", nil, EditorContext{}, nil, false, time.Second, 0, "", time.Second, time.Second,
+		context.Background(), newTestGeminiOpenAIClient(server.URL), "openai", "models/gemini-3.5-flash", "", 0,
+		testSessionID, "user-1", 1,
+		"use the tool", nil, "English", nil, EditorContext{}, nil, false, time.Second, 0, "", time.Second, time.Second,
 	)
 	for event := range events {
 		if event.Type == "turn" {
@@ -452,8 +453,9 @@ func TestAgentChatRestoresCompleteAssistantContextAfterCommit(t *testing.T) {
 	}
 
 	events = AgentChat(
-		context.Background(), newTestOpenAIClient(server.URL), "test-model", "", 0, testSessionID, "user-2", 3,
-		"continue", "English", nil, EditorContext{}, nil, false, time.Second, 0, "", time.Second, time.Second,
+		context.Background(), newTestGeminiOpenAIClient(server.URL), "openai", "models/gemini-3.5-flash", "", 0,
+		testSessionID, "user-2", 3,
+		"continue", nil, "English", nil, EditorContext{}, nil, false, time.Second, 0, "", time.Second, time.Second,
 	)
 	for event := range events {
 		if event.Type == "error" {

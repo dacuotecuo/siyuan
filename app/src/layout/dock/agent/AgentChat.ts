@@ -81,8 +81,6 @@ type UserEntry = EntryBase & {
     timestamp?: number
 };
 
-type UserEntry = EntryBase & { type: "user"; content: string; blockHTML?: string; timestamp?: number };
-
 type SessionEntry =
     | UserEntry
     | (EntryBase & {
@@ -2377,7 +2375,15 @@ export class AgentChat extends Model {
         const reasoningEffort = this.selectedReasoningEffort;
 
         const userEntryId = SessionStore.newSessionId();
-        this.entries.push({id: userEntryId, type: "user", content: text, blockHTML, timestamp: Date.now()});
+        this.entries.push({
+            id: userEntryId,
+            type: "user",
+            content: text,
+            blockHTML,
+            references: refs.length > 0 ? refs : undefined,
+            editorContext,
+            timestamp: Date.now(),
+        });
         if (this.entries.length === 1) {
             this.messagesContainer.innerHTML = "";
         }
@@ -2843,26 +2849,27 @@ export class AgentChat extends Model {
         this.flushThinkingStep();
     }
 
-    private appendUserMessage(text: string, timestamp?: number, entryId?: string, blockHTML?: string) {
+    private createUserMessage(text: string, timestamp?: number, entryId?: string, blockHTML?: string): HTMLElement {
         const el = document.createElement("div");
         el.className = "agent-chat__msg agent-chat__msg--user";
         if (entryId) {
             el.setAttribute("data-message-id", entryId);
         }
-        const bodyElement = document.createElement("div");
-        bodyElement.className = "agent-chat__body protyle-wysiwyg";
-        bodyElement.setAttribute("contenteditable", "false");
-        bodyElement.setAttribute("data-readonly", "true");
-        bodyElement.innerHTML = blockHTML || this.lute.Md2BlockDOM(text);
-        el.appendChild(bodyElement);
+        const body = document.createElement("div");
+        body.className = "agent-chat__body protyle-wysiwyg";
+        body.setAttribute("contenteditable", "false");
+        body.setAttribute("data-readonly", "true");
+        body.innerHTML = blockHTML || this.lute.Md2BlockDOM(text);
+        el.appendChild(body);
         let actionsHTML = '<div class="agent-chat__msg-actions">';
         if (timestamp) {
             actionsHTML += '<span class="agent-chat__msg-meta agent-chat__msg-time">' + this.formatMessageTime(timestamp) + "</span>";
         }
-        actionsHTML += '<span class="block__icon block__icon--show ariaLabel" data-position="north" aria-label="' + window.siyuan.languages.copy + '"><svg><use xlink:href="#iconCopy"></use></svg></span>' +
+        actionsHTML += '<span class="block__icon block__icon--show ariaLabel agent-chat__user-copy" data-position="north" aria-label="' + window.siyuan.languages.copy + '"><svg><use xlink:href="#iconCopy"></use></svg></span>' +
+            '<span class="block__icon block__icon--show ariaLabel agent-chat__user-edit" data-position="north" aria-label="' + window.siyuan.languages.edit + '"><svg><use xlink:href="#iconEdit"></use></svg></span>' +
             "</div>";
         el.insertAdjacentHTML("beforeend", actionsHTML);
-        el.querySelector(".agent-chat__msg-actions .block__icon")?.addEventListener("click", (e) => {
+        el.querySelector(".agent-chat__user-copy")?.addEventListener("click", (e) => {
             e.stopPropagation();
             void copyAgentText(text);
         });
@@ -2900,11 +2907,7 @@ export class AgentChat extends Model {
     private appendUserMessage(text: string, timestamp?: number, entryId?: string, blockHTML?: string) {
         const el = this.createUserMessage(text, timestamp, entryId, blockHTML);
         this.messagesContainer.appendChild(el);
-        postRender(el, this.app);
-        this.composer?.renderBlockHTML(bodyElement, () => {
-            disabledWYSIWYG(bodyElement);
-        });
-        disabledWYSIWYG(bodyElement);
+        this.renderUserMessage(el);
         this.scrollToBottom(true);
     }
 
@@ -3692,7 +3695,7 @@ export class AgentChat extends Model {
         }
         this.hasTitled = true;
         const requestSessionID = this.sessionId;
-        const userEntry = this.entries.find((entry): entry is UserEntry => entry.type === "user");
+        const userEntry = this.entries.find((e): e is { type: "user"; content: string } => e.type === "user");
         const userMsg = userEntry?.content?.slice(0, 500) || "";
         fetch("/api/ai/agent/title", {
             method: "POST",

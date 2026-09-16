@@ -714,6 +714,8 @@ const updateBlock = (updateElements: Element[], protyle: IProtyle, operation: IO
         if (tableScrollTop > 0) {
             item.querySelector("table").scrollTop = tableScrollTop;
         }
+        const restoredSelectionModeElement = restoreBlockSelectionModeState(protyle.wysiwyg.element, item,
+            selectionModeState);
 
         const wbrElement = item.querySelector("wbr");
         const codeElement = item.getAttribute("data-type") === "NodeCodeBlock" ? item.querySelector(".hljs") : undefined;

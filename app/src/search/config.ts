@@ -192,6 +192,8 @@ export const getGlobalSearchPath = (config: Config.IUILayoutTabSearchConfig) => 
     };
 };
 
+export const resolveGlobalSearchScope = getGlobalSearchPath;
+
 export const resolveSearchConfigUpdate = (options: {
     selectedConfig: Config.IUILayoutTabSearchConfig,
     currentConfig: Config.IUILayoutTabSearchConfig,
