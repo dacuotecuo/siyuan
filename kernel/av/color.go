@@ -1,18 +1,6 @@
-// SiYuan - From thought to insight, with agents
+// SiYuan - https://github.com/siyuan-note/siyuan
 // Copyright (c) 2020-present, b3log.org
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU Affero General Public License for more details.
-//
-// You should have received a copy of the GNU Affero General Public License
-// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+// SPDX-License-Identifier: AGPL-3.0-or-later
 
 package av
 
@@ -339,6 +327,11 @@ func (av *AttributeView) resolveDirectViewGroupColors(view *View, colors []*Attr
 	if nil == view {
 		return
 	}
+	for _, rule := range view.ConditionalColors {
+		if nil != rule && nil != rule.Color {
+			rule.Color.ResolvedColor = resolveColor(rule.Color.Color, colors)
+		}
+	}
 	if nil != view.GroupKey {
 		if key, err := av.GetKey(view.GroupKey.ID); nil == err &&
 			(KeyTypeSelect == key.Type || KeyTypeMSelect == key.Type) {
@@ -428,6 +421,7 @@ func (av *AttributeView) visitPersistedColorHolders(visitOption func(*SelectOpti
 			}
 		}
 	}
+	av.visitAutomationValues(func(value *Value) { walkValueSelects(value, visitSelection) })
 }
 
 func visitKeyColorHolders(key *Key, visitOption func(*SelectOption), visitSelection func(*ValueSelect)) {
@@ -467,14 +461,25 @@ func visitViewColorHolders(view *View, visitOption func(*SelectOption), visitSel
 	visitKeyColorHolders(view.GroupKey, visitOption, visitSelection)
 	walkValueSelects(view.GroupVal, visitSelection)
 	visitFilterColorHolders(view.Filters, visitSelection)
+	for _, rule := range view.ConditionalColors {
+		if nil != rule {
+			if nil != rule.Color {
+				visitSelection(rule.Color)
+			}
+			visitFilterColorHolders([]*ViewFilter{rule.Filter}, visitSelection)
+		}
+	}
 	if nil != view.GroupCalc && nil != view.GroupCalc.FieldCalc {
 		walkValueSelects(view.GroupCalc.FieldCalc.Result, visitSelection)
 	}
-	if nil != view.Table {
-		if nil != view.Table.BaseLayout {
-			visitFilterColorHolders(view.Table.Filters, visitSelection)
+	for _, layout := range view.TableLayouts() {
+		if nil == layout {
+			continue
 		}
-		for _, column := range view.Table.Columns {
+		if nil != layout.BaseLayout {
+			visitFilterColorHolders(layout.Filters, visitSelection)
+		}
+		for _, column := range layout.Columns {
 			if nil == column {
 				continue
 			}
@@ -608,6 +613,7 @@ func (av *AttributeView) usedCustomColorIndexSet() map[int]struct{} {
 			}
 		}
 	}
+	av.visitAutomationValues(func(value *Value) { collectValueCustomColorIndexes(value, addColor) })
 	return ret
 }
 
@@ -666,10 +672,21 @@ func collectViewCustomColorIndexes(view *View, attrView *AttributeView, addColor
 	}
 	collectKeyCustomColorIndexes(view.GroupKey, addColor)
 	collectFilterCustomColorIndexes(view.Filters, attrView, addColor)
+	for _, rule := range view.ConditionalColors {
+		if nil != rule {
+			if nil != rule.Color {
+				addColor(rule.Color.Color)
+			}
+			collectFilterCustomColorIndexes([]*ViewFilter{rule.Filter}, attrView, addColor)
+		}
+	}
 	collectValueCustomColorIndexes(view.GroupVal, addColor)
-	if nil != view.Table {
-		if nil != view.Table.BaseLayout {
-			collectFilterCustomColorIndexes(view.Table.Filters, attrView, addColor)
+	for _, layout := range view.TableLayouts() {
+		if nil == layout {
+			continue
+		}
+		if nil != layout.BaseLayout {
+			collectFilterCustomColorIndexes(layout.Filters, attrView, addColor)
 		}
 	}
 	if nil != view.Gallery {

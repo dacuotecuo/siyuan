@@ -1,18 +1,6 @@
-// SiYuan - From thought to insight, with agents
+// SiYuan - https://github.com/siyuan-note/siyuan
 // Copyright (c) 2020-present, b3log.org
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU Affero General Public License for more details.
-//
-// You should have received a copy of the GNU Affero General Public License
-// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+// SPDX-License-Identifier: AGPL-3.0-or-later
 
 package model
 
@@ -20,11 +8,13 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"slices"
 	"sort"
 	"sync"
 
 	"github.com/siyuan-note/filelock"
 	"github.com/siyuan-note/siyuan/kernel/conf"
+	"github.com/siyuan-note/siyuan/kernel/filesys"
 	"github.com/siyuan-note/siyuan/kernel/util"
 )
 
@@ -53,6 +43,7 @@ type encryptedBoxLifecycle struct {
 	state            EncryptedBoxState
 	acceptOperations bool
 	activeOperations int
+	assetCleanup     bool
 }
 
 func holdEncryptedBoxTransition(boxID string) func() {
@@ -118,7 +109,8 @@ func NotebookCryptoLifecycleState(hasRecoveryDependency bool) NotebookCryptoStat
 		}
 		return NotebookCryptoStateRecoveryRequired
 	}
-	if hasRecoveryDependency || filelock.IsExist(dataCryptoBackupPath()) {
+	if hasRecoveryDependency || filelock.IsExist(dataCryptoBackupPath()) || len(notebookCrypto.MasterSalt) != 0 ||
+		len(notebookCrypto.KEKVerifier) != 0 || len(notebookCrypto.HistoryKEKs) != 0 || notebookCrypto.BackupID != "" || len(notebookCrypto.KEKMAC) != 0 {
 		return NotebookCryptoStateRecoveryRequired
 	}
 	return NotebookCryptoStateDisabled
@@ -146,12 +138,21 @@ func notebookCryptoConfigurationComplete(notebookCrypto *conf.NotebookCrypto) bo
 
 // AcquireEncryptedBoxOperation 为需要把明文结果保留到响应结束的操作取得准入租约。
 func AcquireEncryptedBoxOperation(boxID string) error {
+	if err := checkDataImportRecovery(); err != nil {
+		return err
+	}
 	if boxID == "" || !IsEncryptedBox(boxID) {
 		return nil
+	}
+	if err := filesys.CheckDocumentAddressing(boxID); err != nil {
+		return err
 	}
 	lifecycle := getEncryptedBoxLifecycle(boxID)
 	lifecycle.lock.Lock()
 	defer lifecycle.lock.Unlock()
+	for lifecycle.assetCleanup && lifecycle.state == EncryptedBoxStateUnlocked {
+		lifecycle.condition.Wait()
+	}
 	if lifecycle.state == EncryptedBoxStateLocked && IsBoxUnlocked(boxID) {
 		lifecycle.state = EncryptedBoxStateUnlocked
 		lifecycle.acceptOperations = true
@@ -183,6 +184,7 @@ func beginEncryptedBoxLock(boxID string) {
 	lifecycle.lock.Lock()
 	lifecycle.state = EncryptedBoxStateLocking
 	lifecycle.acceptOperations = false
+	LivePhotoPreviews.Clear(boxID)
 	for lifecycle.activeOperations > 0 {
 		lifecycle.condition.Wait()
 	}
@@ -237,16 +239,16 @@ func AcquireEncryptedBoxOperations(ctx context.Context, boxIDs []string) (releas
 	var acquired []string
 	for _, boxID := range sortedBoxIDs {
 		if err = AcquireEncryptedBoxOperation(boxID); err != nil {
-			for i := len(acquired) - 1; i >= 0; i-- {
-				ReleaseEncryptedBoxOperation(acquired[i])
+			for _, a := range slices.Backward(acquired) {
+				ReleaseEncryptedBoxOperation(a)
 			}
 			return func() {}, err
 		}
 		acquired = append(acquired, boxID)
 	}
 	return func() {
-		for i := len(acquired) - 1; i >= 0; i-- {
-			ReleaseEncryptedBoxOperation(acquired[i])
+		for _, a := range slices.Backward(acquired) {
+			ReleaseEncryptedBoxOperation(a)
 		}
 	}, nil
 }
@@ -281,7 +283,7 @@ func (scope *encryptedBoxOperationScope) release() {
 	scope.boxIDs = nil
 	scope.boxIDSet = nil
 	scope.lock.Unlock()
-	for i := len(boxIDs) - 1; i >= 0; i-- {
-		ReleaseEncryptedBoxOperation(boxIDs[i])
+	for _, boxID := range slices.Backward(boxIDs) {
+		ReleaseEncryptedBoxOperation(boxID)
 	}
 }

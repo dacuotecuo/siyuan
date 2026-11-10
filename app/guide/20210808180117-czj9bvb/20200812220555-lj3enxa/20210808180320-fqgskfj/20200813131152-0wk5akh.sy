@@ -6,7 +6,7 @@
 		"id": "20200813131152-0wk5akh",
 		"title": "在内容块中遨游",
 		"type": "doc",
-		"updated": "20260820190627"
+		"updated": "20261024163013"
 	},
 	"Children": [
 		{
@@ -229,7 +229,7 @@
 			"HeadingLevel": 2,
 			"Properties": {
 				"id": "20210104090757-xwom8ia",
-				"updated": "20260820190627"
+				"updated": "20261024160716"
 			},
 			"Children": [
 				{
@@ -261,21 +261,30 @@
 			"Type": "NodeParagraph",
 			"Properties": {
 				"id": "20210428225151-3kj13k3",
-				"updated": "20260820190627"
+				"updated": "20261024160716"
 			},
 			"Children": [
 				{
 					"Type": "NodeText",
-					"Data": "按住 "
+					"Data": "点击节点可打开对应内容块；按住 "
 				},
 				{
 					"Type": "NodeTextMark",
-					"TextMarkType": "kbd",
+					"TextMarkType": "code",
 					"TextMarkTextContent": "Ctrl"
 				},
 				{
 					"Type": "NodeText",
-					"Data": "​ 点击节点：跳转到该节点。"
+					"Data": "（macOS 为 "
+				},
+				{
+					"Type": "NodeTextMark",
+					"TextMarkType": "code",
+					"TextMarkTextContent": "Command"
+				},
+				{
+					"Type": "NodeText",
+					"Data": "）点击可打开浮窗预览。"
 				}
 			]
 		},
@@ -285,7 +294,7 @@
 			"HeadingLevel": 2,
 			"Properties": {
 				"id": "20200920194146-psjundj",
-				"updated": "20260820190627"
+				"updated": "20261024163013"
 			},
 			"Children": [
 				{
@@ -440,12 +449,83 @@
 			]
 		},
 		{
+			"ID": "20260909204559-ycki0id",
+			"Type": "NodeHeading",
+			"Properties": {
+				"id": "20260909204559-ycki0id",
+				"updated": "20260909204559"
+			},
+			"Children": [
+				{
+					"Type": "NodeText",
+					"Data": "筛选与折叠"
+				}
+			],
+			"HeadingLevel": 3
+		},
+		{
+			"ID": "20260909204559-jqwxd2l",
+			"Type": "NodeParagraph",
+			"Properties": {
+				"id": "20260909204559-jqwxd2l",
+				"updated": "20260909204559"
+			},
+			"Children": [
+				{
+					"Type": "NodeText",
+					"Data": "在底部反链或侧栏反链中，打开 "
+				},
+				{
+					"Type": "NodeTextMark",
+					"TextMarkType": "kbd",
+					"TextMarkTextContent": "筛选反链来源"
+				},
+				{
+					"Type": "NodeText",
+					"Data": "，可以筛选来源或按块类型折叠条目。这两类设置的保存方式不同。"
+				}
+			]
+		},
+		{
+			"ID": "20260909204559-glui8h0",
+			"Type": "NodeParagraph",
+			"Properties": {
+				"id": "20260909204559-glui8h0",
+				"updated": "20260909204559"
+			},
+			"Children": [
+				{
+					"Type": "NodeText",
+					"Data": "日记、笔记本、排除当前文档反链和排除引用属于临时筛选，只在当前面板中生效，不会持久保存，也不会在底部反链与侧栏反链之间同步。"
+				}
+			]
+		},
+		{
+			"ID": "20260909204559-e7i9ulj",
+			"Type": "NodeParagraph",
+			"Properties": {
+				"id": "20260909204559-e7i9ulj",
+				"updated": "20260909204559"
+			},
+			"Children": [
+				{
+					"Type": "NodeTextMark",
+					"TextMarkType": "kbd",
+					"TextMarkTextContent": "按块类型折叠"
+				},
+				{
+					"Type": "NodeText",
+					"Data": " 的设置会被记住。例如，在文档 A 的底部反链中设置折叠列表块，重新打开后仍会保留，文档 B 不受影响。同一文档的底部反链和侧栏反链分别记忆。查看某个内容块的反链时，也会单独记忆其折叠设置。"
+				}
+			]
+		},
+		{
 			"ID": "20210106201736-oyu11fw",
 			"Type": "NodeHeading",
 			"HeadingLevel": 3,
 			"Properties": {
 				"id": "20210106201736-oyu11fw",
-				"updated": "20260803163440"
+				"updated": "20261024163013"
 			},
 			"Children": [
 				{
@@ -463,7 +543,7 @@
 			"Type": "NodeParagraph",
 			"Properties": {
 				"id": "20210106201743-z1iz0ce",
-				"updated": "20260803163440"
+				"updated": "20261024163013"
 			},
 			"Children": [
 				{
@@ -477,7 +557,7 @@
 				},
 				{
 					"Type": "NodeText",
-					"Data": "​ - "
+					"Data": " - "
 				},
 				{
 					"Type": "NodeTextMark",
@@ -486,7 +566,7 @@
 				},
 				{
 					"Type": "NodeText",
-					"Data": "​ - "
+					"Data": " - "
 				},
 				{
 					"Type": "NodeTextMark",
@@ -495,7 +575,7 @@
 				},
 				{
 					"Type": "NodeText",
-					"Data": " ​ 中设置搜索范围），搜索结果为包含这些关键字的内容块。"
+					"Data": " 中设置搜索范围），搜索结果为包含这些关键字的内容块。"
 				}
 			]
 		},

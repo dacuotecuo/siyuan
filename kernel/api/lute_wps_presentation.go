@@ -1,18 +1,6 @@
-// SiYuan - From thought to insight, with agents
+// SiYuan - https://github.com/siyuan-note/siyuan
 // Copyright (c) 2020-present, b3log.org
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU Affero General Public License for more details.
-//
-// You should have received a copy of the GNU Affero General Public License
-// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+// SPDX-License-Identifier: AGPL-3.0-or-later
 
 package api
 
@@ -28,8 +16,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/88250/gulu"
 	"github.com/gin-gonic/gin"
+	"github.com/siyuan-note/siyuan/kernel/apicontract"
 	"github.com/siyuan-note/siyuan/kernel/util"
 )
 
@@ -51,11 +39,6 @@ const (
 	presentationMLNamespace            = "http://schemas.openxmlformats.org/presentationml/2006/main"
 	presentationMLStrictNamespace      = "http://purl.oclc.org/ooxml/presentationml/main"
 )
-
-type wpsPresentationConversionResult struct {
-	Converted bool   `json:"converted"`
-	DOM       string `json:"dom"`
-}
 
 type wpsPresentationBulletKind uint8
 
@@ -143,31 +126,16 @@ type wpsPresentationListStackEntry struct {
 	list     *wpsPresentationHTMLList
 }
 
-func wpsPresentation2BlockDOM(c *gin.Context) {
-	ret := gulu.Ret.NewResult()
-	result := &wpsPresentationConversionResult{}
-	ret.Data = result
-	defer c.JSON(http.StatusOK, ret)
+var wpsPresentation2BlockDOM = contractHandler(apicontract.WPSPresentation2BlockDOM, func(c *gin.Context, request apicontract.WPSPresentationRequest) apicontract.Response[apicontract.WPSPresentationData] {
+	result := apicontract.WPSPresentationData{}
+	if request.Type == "texts" || request.Type == "objects" {
+		result.DOM, result.Converted = convertWPSPresentation(request.Data, request.Text, request.Type)
+	}
+	return apicontract.Success(result)
+}, func(c *gin.Context) *apicontract.Response[apicontract.WPSPresentationData] {
 	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxWPSPresentationRequestBytes)
-
-	arg, ok := util.JsonArg(c, ret)
-	if !ok {
-		return
-	}
-
-	var encoded, text, clipboardType string
-	if !util.ParseJsonArgs(arg, ret,
-		util.BindJsonArg("data", &encoded, true, true),
-		util.BindJsonArg("text", &text, false, false),
-		util.BindJsonArg("type", &clipboardType, true, true)) {
-		return
-	}
-	if clipboardType != "texts" && clipboardType != "objects" {
-		return
-	}
-
-	result.DOM, result.Converted = convertWPSPresentation(encoded, text, clipboardType)
-}
+	return nil
+})
 
 func convertWPSPresentation(encoded, text, clipboardType string) (dom string, converted bool) {
 	htmlContent, converted := wpsPresentationHTML(encoded, text, clipboardType)

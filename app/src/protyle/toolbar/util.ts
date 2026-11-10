@@ -1,6 +1,8 @@
-import {fetchPost, fetchSyncPost} from "../../util/fetch";
+import {fetchSyncPost} from "../../util/fetch";
+import {markToolbarHotkey} from "./hotkey";
 import {Constants} from "../../constants";
-import {focusByRange, focusByWbr} from "../util/selection";
+import {focusByWbr} from "../util/selection";
+import {focusByRange} from "../util/selectionOffsets";
 import {isDisabledFeature, writeText} from "../util/compatibility";
 import {isArrayEqual} from "../../util/functions";
 import {hasSameTextStyle} from "./Font";
@@ -28,21 +30,25 @@ export const clearTemplatePreview = (element: Element) => {
 };
 
 export const previewTemplate = (pathString: string, element: Element, parentId: string, source?: string) => {
-    clearTemplatePreview(element);
     if (!pathString || !element.isConnected || element.closest(".fn__none")) {
+        clearTemplatePreview(element);
         return;
     }
     const request = {};
     templatePreviewRequests.set(element, request);
-    fetchPost("/api/template/render", {
+    fetchSyncPost("/api/template/render", {
         id: parentId,
         path: pathString,
         mode: "preview",
         preview: true,
         ...(source === undefined ? {} : {content: source})
-    }, (response) => {
+    }).then((response) => {
         // 切换模板或关闭预览后，忽略先前请求的返回结果。
-        if (templatePreviewRequests.get(element) !== request || !element.isConnected || response.code !== 0) {
+        if (templatePreviewRequests.get(element) !== request || !element.isConnected) {
+            return;
+        }
+        clearTemplatePreview(element);
+        if (response.code !== 0) {
             return;
         }
         const content = normalizeHTMLAssetIFrameBlockDOM(response.data.content.replace(/contenteditable="true"/g, ""));
@@ -52,6 +58,10 @@ export const previewTemplate = (pathString: string, element: Element, parentId: 
                 window.siyuan.languages.newSubDoc));
         }
         tabsRender(element.firstElementChild, {label: window.siyuan.languages.tabItem});
+    }).catch(() => {
+        if (templatePreviewRequests.get(element) === request) {
+            clearTemplatePreview(element);
+        }
     });
 };
 
@@ -186,6 +196,11 @@ export const removeInlineType = (inlineElement: HTMLElement, type: string, range
 
 export const toolbarKeyToMenu = (toolbar: Array<string | IMenuItem>) => {
     const toolbarItem: IMenuItem [] = [{
+        name: "block-type",
+        lang: "turnInto",
+        icon: "iconParagraph",
+        tipPosition: "n",
+    }, {
         name: "block-ref",
         hotkey: window.siyuan.config.keymap.editor.insert.ref.custom,
         lang: "ref",
@@ -207,7 +222,7 @@ export const toolbarKeyToMenu = (toolbar: Array<string | IMenuItem>) => {
             const editor = protyle.protyle;
             const range = editor.toolbar.range?.cloneRange();
             if (range && !range.collapsed) {
-                AIActions([], editor, range);
+                AIActions([], editor, range, editor.toolbar.element.querySelector('[data-type="ai"]'));
             }
         },
     }, {
@@ -289,10 +304,20 @@ export const toolbarKeyToMenu = (toolbar: Array<string | IMenuItem>) => {
         icon: "iconFont",
         tipPosition: "n",
     }, {
+        name: "font-family",
+        lang: "fontFamily",
+        icon: "iconFont",
+        tipPosition: "n",
+    }, {
+        name: "font-size",
+        lang: "fontSize",
+        icon: "iconFont",
+        tipPosition: "n",
+    }, {
         name: "clear",
         lang: "clearInline",
         hotkey: window.siyuan.config.keymap.editor.insert.clearInline.custom,
-        icon: "iconClear",
+        icon: "iconEraser",
         tipPosition: "n",
     }, {
         name: "format-painter",
@@ -308,10 +333,12 @@ export const toolbarKeyToMenu = (toolbar: Array<string | IMenuItem>) => {
         toolbarItem.find((defaultMenuItem: IMenuItem) => {
             if (typeof menuItem === "string" && defaultMenuItem.name === menuItem) {
                 currentMenuItem = defaultMenuItem;
+                markToolbarHotkey(currentMenuItem, menuItem);
                 return true;
             }
             if (typeof menuItem === "object" && defaultMenuItem.name === menuItem.name) {
                 currentMenuItem = Object.assign({}, defaultMenuItem, menuItem);
+                markToolbarHotkey(currentMenuItem, menuItem);
                 return true;
             }
         });
@@ -366,6 +393,9 @@ export const copyTextByType = async (ids: string[],
         }
         if (type === "ref") {
             const response = await fetchSyncPost("/api/block/getRefText", {id});
+            if (response.code !== 0) {
+                return;
+            }
             text += `((${id} '${response.data}'))`;
         } else if (type === "blockEmbed") {
             text += `{{select * from blocks where id='${id}'}}`;
@@ -373,6 +403,9 @@ export const copyTextByType = async (ids: string[],
             text += `siyuan://blocks/${id}`;
         } else if (type === "protocolMd") {
             const response = await fetchSyncPost("/api/block/getRefText", {id});
+            if (response.code !== 0) {
+                return;
+            }
             text += `[${response.data.replace("[", "\\[").replace("]", "\\]")}](siyuan://blocks/${id})`;
         } else if (type === "hPath") {
             const response = await fetchSyncPost("/api/filetree/getHPathByID", {id});

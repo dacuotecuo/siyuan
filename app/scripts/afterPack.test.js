@@ -4,9 +4,33 @@ const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
 const {Arch} = require("electron-builder");
-const {extractPackagedPandoc} = require("./afterPack");
+const {extractPackagedPandoc, validatePackagedKernel} = require("./afterPack");
 
 const PANDOC_ZIP = "UEsDBBQAAAAIAFxK/lz1kGVQDQAAAAsAAAAOAAAAYmluL3BhbmRvYy5leGUrSS0u0S1IzEvJTwYAUEsDBBQAAAAIAFxK/lzzFYE4CwAAAAkAAAANAAAAQ09QWVJJR0hULnR4dEvOL6gsykzPKAEAUEsBAhQAFAAAAAgAXEr+XPWQZVANAAAACwAAAA4AAAAAAAAAAAAAAIABAAAAAGJpbi9wYW5kb2MuZXhlUEsBAhQAFAAAAAgAXEr+XPMVgTgLAAAACQAAAA0AAAAAAAAAAAAAAIABOQAAAENPUFlSSUdIVC50eHRQSwUGAAAAAAIAAgB3AAAAbwAAAAAA";
+
+test("validatePackagedKernel rejects a missing macOS kernel", async () => {
+  const appOutDir = await fs.mkdtemp(path.join(os.tmpdir(), "siyuan-after-pack-"));
+  try {
+    await assert.rejects(
+      validatePackagedKernel(appOutDir, {appInfo: {productFilename: "SiYuan"}}, "darwin"),
+      /Packaged kernel not found/
+    );
+  } finally {
+    await fs.rm(appOutDir, {force: true, recursive: true});
+  }
+});
+
+test("validatePackagedKernel accepts an executable macOS kernel", async () => {
+  const appOutDir = await fs.mkdtemp(path.join(os.tmpdir(), "siyuan-after-pack-"));
+  try {
+    const kernelPath = path.join(appOutDir, "SiYuan.app", "Contents", "Resources", "kernel", "SiYuan-Kernel");
+    await fs.mkdir(path.dirname(kernelPath), {recursive: true});
+    await fs.writeFile(kernelPath, "kernel", {mode: 0o755});
+    await validatePackagedKernel(appOutDir, {appInfo: {productFilename: "SiYuan"}}, "darwin");
+  } finally {
+    await fs.rm(appOutDir, {force: true, recursive: true});
+  }
+});
 
 test("extractPackagedPandoc extracts the executable and removes the archive", async () => {
   const appOutDir = await fs.mkdtemp(path.join(os.tmpdir(), "siyuan-after-pack-"));

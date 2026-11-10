@@ -84,6 +84,7 @@ export class Tab {
             this.headElement.addEventListener("dragstart", (event: DragEvent & { target: HTMLElement }) => {
                 window.getSelection().removeAllRanges();
                 hideTooltip();
+                window.siyuan.menus.menu.remove();
                 const tabElement = hasClosestByTag(event.target, "LI");
                 if (tabElement) {
                     event.dataTransfer.setData("text/html", tabElement.outerHTML);
@@ -176,13 +177,14 @@ export class Tab {
     public updateTitle(title: string) {
         this.title = title;
         this.headElement.querySelector(".item__text").innerHTML = escapeHtml(title);
+        this.updateWindowTitle();
+    }
 
-        if (document.querySelector(".layout__wnd--active .layout-tab-bar .item--focus")) {
-            if (this.headElement.closest(".layout__wnd--active")) {
-                setTitle(title);
-            }
-        } else if (this.headElement.classList.contains("item--focus")) {
-            setTitle(title);
+    private updateWindowTitle() {
+        const activeHeader = document.querySelector(".layout__wnd--active .layout-tab-bar .item--focus") ||
+            document.querySelector(".layout-tab-bar .item--focus");
+        if (activeHeader === this.headElement) {
+            setTitle(this.title, false, this.headElement.querySelector(".item__icon"));
         }
     }
 
@@ -239,6 +241,7 @@ export class Tab {
             this.headElement.querySelector(".item__icon")?.remove();
             this.headElement.querySelector(".item__text").classList.remove("fn__none");
         }
+        this.updateWindowTitle();
     }
 
     public unpin() {

@@ -1,1390 +1,525 @@
-// SiYuan - From thought to insight, with agents
+// SiYuan - https://github.com/siyuan-note/siyuan
 // Copyright (c) 2020-present, b3log.org
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU Affero General Public License for more details.
-//
-// You should have received a copy of the GNU Affero General Public License
-// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+// SPDX-License-Identifier: AGPL-3.0-or-later
 
 package api
 
 import (
 	"errors"
 	"fmt"
-	"net/http"
+	"strings"
 
-	"github.com/88250/gulu"
 	"github.com/gin-gonic/gin"
-	goccyJSON "github.com/goccy/go-json"
 	"github.com/siyuan-note/logging"
+	"github.com/siyuan-note/siyuan/kernel/apicontract"
 	"github.com/siyuan-note/siyuan/kernel/av"
 	"github.com/siyuan-note/siyuan/kernel/model"
 	"github.com/siyuan-note/siyuan/kernel/treenode"
 	"github.com/siyuan-note/siyuan/kernel/util"
 )
 
-func removeUnusedAttributeView(c *gin.Context) {
-	ret := gulu.Ret.NewResult()
-	defer c.JSON(http.StatusOK, ret)
-
-	arg, ok := util.JsonArg(c, ret)
-	if !ok {
-		return
+var removeUnusedAttributeView = contractHandler(apicontract.RemoveUnusedAttributeView, func(c *gin.Context, request apicontract.RemoveUnusedAttributeViewRequest) apicontract.Response[apicontract.AVIDData] {
+	if err := util.ValidateID(request.ID); err != nil {
+		return apicontract.FailureFrom[apicontract.AVIDData](err)
 	}
-
-	avID := arg["id"].(string)
-	if util.InvalidIDPattern(avID, ret) {
-		return
+	if err := model.RemoveUnusedAttributeView(request.ID); err != nil {
+		return apicontract.Failure[apicontract.AVIDData](-1, err.Error())
 	}
-	model.RemoveUnusedAttributeView(avID)
-	ret.Data = map[string]any{
-		"id": avID,
+	return apicontract.Success(apicontract.AVIDData{ID: request.ID})
+})
+
+var removeUnusedAttributeViews = contractHandler(apicontract.RemoveUnusedAttributeViews, func(c *gin.Context, request apicontract.EmptyRequest) apicontract.Response[apicontract.AVPathsData] {
+	defer beginSettingTask("clearingUnusedAttributeViews")()
+	paths, err := model.RemoveUnusedAttributeViews()
+	if err != nil {
+		return apicontract.Failure[apicontract.AVPathsData](-1, err.Error())
 	}
-}
+	return apicontract.Success(apicontract.AVPathsData{Paths: paths})
+})
 
-func removeUnusedAttributeViews(c *gin.Context) {
-	ret := gulu.Ret.NewResult()
-	defer c.JSON(http.StatusOK, ret)
-
-	paths := model.RemoveUnusedAttributeViews()
-	ret.Data = map[string]any{
-		"paths": paths,
+var getUnusedAttributeViews = contractHandler(apicontract.GetUnusedAttributeViews, func(c *gin.Context, request apicontract.EmptyRequest) apicontract.Response[[]*apicontract.AssetUnusedItem] {
+	values, err := model.UnusedAttributeViews(true)
+	if err != nil {
+		return apicontract.Failure[[]*apicontract.AssetUnusedItem](-1, err.Error())
 	}
-}
-
-func getUnusedAttributeViews(c *gin.Context) {
-	ret := gulu.Ret.NewResult()
-	defer c.JSON(http.StatusOK, ret)
-
-	unusedAttributeViews := model.UnusedAttributeViews(true)
-	total := len(unusedAttributeViews)
-
-	const maxUnusedAttributeViews = 512
-	if total > maxUnusedAttributeViews {
-		unusedAttributeViews = unusedAttributeViews[:maxUnusedAttributeViews]
-		util.PushMsg(fmt.Sprintf(model.Conf.Language(279), total, maxUnusedAttributeViews), 5000)
+	total := len(values)
+	if total > 512 {
+		values = values[:512]
+		util.PushMsgWithApp(resolveRequestAppID(c, ""), fmt.Sprintf(model.Conf.Language(279), total, 512), 5000)
 	}
+	return apicontract.Success(assetUnusedItems(values))
+})
 
-	ret.Data = unusedAttributeViews
-}
+var getAttributeViewItemIDsByBoundIDs = contractHandler(apicontract.GetAttributeViewItemIDsByBoundIDs, func(c *gin.Context, request apicontract.GetAttributeViewItemIDsByBoundIDsRequest) apicontract.Response[map[string]string] {
+	return apicontract.Success(model.GetAttributeViewItemIDs(request.AvID, append([]string(nil), request.BlockIDs...)))
+})
 
-func getAttributeViewItemIDsByBoundIDs(c *gin.Context) {
-	ret := gulu.Ret.NewResult()
-	defer c.JSON(http.StatusOK, ret)
+var getAttributeViewBoundBlockIDsByItemIDs = contractHandler(apicontract.GetAttributeViewBoundBlockIDsByItemIDs, func(c *gin.Context, request apicontract.GetAttributeViewBoundBlockIDsByItemIDsRequest) apicontract.Response[map[string]string] {
+	return apicontract.Success(model.GetAttributeViewBoundBlockIDs(request.AvID, append([]string(nil), request.ItemIDs...)))
+})
 
-	arg, ok := util.JsonArg(c, ret)
-	if !ok {
-		return
+var getAttributeViewItemStatuses = contractHandler(apicontract.GetAttributeViewItemStatuses, func(c *gin.Context, request apicontract.GetAttributeViewItemStatusesRequest) apicontract.Response[map[string]string] {
+	if err := holdAttributeViewRequest(c, request.BlockID, request.ID); err != nil {
+		return apicontract.Failure[map[string]string](-1, model.Conf.Language(314))
 	}
-
-	avID := arg["avID"].(string)
-	blockIDsArg := arg["blockIDs"].([]any)
-	var blockIDs []string
-	for _, v := range blockIDsArg {
-		blockIDs = append(blockIDs, v.(string))
+	values, err := model.GetAttributeViewItemStatuses(request.BlockID, request.ID, request.ViewID, request.Query, append([]string{}, request.ItemIDs...))
+	if err != nil {
+		return apicontract.Failure[map[string]string](-1, err.Error())
 	}
-
-	ret.Data = model.GetAttributeViewItemIDs(avID, blockIDs)
-}
-
-func getAttributeViewBoundBlockIDsByItemIDs(c *gin.Context) {
-	ret := gulu.Ret.NewResult()
-	defer c.JSON(http.StatusOK, ret)
-
-	arg, ok := util.JsonArg(c, ret)
-	if !ok {
-		return
-	}
-
-	avID := arg["avID"].(string)
-	itemIDsArg := arg["itemIDs"].([]any)
-	var itemIDs []string
-	for _, v := range itemIDsArg {
-		itemIDs = append(itemIDs, v.(string))
-	}
-
-	ret.Data = model.GetAttributeViewBoundBlockIDs(avID, itemIDs)
-}
-
-func getAttributeViewItemStatuses(c *gin.Context) {
-	ret := gulu.Ret.NewResult()
-	defer c.JSON(http.StatusOK, ret)
-
-	arg, ok := util.JsonArg(c, ret)
-	if !ok {
-		return
-	}
-
-	avID := arg["id"].(string)
-	blockID, _ := arg["blockID"].(string)
-	viewID, _ := arg["viewID"].(string)
-	query, _ := arg["query"].(string)
-	itemIDsArg := arg["itemIDs"].([]any)
-	itemIDs := make([]string, 0, len(itemIDsArg))
-	for _, itemIDArg := range itemIDsArg {
-		itemIDs = append(itemIDs, itemIDArg.(string))
-	}
-	if err := holdAttributeViewRequest(c, blockID, avID); nil != err {
-		ret.Code = -1
-		ret.Msg = model.Conf.Language(314)
-		return
-	}
-
-	statuses, err := model.GetAttributeViewItemStatuses(blockID, avID, viewID, query, itemIDs)
-	if nil != err {
-		ret.Code = -1
-		ret.Msg = err.Error()
-		return
-	}
-	ret.Data = statuses
-}
+	return apicontract.Success(values)
+})
 
 // getAttributeViewAddingBlockDefaultValues 用于获取添加块时的默认值。
 // 存在过滤或分组条件时，添加块时需要填充默认值到过滤字段或分组字段中，前端需要调用该接口来获取这些默认值以便填充。
-func getAttributeViewAddingBlockDefaultValues(c *gin.Context) {
-	ret := gulu.Ret.NewResult()
-	defer c.JSON(http.StatusOK, ret)
-
-	arg, ok := util.JsonArg(c, ret)
-	if !ok {
-		return
+var getAttributeViewAddingBlockDefaultValues = contractHandler(apicontract.GetAttributeViewAddingBlockDefaultValues, func(c *gin.Context, request apicontract.GetAttributeViewAddingBlockDefaultValuesRequest) apicontract.Response[apicontract.AVValuesData] {
+	values, err := model.GetAttrViewAddingBlockDefaultValues(request.AvID, request.BlockID, request.ViewID, request.GroupID, request.PreviousID, request.AddingBlockID)
+	if err != nil {
+		return apicontract.Failure[apicontract.AVValuesData](-1, err.Error())
 	}
-
-	avID := arg["avID"].(string)
-	blockID, _ := arg["blockID"].(string)
-	var viewID string
-	if viewIDArg := arg["viewID"]; nil != viewIDArg {
-		viewID = viewIDArg.(string)
-	}
-	var groupID string
-	if groupIDArg := arg["groupID"]; nil != groupIDArg {
-		groupID = groupIDArg.(string)
-	}
-	var previousID string
-	if nil != arg["previousID"] {
-		previousID = arg["previousID"].(string)
-	}
-	var addingBlockID string
-	if nil != arg["addingBlockID"] {
-		addingBlockID = arg["addingBlockID"].(string)
-	}
-
-	values, err := model.GetAttrViewAddingBlockDefaultValues(avID, blockID, viewID, groupID, previousID, addingBlockID)
-	if nil != err {
-		ret.Code = -1
-		ret.Msg = err.Error()
-		return
-	}
-	if 1 > len(values) {
+	if len(values) == 0 {
 		values = nil
 	}
-	ret.Data = map[string]any{
-		"values": values,
-	}
-}
+	return apicontract.Success(apicontract.AVValuesData{Values: avContractMap(values, toContractAVValue)})
+})
 
-func batchReplaceAttributeViewBlocks(c *gin.Context) {
-	// Add kernel API `/api/av/batchReplaceAttributeViewBlocks` https://github.com/siyuan-note/siyuan/issues/15313
-	ret := gulu.Ret.NewResult()
-	defer c.JSON(http.StatusOK, ret)
-
-	arg, ok := util.JsonArg(c, ret)
-	if !ok {
-		return
-	}
-
-	avID := arg["avID"].(string)
-	isDetached := arg["isDetached"].(bool)
-	oldNewArg := arg["oldNew"].([]any)
-	var oldNew []map[string]string
-	for _, v := range oldNewArg {
-		for o, n := range v.(map[string]any) {
-			oldNew = append(oldNew, map[string]string{o: n.(string)})
+var batchReplaceAttributeViewBlocks = contractHandler(apicontract.BatchReplaceAttributeViewBlocks, func(c *gin.Context, request apicontract.BatchReplaceAttributeViewBlocksRequest) apicontract.Response[apicontract.Null] {
+	var values []map[string]string
+	for _, pairs := range request.OldNew {
+		for oldID, newID := range pairs {
+			values = append(values, map[string]string{oldID: newID})
 		}
 	}
+	if err := model.BatchReplaceAttributeViewBlocks(request.AvID, request.IsDetached, values); err != nil {
+		return apicontract.Failure[apicontract.Null](-1, err.Error())
+	}
+	model.ReloadAttrView(request.AvID)
+	return apicontract.Success(apicontract.Null{})
+})
 
-	err := model.BatchReplaceAttributeViewBlocks(avID, isDetached, oldNew)
+var setAttrViewGroup = contractHandler(apicontract.SetAttrViewGroup, func(c *gin.Context, request apicontract.SetAttrViewGroupRequest) apicontract.Response[apicontract.AVRenderResult] {
+	if err := model.SetAttributeViewGroup(request.AvID, request.BlockID, fromContractAVViewGroup(&request.Group)); err != nil {
+		return apicontract.Failure[apicontract.AVRenderResult](-1, err.Error())
+	}
+	var filter func(av.Viewable) av.Viewable
+	if model.IsReadOnlyRoleContext(c) {
+		access := model.GetPublishAccess()
+		filter = func(view av.Viewable) av.Viewable { return model.FilterViewByPublishAccess(c, access, view) }
+	}
+	return renderAttrView(request.BlockID, request.AvID, "", "", 1, -1, nil, "", false, request.IgnoreRows, "", "", filter, false)
+})
+
+var setAttrViewFilters = contractHandler(apicontract.SetAttrViewFilters, func(c *gin.Context, request apicontract.SetAttrViewFiltersRequest) apicontract.Response[apicontract.Null] {
+	values := make([]any, len(request.Data))
+	for i, value := range request.Data {
+		values[i] = fromContractAVViewFilter(value)
+	}
+	if err := model.SetAttrViewFilters(request.AvID, request.BlockID, values); err != nil {
+		return apicontract.Failure[apicontract.Null](-1, err.Error())
+	}
+	model.ReloadAttrView(request.AvID)
+	return apicontract.Success(apicontract.Null{})
+})
+
+var setAttrViewContextFilter = contractHandler(apicontract.SetAttrViewContextFilter, func(c *gin.Context, request apicontract.SetAttrViewContextFilterRequest) apicontract.Response[apicontract.AVContextFilterData] {
+	if err := holdAttributeViewRequest(c, request.BlockID, request.AvID); err != nil {
+		return apicontract.Failure[apicontract.AVContextFilterData](-1, model.Conf.Language(314))
+	}
+	value, err := model.SetAttributeViewContextFilter(request.BlockID, request.AvID, request.KeyID)
 	if err != nil {
-		ret.Code = -1
-		ret.Msg = err.Error()
-		return
+		return apicontract.Failure[apicontract.AVContextFilterData](-1, err.Error())
 	}
+	return apicontract.Success(apicontract.AVContextFilterData{ContextFilter: toContractAVAttributeViewContextFilter(value)})
+})
 
-	model.ReloadAttrView(avID)
-}
-
-func setAttrViewGroup(c *gin.Context) {
-	ret := gulu.Ret.NewResult()
-	arg, ok := util.JsonArg(c, ret)
-	if !ok {
-		c.JSON(http.StatusOK, ret)
-		return
+var setAttrViewSorts = contractHandler(apicontract.SetAttrViewSorts, func(c *gin.Context, request apicontract.SetAttrViewSortsRequest) apicontract.Response[apicontract.Null] {
+	values := make([]any, len(request.Data))
+	for i, value := range request.Data {
+		values[i] = fromContractAVViewSort(value)
 	}
-
-	avID := arg["avID"].(string)
-	blockID := arg["blockID"].(string)
-	groupArg := arg["group"].(map[string]any)
-	ignoreRows, _ := arg["ignoreRows"].(bool)
-
-	data, err := gulu.JSON.MarshalJSON(groupArg)
-	if nil != err {
-		ret.Code = -1
-		ret.Msg = err.Error()
-		c.JSON(http.StatusOK, ret)
-		return
+	if err := model.SetAttrViewSorts(request.AvID, request.BlockID, values); err != nil {
+		return apicontract.Failure[apicontract.Null](-1, err.Error())
 	}
-	group := &av.ViewGroup{}
-	if err = gulu.JSON.UnmarshalJSON(data, group); nil != err {
-		ret.Code = -1
-		ret.Msg = err.Error()
-		c.JSON(http.StatusOK, ret)
-		return
-	}
+	model.ReloadAttrView(request.AvID)
+	return apicontract.Success(apicontract.Null{})
+})
 
-	err = model.SetAttributeViewGroup(avID, blockID, group)
+var changeAttrViewLayout = contractHandler(apicontract.ChangeAttrViewLayout, func(c *gin.Context, request apicontract.ChangeAttrViewLayoutRequest) apicontract.Response[apicontract.AVRenderResult] {
+	if err := model.ChangeAttrViewLayout(request.BlockID, request.AvID, av.LayoutType(request.LayoutType)); err != nil {
+		return apicontract.Failure[apicontract.AVRenderResult](-1, err.Error())
+	}
+	var filter func(av.Viewable) av.Viewable
+	if model.IsReadOnlyRoleContext(c) {
+		access := model.GetPublishAccess()
+		filter = func(view av.Viewable) av.Viewable { return model.FilterViewByPublishAccess(c, access, view) }
+	}
+	return renderAttrView(request.BlockID, request.AvID, "", "", 1, -1, nil, "", false, false, "", "", filter, false)
+})
+
+var duplicateAttributeViewBlock = contractHandler(apicontract.DuplicateAttributeViewBlock, func(c *gin.Context, request apicontract.DuplicateAttributeViewBlockRequest) apicontract.Response[apicontract.AVDuplicateData] {
+	avID, blockID, err := model.DuplicateDatabaseBlock(request.AvID)
 	if err != nil {
-		ret.Code = -1
-		ret.Msg = err.Error()
-
-		c.JSON(http.StatusOK, ret)
-		return
+		return apicontract.Failure[apicontract.AVDuplicateData](-1, err.Error())
 	}
+	return apicontract.Success(apicontract.AVDuplicateData{AvID: avID, BlockID: blockID})
+})
 
-	ret = renderAttrView(blockID, avID, "", "", 1, -1, nil, "", false, ignoreRows, "", "")
-	if ret.Code == 0 && model.IsReadOnlyRoleContext(c) {
-		publishAccess := model.GetPublishAccess()
-		retDataMap := ret.Data.(map[string]any)
-		retDataMap["view"] = model.FilterViewByPublishAccess(c, publishAccess, retDataMap["view"].(av.Viewable))
+var getAttributeViewKeysByAvID = contractHandler(apicontract.GetAttributeViewKeysByAvID, func(c *gin.Context, request apicontract.GetAttributeViewKeysByAvIDRequest) apicontract.Response[[]*apicontract.AVKey] {
+	return apicontract.Success(avContractSlice(model.GetAttributeViewKeysByID(request.AvID), toContractAVKey))
+})
+
+var getAttributeViewKeysByID = contractHandler(apicontract.GetAttributeViewKeysByID, func(c *gin.Context, request apicontract.GetAttributeViewKeysByIDRequest) apicontract.Response[[]*apicontract.AVKey] {
+	if model.IsReadOnlyRoleContext(c) && !model.CheckAttributeViewAccessableByPublishAccess(c, model.GetPublishAccess(), request.AvID) {
+		return apicontract.Failure[[]*apicontract.AVKey](-1, av.ErrAttributeViewNotFound.Error())
 	}
-
-	c.JSON(http.StatusOK, ret)
-}
-
-func setAttrViewFilters(c *gin.Context) {
-	ret := gulu.Ret.NewResult()
-	arg, ok := util.JsonArg(c, ret)
-	if !ok {
-		c.JSON(http.StatusOK, ret)
-		return
+	if request.KeyIDsError != nil {
+		return apicontract.Failure[[]*apicontract.AVKey](-1, request.KeyIDsError.Error())
 	}
+	return apicontract.Success(avContractSlice(model.GetAttributeViewKeysByID(request.AvID, request.KeyIDs...), toContractAVKey))
+})
 
-	avID := arg["avID"].(string)
-	blockID := arg["blockID"].(string)
-	data := arg["data"].([]any)
+var getMirrorDatabaseBlocks = contractHandler(apicontract.GetMirrorDatabaseBlocks, func(c *gin.Context, request apicontract.GetMirrorDatabaseBlocksRequest) apicontract.Response[apicontract.RefDefsData] {
+	values := []apicontract.RefDefs{}
+	for _, id := range treenode.GetMirrorAttrViewBlockIDs(request.AvID) {
+		values = append(values, apicontract.RefDefs{RefID: id, DefIDs: []string{}})
+	}
+	return apicontract.Success(apicontract.RefDefsData{RefDefs: values})
+})
 
-	err := model.SetAttrViewFilters(avID, blockID, data)
+var setDatabaseBlockView = contractHandler(apicontract.SetDatabaseBlockView, func(c *gin.Context, request apicontract.SetDatabaseBlockViewRequest) apicontract.Response[apicontract.Null] {
+	if err := model.SetDatabaseBlockView(request.ID, request.AvID, request.ViewID); err != nil {
+		return apicontract.Failure[apicontract.Null](-1, err.Error())
+	}
+	return apicontract.Success(apicontract.Null{})
+})
+
+var getAttributeViewPrimaryKeyValues = contractHandler(apicontract.GetAttributeViewPrimaryKeyValues, func(c *gin.Context, request apicontract.GetAttributeViewPrimaryKeyValuesRequest) apicontract.Response[apicontract.AVPrimaryValuesData] {
+	name, blockIDs, rows, total, err := model.GetAttributeViewPrimaryKeyValues(request.ID, request.Keyword, avNonemptyStrings(request.BlockIDs), avPage(request.Page, 1), avPage(request.PageSize, -1))
 	if err != nil {
-		ret.Code = -1
-		ret.Msg = err.Error()
-		c.JSON(http.StatusOK, ret)
-		return
+		return apicontract.Failure[apicontract.AVPrimaryValuesData](-1, err.Error())
 	}
+	return apicontract.Success(apicontract.AVPrimaryValuesData{Name: name, BlockIDs: blockIDs, Rows: toContractAVKeyValues(rows), Total: total})
+})
 
-	model.ReloadAttrView(avID)
-	c.JSON(http.StatusOK, ret)
-}
-
-func setAttrViewContextFilter(c *gin.Context) {
-	ret := gulu.Ret.NewResult()
-	defer c.JSON(http.StatusOK, ret)
-	arg, ok := util.JsonArg(c, ret)
-	if !ok {
-		return
+var getAttributeViewRelationCandidates = contractHandler(apicontract.GetAttributeViewRelationCandidates, func(c *gin.Context, request apicontract.GetAttributeViewRelationCandidatesRequest) apicontract.Response[apicontract.AVRelationCandidatesData] {
+	avID := request.AvID
+	if avID == "" {
+		avID = request.ID
 	}
-
-	avID := arg["avID"].(string)
-	blockID := arg["blockID"].(string)
-	keyID, _ := arg["keyID"].(string)
-	if err := holdAttributeViewRequest(c, blockID, avID); nil != err {
-		ret.Code = -1
-		ret.Msg = model.Conf.Language(314)
-		return
-	}
-
-	contextFilter, err := model.SetAttributeViewContextFilter(blockID, avID, keyID)
-	if nil != err {
-		ret.Code = -1
-		ret.Msg = err.Error()
-		return
-	}
-	ret.Data = map[string]any{"contextFilter": contextFilter}
-}
-
-func setAttrViewSorts(c *gin.Context) {
-	ret := gulu.Ret.NewResult()
-	arg, ok := util.JsonArg(c, ret)
-	if !ok {
-		c.JSON(http.StatusOK, ret)
-		return
-	}
-
-	avID := arg["avID"].(string)
-	blockID := arg["blockID"].(string)
-	data := arg["data"].([]any)
-
-	err := model.SetAttrViewSorts(avID, blockID, data)
-	if err != nil {
-		ret.Code = -1
-		ret.Msg = err.Error()
-		c.JSON(http.StatusOK, ret)
-		return
-	}
-
-	model.ReloadAttrView(avID)
-	c.JSON(http.StatusOK, ret)
-}
-
-func changeAttrViewLayout(c *gin.Context) {
-	ret := gulu.Ret.NewResult()
-	arg, ok := util.JsonArg(c, ret)
-	if !ok {
-		c.JSON(http.StatusOK, ret)
-		return
-	}
-
-	blockID := arg["blockID"].(string)
-	avID := arg["avID"].(string)
-	layoutType := arg["layoutType"].(string)
-	err := model.ChangeAttrViewLayout(blockID, avID, av.LayoutType(layoutType))
-	if err != nil {
-		ret.Code = -1
-		ret.Msg = err.Error()
-		c.JSON(http.StatusOK, ret)
-		return
-	}
-
-	ret = renderAttrView(blockID, avID, "", "", 1, -1, nil, "", false, false, "", "")
-	if ret.Code == 0 && model.IsReadOnlyRoleContext(c) {
-		publishAccess := model.GetPublishAccess()
-		retDataMap := ret.Data.(map[string]any)
-		retDataMap["view"] = model.FilterViewByPublishAccess(c, publishAccess, retDataMap["view"].(av.Viewable))
-	}
-
-	c.JSON(http.StatusOK, ret)
-}
-
-func duplicateAttributeViewBlock(c *gin.Context) {
-	ret := gulu.Ret.NewResult()
-	defer c.JSON(http.StatusOK, ret)
-
-	arg, ok := util.JsonArg(c, ret)
-	if !ok {
-		return
-	}
-	avID := arg["avID"].(string)
-
-	newAvID, newBlockID, err := model.DuplicateDatabaseBlock(avID)
-	if err != nil {
-		ret.Code = -1
-		ret.Msg = err.Error()
-		return
-	}
-
-	ret.Data = map[string]any{
-		"avID":    newAvID,
-		"blockID": newBlockID,
-	}
-}
-
-func getAttributeViewKeysByAvID(c *gin.Context) {
-	ret := gulu.Ret.NewResult()
-	defer c.JSON(http.StatusOK, ret)
-
-	arg, ok := util.JsonArg(c, ret)
-	if !ok {
-		return
-	}
-	avID := arg["avID"].(string)
-	ret.Data = model.GetAttributeViewKeysByID(avID)
-}
-
-func getAttributeViewKeysByID(c *gin.Context) {
-	ret := gulu.Ret.NewResult()
-	defer c.JSON(http.StatusOK, ret)
-
-	arg, ok := util.JsonArg(c, ret)
-	if !ok {
-		return
-	}
-	avID := arg["avID"].(string)
-	if model.IsReadOnlyRoleContext(c) && !model.CheckAttributeViewAccessableByPublishAccess(c, model.GetPublishAccess(), avID) {
-		ret.Code = -1
-		ret.Msg = av.ErrAttributeViewNotFound.Error()
-		return
-	}
-	keyIDsArg := arg["keyIDs"].([]any)
-	var keyIDs []string
-	for _, v := range keyIDsArg {
-		keyIDs = append(keyIDs, v.(string))
-	}
-	ret.Data = model.GetAttributeViewKeysByID(avID, keyIDs...)
-}
-
-func getMirrorDatabaseBlocks(c *gin.Context) {
-	ret := gulu.Ret.NewResult()
-	defer c.JSON(http.StatusOK, ret)
-
-	arg, ok := util.JsonArg(c, ret)
-	if !ok {
-		return
-	}
-
-	avID := arg["avID"].(string)
-	blockIDs := treenode.GetMirrorAttrViewBlockIDs(avID)
-	var retRefDefs []model.RefDefs
-	for _, blockID := range blockIDs {
-		retRefDefs = append(retRefDefs, model.RefDefs{RefID: blockID, DefIDs: []string{}})
-	}
-	if 1 > len(retRefDefs) {
-		retRefDefs = []model.RefDefs{}
-	}
-
-	ret.Data = map[string]any{
-		"refDefs": retRefDefs,
-	}
-}
-
-func setDatabaseBlockView(c *gin.Context) {
-	ret := gulu.Ret.NewResult()
-	defer c.JSON(http.StatusOK, ret)
-
-	arg, ok := util.JsonArg(c, ret)
-	if !ok {
-		return
-	}
-
-	blockID := arg["id"].(string)
-	viewID := arg["viewID"].(string)
-	avID := arg["avID"].(string)
-
-	err := model.SetDatabaseBlockView(blockID, avID, viewID)
-	if err != nil {
-		ret.Code = -1
-		ret.Msg = err.Error()
-		return
-	}
-}
-
-func getAttributeViewPrimaryKeyValues(c *gin.Context) {
-	ret := gulu.Ret.NewResult()
-	defer c.JSON(http.StatusOK, ret)
-
-	arg, ok := util.JsonArg(c, ret)
-	if !ok {
-		return
-	}
-
-	id := arg["id"].(string)
-	page := 1
-	pageArg := arg["page"]
-	if nil != pageArg {
-		page = int(pageArg.(float64))
-	}
-
-	pageSize := -1
-	pageSizeArg := arg["pageSize"]
-	if nil != pageSizeArg {
-		pageSize = int(pageSizeArg.(float64))
-	}
-
-	keyword := ""
-	if keywordArg := arg["keyword"]; nil != keywordArg {
-		keyword = keywordArg.(string)
-	}
-	var blockIDs []string
-	if blockIDsArg := arg["blockIDs"]; nil != blockIDsArg {
-		if blockIDArgs, ok := blockIDsArg.([]any); ok {
-			for _, blockIDArg := range blockIDArgs {
-				if blockID, ok := blockIDArg.(string); ok && "" != blockID {
-					blockIDs = append(blockIDs, blockID)
-				}
-			}
+	if request.IncludeNewItemPreview || request.BlockID != "" {
+		if err := holdAttributeViewRequest(c, request.BlockID, avID); err != nil {
+			return apicontract.Failure[apicontract.AVRelationCandidatesData](-1, err.Error())
 		}
 	}
-	attributeViewName, databaseBlockIDs, rows, total, err := model.GetAttributeViewPrimaryKeyValues(id, keyword, blockIDs, page, pageSize)
+	var candidateSort *av.ViewSort
+	if request.Sort != nil {
+		candidateSort = &av.ViewSort{Column: request.Sort.Column, Order: av.SortOrder(request.Sort.Order)}
+	}
+	name, blockIDs, colors, columns, selectedRows, rows, total, err := model.GetAttributeViewRelationCandidates(avID, request.KeyID, request.Keyword, avNonemptyStrings(request.SelectedBlockIDs), avPage(request.Page, 1), avPage(request.PageSize, -1), candidateSort, request.BlockID)
 	if err != nil {
-		ret.Code = -1
-		ret.Msg = err.Error()
-		return
-	}
-
-	ret.Data = map[string]any{
-		"name":     attributeViewName,
-		"blockIDs": databaseBlockIDs,
-		"rows":     rows,
-		"total":    total,
-	}
-}
-
-func getAttributeViewRelationCandidates(c *gin.Context) {
-	ret := gulu.Ret.NewResult()
-	defer c.JSON(http.StatusOK, ret)
-
-	arg, ok := util.JsonArg(c, ret)
-	if !ok {
-		return
-	}
-
-	avID, _ := arg["avID"].(string)
-	keyID, _ := arg["keyID"].(string)
-	if "" == avID {
-		avID, _ = arg["id"].(string)
-	}
-	keyword := ""
-	if keywordArg := arg["keyword"]; nil != keywordArg {
-		keyword = keywordArg.(string)
-	}
-	page := 1
-	if pageArg := arg["page"]; nil != pageArg {
-		page = int(pageArg.(float64))
-	}
-	pageSize := -1
-	if pageSizeArg := arg["pageSize"]; nil != pageSizeArg {
-		pageSize = int(pageSizeArg.(float64))
-	}
-	var selectedBlockIDs []string
-	if selectedBlockIDsArg, ok := arg["selectedBlockIDs"].([]any); ok {
-		for _, selectedBlockIDArg := range selectedBlockIDsArg {
-			if selectedBlockID, ok := selectedBlockIDArg.(string); ok && "" != selectedBlockID {
-				selectedBlockIDs = append(selectedBlockIDs, selectedBlockID)
-			}
-		}
-	}
-
-	name, blockIDs, customColors, columns, selectedRows, rows, total, err := model.GetAttributeViewRelationCandidates(
-		avID, keyID, keyword, selectedBlockIDs, page, pageSize)
-	if err != nil {
-		ret.Code = -1
-		ret.Msg = err.Error()
-		return
+		return apicontract.Failure[apicontract.AVRelationCandidatesData](-1, err.Error())
 	}
 	notebookID := ""
-	if 0 < len(blockIDs) {
-		if blockTree := treenode.GetBlockTree(blockIDs[0]); nil != blockTree {
-			notebookID = blockTree.BoxID
+	if len(blockIDs) > 0 {
+		if tree := treenode.GetBlockTree(blockIDs[0]); tree != nil {
+			notebookID = tree.BoxID
 		}
 	}
-	ret.Data = map[string]any{
-		"name":         name,
-		"blockIDs":     blockIDs,
-		"customColors": customColors,
-		"notebookID":   notebookID,
-		"columns":      columns,
-		"selectedRows": selectedRows,
-		"rows":         rows,
-		"total":        total,
+	data := apicontract.AVRelationCandidatesData{Name: name, BlockIDs: blockIDs, CustomColors: avContractSlice(colors, toContractAVAttributeViewCustomColor), NotebookID: notebookID, Columns: avContractSlice(columns, toContractAVTableColumn), SelectedRows: avContractSlice(selectedRows, toContractAVTableRow), Rows: avContractSlice(rows, toContractAVTableRow), Total: total}
+	if request.IncludeNewItemPreview {
+		preview := model.PreviewAttributeViewRelationItem(avID, request.BlockID, request.KeyID, request.Keyword)
+		data.NewItemPreview = &apicontract.AVRelationItemPreview{TemplateID: preview.TemplateID,
+			PrimaryKey: preview.PrimaryKey, CreatedAt: preview.CreatedAt, Error: preview.Error,
+			HasPrimaryKeyTemplate: preview.HasPrimaryKeyTemplate, InputPrimaryKey: preview.InputPrimaryKey}
 	}
-}
+	return apicontract.Success(data)
+})
 
-func appendAttributeViewDetachedBlocksWithValues(c *gin.Context) {
-	// Add an internal kernel API `/api/av/appendAttributeViewDetachedBlocksWithValues` https://github.com/siyuan-note/siyuan/issues/11608
-
-	ret := gulu.Ret.NewResult()
-	defer c.JSON(http.StatusOK, ret)
-
-	arg, _ := util.JsonArg(c, ret)
-	if nil == arg {
-		return
-	}
-
-	avID := arg["avID"].(string)
+var appendAttributeViewDetachedBlocksWithValues = contractHandler(apicontract.AppendAttributeViewDetachedBlocksWithValues, func(c *gin.Context, request apicontract.AppendAttributeViewDetachedBlocksWithValuesRequest) apicontract.Response[apicontract.Null] {
 	var values [][]*av.Value
-	for _, blocksVals := range arg["blocksValues"].([]any) {
-		vals := blocksVals.([]any)
+	for _, row := range request.BlocksValues {
 		var rowValues []*av.Value
-		for _, val := range vals {
-			data, marshalErr := gulu.JSON.MarshalJSON(val)
-			if nil != marshalErr {
-				ret.Code = -1
-				ret.Msg = marshalErr.Error()
-				return
+		for _, value := range row {
+			if value == nil {
+				value = &apicontract.AVValue{}
 			}
-			value := av.Value{}
-			if unmarshalErr := gulu.JSON.UnmarshalJSON(data, &value); nil != unmarshalErr {
-				ret.Code = -1
-				ret.Msg = unmarshalErr.Error()
-				return
-			}
-			rowValues = append(rowValues, &value)
+			rowValues = append(rowValues, fromContractAVValue(value))
 		}
 		values = append(values, rowValues)
 	}
+	if err := model.AppendAttributeViewDetachedBlocksWithValues(request.AvID, values); err != nil {
+		return apicontract.Failure[apicontract.Null](-1, err.Error())
+	}
+	return apicontract.Success(apicontract.Null{})
+})
 
-	err := model.AppendAttributeViewDetachedBlocksWithValues(avID, values)
-	if err != nil {
-		ret.Code = -1
-		ret.Msg = err.Error()
-		return
-	}
-}
-
-func addAttributeViewBlocks(c *gin.Context) {
-	ret := gulu.Ret.NewResult()
-	defer c.JSON(http.StatusOK, ret)
-
-	arg, _ := util.JsonArg(c, ret)
-	if nil == arg {
-		return
-	}
-
-	avID := arg["avID"].(string)
-	var blockID string
-	if blockIDArg := arg["blockID"]; nil != blockIDArg {
-		blockID = blockIDArg.(string)
-	}
-	var viewID string
-	if viewIDArg := arg["viewID"]; nil != viewIDArg {
-		viewID = viewIDArg.(string)
-	}
-	var groupID string
-	if groupIDArg := arg["groupID"]; nil != groupIDArg {
-		groupID = groupIDArg.(string)
-	}
-	var previousID string
-	if nil != arg["previousID"] {
-		previousID = arg["previousID"].(string)
-	}
-
+var addAttributeViewBlocks = contractHandler(apicontract.AddAttributeViewBlocks, func(c *gin.Context, request apicontract.AddAttributeViewBlocksRequest) apicontract.Response[apicontract.Null] {
 	var srcs []map[string]any
-	for _, v := range arg["srcs"].([]any) {
-		src := v.(map[string]any)
+	for _, value := range request.Srcs {
+		src := map[string]any{"id": value.ID, "isDetached": value.IsDetached}
+		if value.ItemID != nil {
+			src["itemID"] = *value.ItemID
+		}
+		if value.Content != nil {
+			src["content"] = *value.Content
+		}
 		srcs = append(srcs, src)
 	}
-
-	var ignoreDefaultFill bool
-	if nil != arg["ignoreDefaultFill"] {
-		ignoreDefaultFill = arg["ignoreDefaultFill"].(bool)
+	if err := model.PerformAttributeViewOperations([]*model.Operation{{Action: "insertAttrViewBlock", Srcs: srcs,
+		AvID: request.AvID, BlockID: request.BlockID, ViewID: request.ViewID, GroupID: request.GroupID,
+		PreviousID: request.PreviousID, IgnoreDefaultFill: request.IgnoreDefaultFill}}); err != nil {
+		return apicontract.Failure[apicontract.Null](-1, err.Error())
 	}
+	model.ReloadAttrView(request.AvID)
+	return apicontract.Success(apicontract.Null{})
+})
 
-	err := model.AddAttributeViewBlock(nil, srcs, avID, blockID, viewID, groupID, previousID, ignoreDefaultFill)
+var removeAttributeViewBlocks = contractHandler(apicontract.RemoveAttributeViewBlocks, func(c *gin.Context, request apicontract.RemoveAttributeViewBlocksRequest) apicontract.Response[apicontract.Null] {
+	if err := model.RemoveAttributeViewBlock(append([]string(nil), request.SrcIDs...), request.AvID); err != nil {
+		return apicontract.Failure[apicontract.Null](-1, err.Error())
+	}
+	model.ReloadAttrView(request.AvID)
+	return apicontract.Success(apicontract.Null{})
+})
+
+var addAttributeViewKey = contractHandler(apicontract.AddAttributeViewKey, func(c *gin.Context, request apicontract.AddAttributeViewKeyRequest) apicontract.Response[apicontract.Null] {
+	if err := model.AddAttributeViewKey(request.AvID, request.BlockID, request.KeyID, request.KeyName, request.KeyType, request.KeyIcon, request.PreviousKeyID, av.DateDisplayFormatFull); err != nil {
+		return apicontract.Failure[apicontract.Null](-1, err.Error())
+	}
+	model.ReloadAttrView(request.AvID)
+	return apicontract.Success(apicontract.Null{})
+})
+
+var removeAttributeViewKey = contractHandler(apicontract.RemoveAttributeViewKey, func(c *gin.Context, request apicontract.RemoveAttributeViewKeyRequest) apicontract.Response[apicontract.Null] {
+	if err := model.RemoveAttributeViewKey(request.AvID, request.KeyID, request.RemoveRelationDest); err != nil {
+		return apicontract.Failure[apicontract.Null](-1, err.Error())
+	}
+	model.ReloadAttrView(request.AvID)
+	return apicontract.Success(apicontract.Null{})
+})
+
+var sortAttributeViewViewKey = contractHandler(apicontract.SortAttributeViewViewKey, func(c *gin.Context, request apicontract.SortAttributeViewViewKeyRequest) apicontract.Response[apicontract.Null] {
+	if err := model.SortAttributeViewViewKey(request.AvID, request.ViewID, request.KeyID, request.PreviousKeyID); err != nil {
+		return apicontract.Failure[apicontract.Null](-1, err.Error())
+	}
+	model.ReloadAttrView(request.AvID)
+	return apicontract.Success(apicontract.Null{})
+})
+
+var sortAttributeViewKey = contractHandler(apicontract.SortAttributeViewKey, func(c *gin.Context, request apicontract.SortAttributeViewKeyRequest) apicontract.Response[apicontract.Null] {
+	if err := model.SortAttributeViewKey(request.AvID, request.KeyID, request.PreviousKeyID); err != nil {
+		return apicontract.Failure[apicontract.Null](-1, err.Error())
+	}
+	model.ReloadAttrView(request.AvID)
+	return apicontract.Success(apicontract.Null{})
+})
+
+var getAttributeViewFilterSort = contractHandler(apicontract.GetAttributeViewFilterSort, func(c *gin.Context, request apicontract.GetAttributeViewFilterSortRequest) apicontract.Response[apicontract.AVFilterSortData] {
+	filters, sorts := model.GetAttributeViewFilterSort(request.ID, request.BlockID)
+	return apicontract.Success(apicontract.AVFilterSortData{Filters: avContractSlice(filters, toContractAVViewFilter), Sorts: avContractSlice(sorts, toContractAVViewSort)})
+})
+
+var searchAttributeViewRollupDestKeys = contractHandler(apicontract.SearchAttributeViewRollupDestKeys, func(c *gin.Context, request apicontract.SearchAttributeViewRollupDestKeysRequest) apicontract.Response[apicontract.AVKeysData] {
+	return apicontract.Success(apicontract.AVKeysData{Keys: avContractSlice(model.SearchAttributeViewRollupDestKeys(request.AvID, request.Keyword), toContractAVKey)})
+})
+
+var searchAttributeViewRelationKey = contractHandler(apicontract.SearchAttributeViewRelationKey, func(c *gin.Context, request apicontract.SearchAttributeViewRelationKeyRequest) apicontract.Response[apicontract.AVKeysData] {
+	return apicontract.Success(apicontract.AVKeysData{Keys: avContractSlice(model.SearchAttributeViewRelationKey(request.AvID, request.Keyword), toContractAVKey)})
+})
+
+var getAttributeView = contractHandler(apicontract.GetAttributeView, func(c *gin.Context, request apicontract.GetAttributeViewRequest) apicontract.Response[apicontract.AVData] {
+	return apicontract.Success(apicontract.AVData{Av: toContractAVAttributeViewData(model.NewAttributeViewData(model.GetAttributeView(request.ID)))})
+})
+
+var getAttributeViewPasteRows = contractHandler(apicontract.GetAttributeViewPasteRows, func(c *gin.Context, request apicontract.GetAttributeViewPasteRowsRequest) apicontract.Response[apicontract.AVPasteRowsData] {
+	if err := util.ValidateID(request.AvID); err != nil {
+		return apicontract.FailureFrom[apicontract.AVPasteRowsData](err)
+	}
+	if err := util.ValidateID(request.BlockID); err != nil {
+		return apicontract.FailureFrom[apicontract.AVPasteRowsData](err)
+	}
+	if err := util.ValidateID(request.StartItemID); err != nil {
+		return apicontract.FailureFrom[apicontract.AVPasteRowsData](err)
+	}
+	if err := util.ValidateOptionalID(request.ViewID); err != nil {
+		return apicontract.FailureFrom[apicontract.AVPasteRowsData](err)
+	}
+	if err := util.ValidateOptionalID(request.GroupID); err != nil {
+		return apicontract.FailureFrom[apicontract.AVPasteRowsData](err)
+	}
+	count := int(request.Count)
+	if request.Count != float64(count) || count < 1 || count > 100000 {
+		return apicontract.Failure[apicontract.AVPasteRowsData](-1, "invalid paste row count")
+	}
+	view, keys, err := model.GetAttributeViewPasteRows(request.BlockID, request.AvID, request.ViewID, request.GroupID, request.Query, request.StartItemID, count)
 	if err != nil {
-		ret.Code = -1
-		ret.Msg = err.Error()
-		return
+		return apicontract.Failure[apicontract.AVPasteRowsData](-1, err.Error())
 	}
+	return apicontract.Success(apicontract.AVPasteRowsData{View: toContractAVTable(view), InferableKeyIDs: keys})
+})
 
-	model.ReloadAttrView(avID)
-}
-
-func removeAttributeViewBlocks(c *gin.Context) {
-	ret := gulu.Ret.NewResult()
-	defer c.JSON(http.StatusOK, ret)
-
-	arg, _ := util.JsonArg(c, ret)
-	if nil == arg {
-		return
+var getAttributeViewFieldViews = contractHandler(apicontract.GetAttributeViewFieldViews, func(c *gin.Context, request apicontract.GetAttributeViewFieldViewsRequest) apicontract.Response[apicontract.AVFieldViewsData] {
+	if err := util.ValidateID(request.AvID); err != nil {
+		return apicontract.FailureFrom[apicontract.AVFieldViewsData](err)
 	}
-
-	avID := arg["avID"].(string)
-	var srcIDs []string
-	for _, v := range arg["srcIDs"].([]any) {
-		srcIDs = append(srcIDs, v.(string))
+	if err := util.ValidateID(request.KeyID); err != nil {
+		return apicontract.FailureFrom[apicontract.AVFieldViewsData](err)
 	}
-
-	err := model.RemoveAttributeViewBlock(srcIDs, avID)
+	views, err := model.GetAttributeViewFieldViews(request.AvID, request.KeyID)
 	if err != nil {
-		ret.Code = -1
-		ret.Msg = err.Error()
-		return
+		return apicontract.Failure[apicontract.AVFieldViewsData](-1, err.Error())
 	}
+	return apicontract.Success(apicontract.AVFieldViewsData{Views: avContractSlice(views, toContractAVAttributeViewFieldView)})
+})
 
-	model.ReloadAttrView(avID)
-}
+var createAttributeViewItem = contractHandler(apicontract.CreateAttributeViewItem, func(c *gin.Context, request apicontract.CreateAttributeViewItemRequest) apicontract.Response[apicontract.AVCreateItemResult] {
+	value, err := model.CreateAttributeViewItem(request.AvID, request.BlockID, request.ViewID, request.TemplateID, request.PreviousID, request.GroupID, request.CalendarDate)
+	return createAVItemResponse(value, err, request.App, request.Session)
+})
 
-func addAttributeViewKey(c *gin.Context) {
-	ret := gulu.Ret.NewResult()
-	defer c.JSON(http.StatusOK, ret)
-
-	arg, _ := util.JsonArg(c, ret)
-	if nil == arg {
-		return
+var createAttributeViewRelationItem = contractHandler(apicontract.CreateAttributeViewRelationItem, func(c *gin.Context, request apicontract.CreateAttributeViewRelationItemRequest) apicontract.Response[apicontract.AVCreateItemResult] {
+	if err := holdEncryptedBlockRequests(c, "", []string{request.BlockID}, false); err != nil {
+		return apicontract.Failure[apicontract.AVCreateItemResult](-1, err.Error())
 	}
-
-	avID := arg["avID"].(string)
-	blockID, _ := arg["blockID"].(string)
-	keyID := arg["keyID"].(string)
-	keyName := arg["keyName"].(string)
-	keyType := arg["keyType"].(string)
-	keyIcon := arg["keyIcon"].(string)
-	previousKeyID := arg["previousKeyID"].(string)
-
-	err := model.AddAttributeViewKey(avID, blockID, keyID, keyName, keyType, keyIcon, previousKeyID, av.DateDisplayFormatFull)
+	if err := holdAttributeViewRequest(c, request.BlockID, request.AvID); err != nil {
+		return apicontract.Failure[apicontract.AVCreateItemResult](-1, err.Error())
+	}
+	var preview *model.AttributeViewRelationItemPreview
+	if request.Preview != nil {
+		preview = &model.AttributeViewRelationItemPreview{TemplateID: request.Preview.TemplateID,
+			PrimaryKey: request.Preview.PrimaryKey, CreatedAt: request.Preview.CreatedAt, Error: request.Preview.Error}
+	}
+	var cells []*model.AttributeViewRelationItemCell
+	for _, cell := range request.Cells {
+		if cell == nil {
+			return apicontract.Failure[apicontract.AVCreateItemResult](-1, "invalid relation item cell")
+		}
+		cells = append(cells, &model.AttributeViewRelationItemCell{ItemID: cell.ItemID, RelatedItemIDs: cell.RelatedItemIDs})
+	}
+	result, err := model.CreateAttributeViewRelationItem(request.AvID, request.BlockID, request.KeyID, request.Keyword, cells, preview, request.UseInputName)
 	if err != nil {
-		ret.Code = -1
-		ret.Msg = err.Error()
-		return
-	}
-
-	model.ReloadAttrView(avID)
-}
-
-func removeAttributeViewKey(c *gin.Context) {
-	ret := gulu.Ret.NewResult()
-	defer c.JSON(http.StatusOK, ret)
-
-	arg, _ := util.JsonArg(c, ret)
-	if nil == arg {
-		return
-	}
-
-	avID := arg["avID"].(string)
-	keyID := arg["keyID"].(string)
-	removeRelationDest := false
-	if nil != arg["removeRelationDest"] {
-		removeRelationDest = arg["removeRelationDest"].(bool)
-	}
-
-	err := model.RemoveAttributeViewKey(avID, keyID, removeRelationDest)
-	if err != nil {
-		ret.Code = -1
-		ret.Msg = err.Error()
-		return
-	}
-
-	model.ReloadAttrView(avID)
-}
-
-func sortAttributeViewViewKey(c *gin.Context) {
-	ret := gulu.Ret.NewResult()
-	defer c.JSON(http.StatusOK, ret)
-
-	arg, ok := util.JsonArg(c, ret)
-	if !ok {
-		return
-	}
-
-	avID := arg["avID"].(string)
-	viewID := ""
-	if viewIDArg := arg["viewID"]; nil != viewIDArg {
-		viewID = viewIDArg.(string)
-	}
-	keyID := arg["keyID"].(string)
-	previousKeyID := arg["previousKeyID"].(string)
-
-	err := model.SortAttributeViewViewKey(avID, viewID, keyID, previousKeyID)
-	if err != nil {
-		ret.Code = -1
-		ret.Msg = err.Error()
-		return
-	}
-
-	model.ReloadAttrView(avID)
-}
-
-func sortAttributeViewKey(c *gin.Context) {
-	ret := gulu.Ret.NewResult()
-	defer c.JSON(http.StatusOK, ret)
-
-	arg, ok := util.JsonArg(c, ret)
-	if !ok {
-		return
-	}
-
-	avID := arg["avID"].(string)
-	keyID := arg["keyID"].(string)
-	previousKeyID := arg["previousKeyID"].(string)
-
-	err := model.SortAttributeViewKey(avID, keyID, previousKeyID)
-	if err != nil {
-		ret.Code = -1
-		ret.Msg = err.Error()
-		return
-	}
-
-	model.ReloadAttrView(avID)
-}
-
-func getAttributeViewFilterSort(c *gin.Context) {
-	ret := gulu.Ret.NewResult()
-	defer c.JSON(http.StatusOK, ret)
-
-	arg, _ := util.JsonArg(c, ret)
-	if nil == arg {
-		return
-	}
-
-	avID := arg["id"].(string)
-	blockID := arg["blockID"].(string)
-
-	filters, sorts := model.GetAttributeViewFilterSort(avID, blockID)
-	ret.Data = map[string]any{
-		"filters": filters,
-		"sorts":   sorts,
-	}
-}
-
-func searchAttributeViewRollupDestKeys(c *gin.Context) {
-	ret := gulu.Ret.NewResult()
-	defer c.JSON(http.StatusOK, ret)
-
-	arg, _ := util.JsonArg(c, ret)
-	if nil == arg {
-		return
-	}
-
-	avID := arg["avID"].(string)
-	keyword := arg["keyword"].(string)
-
-	rollupDestKeys := model.SearchAttributeViewRollupDestKeys(avID, keyword)
-	ret.Data = map[string]any{
-		"keys": rollupDestKeys,
-	}
-}
-
-func searchAttributeViewRelationKey(c *gin.Context) {
-	ret := gulu.Ret.NewResult()
-	defer c.JSON(http.StatusOK, ret)
-
-	arg, _ := util.JsonArg(c, ret)
-	if nil == arg {
-		return
-	}
-
-	avID := arg["avID"].(string)
-	keyword := arg["keyword"].(string)
-
-	relationKeys := model.SearchAttributeViewRelationKey(avID, keyword)
-	ret.Data = map[string]any{
-		"keys": relationKeys,
-	}
-}
-
-func getAttributeView(c *gin.Context) {
-	ret := gulu.Ret.NewResult()
-	defer c.JSON(http.StatusOK, ret)
-
-	arg, _ := util.JsonArg(c, ret)
-	if nil == arg {
-		return
-	}
-
-	id := arg["id"].(string)
-	ret.Data = map[string]any{
-		"av": model.NewAttributeViewData(model.GetAttributeView(id)),
-	}
-}
-
-func getAttributeViewPasteRows(c *gin.Context) {
-	ret := gulu.Ret.NewResult()
-	defer c.JSON(http.StatusOK, ret)
-
-	arg, ok := util.JsonArg(c, ret)
-	if !ok {
-		return
-	}
-
-	var avID, blockID, viewID, groupID, query, startItemID string
-	var countArg float64
-	if !util.ParseJsonArgs(arg, ret,
-		util.BindJsonArg("avID", &avID, true, true),
-		util.BindJsonArg("blockID", &blockID, true, true),
-		util.BindJsonArg("viewID", &viewID, false, false),
-		util.BindJsonArg("groupID", &groupID, false, false),
-		util.BindJsonArg("query", &query, false, false),
-		util.BindJsonArg("startItemID", &startItemID, true, true),
-		util.BindJsonArg("count", &countArg, true, false),
-	) {
-		return
-	}
-	if util.InvalidIDPattern(avID, ret) || util.InvalidIDPattern(blockID, ret) ||
-		util.InvalidIDPattern(startItemID, ret) ||
-		("" != viewID && util.InvalidIDPattern(viewID, ret)) ||
-		("" != groupID && util.InvalidIDPattern(groupID, ret)) {
-		return
-	}
-	count := int(countArg)
-	if countArg != float64(count) || count < 1 || 100000 < count {
-		ret.Code = -1
-		ret.Msg = "invalid paste row count"
-		return
-	}
-
-	view, inferableKeyIDs, err := model.GetAttributeViewPasteRows(blockID, avID, viewID, groupID, query, startItemID, count)
-	if nil != err {
-		ret.Code = -1
-		ret.Msg = err.Error()
-		return
-	}
-	ret.Data = map[string]any{"view": view, "inferableKeyIDs": inferableKeyIDs}
-}
-
-func getAttributeViewFieldViews(c *gin.Context) {
-	ret := gulu.Ret.NewResult()
-	defer c.JSON(http.StatusOK, ret)
-
-	arg, ok := util.JsonArg(c, ret)
-	if !ok {
-		return
-	}
-
-	var avID, keyID string
-	if !util.ParseJsonArgs(arg, ret,
-		util.BindJsonArg("avID", &avID, true, true),
-		util.BindJsonArg("keyID", &keyID, true, true),
-	) {
-		return
-	}
-	if util.InvalidIDPattern(avID, ret) || util.InvalidIDPattern(keyID, ret) {
-		return
-	}
-
-	views, err := model.GetAttributeViewFieldViews(avID, keyID)
-	if err != nil {
-		ret.Code = -1
-		ret.Msg = err.Error()
-		return
-	}
-	ret.Data = map[string]any{
-		"views": views,
-	}
-}
-
-func createAttributeViewItem(c *gin.Context) {
-	ret := gulu.Ret.NewResult()
-	defer c.JSON(http.StatusOK, ret)
-
-	arg, ok := util.JsonArg(c, ret)
-	if !ok {
-		return
-	}
-	var avID, blockID, viewID, templateID, previousID, groupID, app, session string
-	if !util.ParseJsonArgs(arg, ret,
-		util.BindJsonArg("avID", &avID, true, false),
-		util.BindJsonArg("blockID", &blockID, true, false),
-		util.BindJsonArg("viewID", &viewID, false, false),
-		util.BindJsonArg("templateID", &templateID, false, false),
-		util.BindJsonArg("previousID", &previousID, false, false),
-		util.BindJsonArg("groupID", &groupID, false, false),
-		util.BindJsonArg("app", &app, false, false),
-		util.BindJsonArg("session", &session, false, false),
-	) {
-		return
-	}
-	result, err := model.CreateAttributeViewItem(avID, blockID, viewID, templateID, previousID, groupID)
-	setCreateAttributeViewItemResult(ret, result, err, app, session)
-}
-
-func createAttributeViewItemWithMarkdown(c *gin.Context) {
-	ret := gulu.Ret.NewResult()
-	defer c.JSON(http.StatusOK, ret)
-
-	arg, ok := util.JsonArg(c, ret)
-	if !ok {
-		return
-	}
-	var avID, blockID, viewID, templateID, previousID, groupID, title, markdown, tags, clippingHref, app, session string
-	var withMath, listDocTree bool
-	if !util.ParseJsonArgs(arg, ret,
-		util.BindJsonArg("avID", &avID, true, true),
-		util.BindJsonArg("blockID", &blockID, true, true),
-		util.BindJsonArg("viewID", &viewID, false, false),
-		util.BindJsonArg("templateID", &templateID, true, true),
-		util.BindJsonArg("previousID", &previousID, false, false),
-		util.BindJsonArg("groupID", &groupID, false, false),
-		util.BindJsonArg("title", &title, true, true),
-		util.BindJsonArg("markdown", &markdown, true, false),
-		util.BindJsonArg("tags", &tags, false, false),
-		util.BindJsonArg("withMath", &withMath, false, false),
-		util.BindJsonArg("clippingHref", &clippingHref, false, false),
-		util.BindJsonArg("listDocTree", &listDocTree, false, false),
-		util.BindJsonArg("app", &app, false, false),
-		util.BindJsonArg("session", &session, false, false),
-	) {
-		return
-	}
-	result, err := model.CreateAttributeViewItemWithMarkdown(avID, blockID, viewID, templateID, previousID, groupID,
-		&model.CreateAttributeViewItemMarkdown{
-			Title: title, Markdown: markdown, Tags: tags, WithMath: withMath, ClippingHref: clippingHref,
-			ListDocTree: listDocTree,
-		})
-	setCreateAttributeViewItemResult(ret, result, err, app, session)
-}
-
-func setCreateAttributeViewItemResult(ret *gulu.Result, result *model.CreateAttributeViewItemResult, err error, app, session string) {
-	if nil != err {
 		if errors.Is(err, model.ErrBoxNotFound) {
-			ret.Code = 1
-			ret.Data = map[string]any{"unavailableNotebook": true}
-			return
+			return apicontract.CreateAttributeViewRelationItem.FailureWithData(1, "", apicontract.NewAVCreateItemResultError(apicontract.AVUnavailableNotebook{UnavailableNotebook: true}))
 		}
-		ret.Code = -1
-		ret.Msg = err.Error()
-		return
+		return apicontract.Failure[apicontract.AVCreateItemResult](-1, err.Error())
 	}
-	ret.Data = result
-	if nil != result.Transaction {
-		for _, operation := range result.Transaction.DoOperations {
-			if "insertAttrViewBlock" == operation.Action {
-				operation.Context = map[string]any{
-					"filteredTipScope": "target",
-					"filteredTipToken": result.ItemID,
-					"filteredTipAppID": app,
-					"protyleID":        session,
-					"openFilteredItem": "true",
-				}
-				break
-			}
-		}
-		pushTransactions(app, session, []*model.Transaction{result.Transaction})
-	}
-}
+	pushTransactions(request.App, request.Session, []*model.Transaction{result.Transaction})
+	return apicontract.Success(apicontract.NewAVCreateItemResult(*toContractAVCreateAttributeViewItemResult(result)))
+})
 
-func createAttributeViewItemDocs(c *gin.Context) {
-	ret := gulu.Ret.NewResult()
-	defer c.JSON(http.StatusOK, ret)
+var createAttributeViewItemWithMarkdown = contractHandler(apicontract.CreateAttributeViewItemWithMarkdown, func(c *gin.Context, request apicontract.CreateAttributeViewItemWithMarkdownRequest) apicontract.Response[apicontract.AVCreateItemResult] {
+	value, err := model.CreateAttributeViewItemWithMarkdown(request.AvID, request.BlockID, request.ViewID, request.TemplateID, request.PreviousID, request.GroupID, &model.CreateAttributeViewItemMarkdown{Title: request.Title, Markdown: request.Markdown, Tags: request.Tags, WithMath: request.WithMath, ClippingHref: request.ClippingHref, ListDocTree: request.ListDocTree})
+	return createAVItemResponse(value, err, request.App, request.Session)
+})
 
-	arg, ok := util.JsonArg(c, ret)
-	if !ok {
-		return
-	}
-	var itemIDsArg []any
-	var avID, blockID, saveMode, app, session string
-	if !util.ParseJsonArgs(arg, ret,
-		util.BindJsonArg("avID", &avID, true, false),
-		util.BindJsonArg("blockID", &blockID, true, false),
-		util.BindJsonArg("saveMode", &saveMode, true, false),
-		util.BindJsonArg("itemIDs", &itemIDsArg, true, false),
-		util.BindJsonArg("app", &app, false, false),
-		util.BindJsonArg("session", &session, false, false),
-	) {
-		return
-	}
-	var itemIDs []string
-	for _, itemIDArg := range itemIDsArg {
-		itemID, itemOK := itemIDArg.(string)
-		if itemOK && "" != itemID {
-			itemIDs = append(itemIDs, itemID)
-		}
-	}
-	result, err := model.CreateAttributeViewItemDocs(avID, blockID, saveMode, itemIDs)
-	if nil != err {
+var createAttributeViewItemDocs = contractHandler(apicontract.CreateAttributeViewItemDocs, func(c *gin.Context, request apicontract.CreateAttributeViewItemDocsRequest) apicontract.Response[apicontract.AVCreateItemDocsResult] {
+	value, err := model.CreateAttributeViewItemDocs(request.AvID, request.BlockID, request.SaveMode, avNonemptyStrings(request.ItemIDs))
+	if err != nil {
 		if errors.Is(err, model.ErrBoxNotFound) {
-			ret.Code = 1
-			ret.Data = map[string]any{"unavailableNotebook": true}
-			return
+			return apicontract.CreateAttributeViewItemDocs.FailureWithData(1, "", apicontract.NewAVCreateItemDocsResultError(apicontract.AVUnavailableNotebook{UnavailableNotebook: true}))
 		}
-		ret.Code = -1
-		ret.Msg = err.Error()
-		return
+		return apicontract.Failure[apicontract.AVCreateItemDocsResult](-1, err.Error())
 	}
-	ret.Data = result
-	if nil != result.Transaction {
-		pushTransactions(app, session, []*model.Transaction{result.Transaction})
+	if value.Transaction != nil {
+		pushTransactions(request.App, request.Session, []*model.Transaction{value.Transaction})
 	}
-}
+	return apicontract.Success(apicontract.NewAVCreateItemDocsResult(*toContractAVCreateAttributeViewItemDocsResult(value)))
+})
 
-func searchAttributeView(c *gin.Context) {
-	ret := gulu.Ret.NewResult()
-	defer c.JSON(http.StatusOK, ret)
+var searchAttributeView = contractHandler(apicontract.SearchAttributeView, func(c *gin.Context, request apicontract.SearchAttributeViewRequest) apicontract.Response[apicontract.AVSearchData] {
+	values := model.SearchAttributeViewWithOptions(model.SearchAttributeViewOptions{Keyword: request.Keyword, ExcludeAvIDs: append([]string(nil), request.Excludes...), CurrentAvID: request.AvID, CurrentBlockID: request.BlockID, IncludeViewMatches: request.IncludeViewMatches})
+	return apicontract.Success(apicontract.AVSearchData{Results: avContractSlice(values, toContractAVAvSearchResult)})
+})
 
-	arg, _ := util.JsonArg(c, ret)
-	if nil == arg {
-		return
+var renderSnapshotAttributeView = contractHandler(apicontract.RenderSnapshotAttributeView, func(c *gin.Context, request apicontract.RenderSnapshotAttributeViewRequest) apicontract.Response[apicontract.AVArchiveRenderData] {
+	if err := holdAttributeViewRequest(c, request.BlockID, request.ID); err != nil {
+		return apicontract.Failure[apicontract.AVArchiveRenderData](-1, model.Conf.Language(314))
 	}
+	boxID, err := model.ResolveRepoSnapshotAttributeViewBoxID(request.Snapshot, request.ID)
+	if err != nil {
+		return apicontract.Failure[apicontract.AVArchiveRenderData](-1, err.Error())
+	}
+	if err = holdEncryptedBoxRequest(c, boxID); err != nil {
+		return apicontract.Failure[apicontract.AVArchiveRenderData](-1, model.Conf.Language(314))
+	}
+	view, attrView, err := model.RenderRepoSnapshotAttributeView(request.Snapshot, request.ID, request.ViewID, request.CarrierViewID, fromContractAVCalendarRange(request.CalendarRange))
+	if err != nil {
+		return apicontract.Failure[apicontract.AVArchiveRenderData](-1, err.Error())
+	}
+	return apicontract.Success(avArchiveRenderData(attrView, view))
+})
 
-	keyword := arg["keyword"].(string)
-	currentAvID := ""
-	if nil != arg["avID"] {
-		currentAvID = arg["avID"].(string)
+var renderHistoryAttributeView = contractHandler(apicontract.RenderHistoryAttributeView, func(c *gin.Context, request apicontract.RenderHistoryAttributeViewRequest) apicontract.Response[apicontract.AVArchiveRenderData] {
+	if err := holdAttributeViewRequest(c, request.BlockID, request.ID); err != nil {
+		return apicontract.Failure[apicontract.AVArchiveRenderData](-1, model.Conf.Language(314))
 	}
-	currentBlockID := ""
-	if nil != arg["blockID"] {
-		currentBlockID = arg["blockID"].(string)
+	boxID, err := model.ResolveHistoryAttributeViewBoxID(request.ID, request.Created)
+	if err != nil {
+		return apicontract.Failure[apicontract.AVArchiveRenderData](-1, err.Error())
 	}
-	var excludes []string
-	if nil != arg["excludes"] {
-		for _, e := range arg["excludes"].([]any) {
-			excludes = append(excludes, e.(string))
+	if err = holdEncryptedBoxRequest(c, boxID); err != nil {
+		return apicontract.Failure[apicontract.AVArchiveRenderData](-1, model.Conf.Language(314))
+	}
+	view, attrView, err := model.RenderHistoryAttributeView(request.ID, request.ViewID, request.CarrierViewID, request.Query, avPage(request.Page, 1), avPage(request.PageSize, -1), avGroupPaging(request.GroupPaging), request.Created, fromContractAVCalendarRange(request.CalendarRange))
+	if err != nil {
+		return apicontract.Failure[apicontract.AVArchiveRenderData](-1, err.Error())
+	}
+	return apicontract.Success(avArchiveRenderData(attrView, view))
+})
+
+var renderAttributeView = contractHandler(apicontract.RenderAttributeView, func(c *gin.Context, request apicontract.RenderAttributeViewRequest) apicontract.Response[apicontract.AVRenderResult] {
+	if err := holdAttributeViewRequest(c, request.BlockID, request.ID); err != nil {
+		return apicontract.Failure[apicontract.AVRenderResult](-1, model.Conf.Language(314))
+	}
+	readOnly := model.IsReadOnlyRoleContext(c)
+	var filter func(av.Viewable) av.Viewable
+	if readOnly {
+		access := model.GetPublishAccess()
+		if !model.CheckAttributeViewBlockAccessableByPublishAccess(c, access, request.ID, request.BlockID) {
+			return apicontract.Failure[apicontract.AVRenderResult](-1, av.ErrAttributeViewNotFound.Error())
+		}
+		filter = func(view av.Viewable) av.Viewable {
+			return model.FilterAttributeViewByPublishAccess(c, access, request.ID, request.BlockID, view)
 		}
 	}
-	includeViewMatches, _ := arg["includeViewMatches"].(bool)
-	results := model.SearchAttributeViewWithOptions(model.SearchAttributeViewOptions{
-		Keyword:            keyword,
-		ExcludeAvIDs:       excludes,
-		CurrentAvID:        currentAvID,
-		CurrentBlockID:     currentBlockID,
-		IncludeViewMatches: includeViewMatches,
+	create := true
+	if request.CreateIfNotExist != nil {
+		create = *request.CreateIfNotExist
+	}
+	return renderAttrView(request.BlockID, request.ID, request.ViewID, request.Query, avPage(request.Page, 1), avPage(request.PageSize, -1), avGroupPaging(request.GroupPaging), av.LayoutType(request.InitialLayout), create, request.IgnoreRows, request.TargetItemID, request.TargetGroupID, filter, readOnly, model.AttributeViewRenderOptions{
+		CalendarRange: fromContractAVCalendarRange(request.CalendarRange), TemporarySort: fromContractAVViewSort(request.TemporarySort),
 	})
-	ret.Data = map[string]any{
-		"results": results,
-	}
-}
+})
 
-func renderSnapshotAttributeView(c *gin.Context) {
-	ret := gulu.Ret.NewResult()
-	defer c.JSON(http.StatusOK, ret)
-
-	arg, ok := util.JsonArg(c, ret)
-	if !ok {
-		return
+var getAttributeViewCalendarUndated = contractHandler(apicontract.GetAttributeViewCalendarUndated, func(c *gin.Context, request apicontract.AVCalendarUndatedRequest) apicontract.Response[apicontract.AVCalendarUndatedData] {
+	if err := holdAttributeViewRequest(c, request.BlockID, request.ID); err != nil {
+		return apicontract.Failure[apicontract.AVCalendarUndatedData](-1, model.Conf.Language(314))
 	}
-
-	index := arg["snapshot"].(string)
-	id := arg["id"].(string)
-	blockID, _ := arg["blockID"].(string)
-	viewID, _ := arg["viewID"].(string)
-	carrierViewID, _ := arg["carrierViewID"].(string)
-	if err := holdAttributeViewRequest(c, blockID, id); err != nil {
-		ret.Code = -1
-		ret.Msg = model.Conf.Language(314)
-		return
-	}
-	boxID, err := model.ResolveRepoSnapshotAttributeViewBoxID(index, id)
+	view, _, _, err := model.RenderAttributeViewWithTargetReadOnly(request.BlockID, request.ID, request.ViewID, request.Query,
+		1, -1, nil, "", false, false, "", "")
 	if err != nil {
-		ret.Code = -1
-		ret.Msg = err.Error()
-		return
+		return apicontract.Failure[apicontract.AVCalendarUndatedData](-1, err.Error())
 	}
-	if err = holdEncryptedBoxRequest(c, boxID); err != nil {
-		ret.Code = -1
-		ret.Msg = model.Conf.Language(314)
-		return
+	calendar, ok := view.(*av.Calendar)
+	if !ok || calendar.Calendar == nil {
+		return apicontract.Failure[apicontract.AVCalendarUndatedData](-1, av.ErrViewNotFound.Error())
 	}
-	view, attrView, err := model.RenderRepoSnapshotAttributeView(index, id, viewID, carrierViewID)
-	if err != nil {
-		ret.Code = -1
-		ret.Msg = err.Error()
-		return
+	key := calendar.GetColumn(calendar.Calendar.DateKeyID)
+	if key == nil || key.Type != av.KeyTypeDate {
+		return apicontract.Success(apicontract.AVCalendarUndatedData{Rows: []*apicontract.AVTableRow{}})
 	}
-
-	var views []*av.ViewData
-	for _, v := range attrView.Views {
-		views = append(views, &av.ViewData{
-			ID:               v.ID,
-			Icon:             v.Icon,
-			Name:             v.Name,
-			Desc:             v.Desc,
-			HideAttrViewName: v.HideAttrViewName,
-			Type:             v.LayoutType,
-			PageSize:         v.PageSize,
-		})
-	}
-
-	ret.Data = map[string]any{
-		"name":                   attrView.Name,
-		"id":                     attrView.ID,
-		"customColors":           attrView.Palette(),
-		"colorOrder":             attrView.PaletteOrder(),
-		"usedCustomColorIndexes": attrView.UsedCustomColorIndexes(),
-		"viewType":               view.GetType(),
-		"viewID":                 view.GetID(),
-		"views":                  views,
-		"view":                   view,
-		"isMirror":               av.IsMirror(attrView.ID),
-		"newItemTemplates":       attrView.NewItemTemplates,
-		"defaultTemplateID":      attrView.DefaultTemplateID,
-	}
-}
-
-func renderHistoryAttributeView(c *gin.Context) {
-	ret := gulu.Ret.NewResult()
-	defer c.JSON(http.StatusOK, ret)
-
-	arg, ok := util.JsonArg(c, ret)
-	if !ok {
-		return
-	}
-
-	id := arg["id"].(string)
-	created := arg["created"].(string)
-	blockIDArg := arg["blockID"]
-	var blockID string
-	if nil != blockIDArg {
-		blockID = blockIDArg.(string)
-	}
-	viewIDArg := arg["viewID"]
-	var viewID string
-	if nil != viewIDArg {
-		viewID = viewIDArg.(string)
-	}
-	carrierViewID, _ := arg["carrierViewID"].(string)
-	page := 1
-	pageArg := arg["page"]
-	if nil != pageArg {
-		page = int(pageArg.(float64))
-	}
-
-	pageSize := -1
-	pageSizeArg := arg["pageSize"]
-	if nil != pageSizeArg {
-		pageSize = int(pageSizeArg.(float64))
-	}
-
-	query := ""
-	queryArg := arg["query"]
-	if nil != queryArg {
-		query = queryArg.(string)
-	}
-
-	groupPaging := map[string]any{}
-	groupPagingArg := arg["groupPaging"]
-	if nil != groupPagingArg {
-		groupPaging = groupPagingArg.(map[string]any)
-	}
-	if err := holdAttributeViewRequest(c, blockID, id); err != nil {
-		ret.Code = -1
-		ret.Msg = model.Conf.Language(314)
-		return
-	}
-	boxID, err := model.ResolveHistoryAttributeViewBoxID(id, created)
-	if err != nil {
-		ret.Code = -1
-		ret.Msg = err.Error()
-		return
-	}
-	if err = holdEncryptedBoxRequest(c, boxID); err != nil {
-		ret.Code = -1
-		ret.Msg = model.Conf.Language(314)
-		return
-	}
-
-	view, attrView, err := model.RenderHistoryAttributeView(id, viewID, carrierViewID, query, page, pageSize, groupPaging, created)
-	if err != nil {
-		ret.Code = -1
-		ret.Msg = err.Error()
-		return
-	}
-
-	var views []*av.ViewData
-	for _, v := range attrView.Views {
-		views = append(views, &av.ViewData{
-			ID:               v.ID,
-			Icon:             v.Icon,
-			Name:             v.Name,
-			Desc:             v.Desc,
-			HideAttrViewName: v.HideAttrViewName,
-			Type:             v.LayoutType,
-			PageSize:         v.PageSize,
-		})
-	}
-
-	ret.Data = map[string]any{
-		"name":                   attrView.Name,
-		"id":                     attrView.ID,
-		"customColors":           attrView.Palette(),
-		"colorOrder":             attrView.PaletteOrder(),
-		"usedCustomColorIndexes": attrView.UsedCustomColorIndexes(),
-		"viewType":               view.GetType(),
-		"viewID":                 view.GetID(),
-		"views":                  views,
-		"view":                   view,
-		"isMirror":               av.IsMirror(attrView.ID),
-		"newItemTemplates":       attrView.NewItemTemplates,
-		"defaultTemplateID":      attrView.DefaultTemplateID,
-	}
-}
-
-func renderAttributeView(c *gin.Context) {
-	ret := gulu.Ret.NewResult()
-	arg, ok := util.JsonArg(c, ret)
-	if !ok {
-		c.JSON(http.StatusOK, ret)
-		return
-	}
-
-	id := arg["id"].(string)
-	blockIDArg := arg["blockID"]
-	var blockID string
-	if nil != blockIDArg {
-		blockID = blockIDArg.(string)
-	}
-	viewIDArg := arg["viewID"]
-	var viewID string
-	if nil != viewIDArg {
-		viewID = viewIDArg.(string)
-	}
-	page := 1
-	pageArg := arg["page"]
-	if nil != pageArg {
-		page = int(pageArg.(float64))
-	}
-
-	pageSize := -1
-	pageSizeArg := arg["pageSize"]
-	if nil != pageSizeArg {
-		pageSize = int(pageSizeArg.(float64))
-	}
-
-	query := ""
-	queryArg := arg["query"]
-	if nil != queryArg {
-		query = queryArg.(string)
-	}
-
-	groupPaging := map[string]any{}
-	groupPagingArg := arg["groupPaging"]
-	if nil != groupPagingArg {
-		groupPaging = groupPagingArg.(map[string]any)
-	}
-
-	initialLayout := av.LayoutType("")
-	if initialLayoutArg, ok := arg["initialLayout"].(string); ok {
-		initialLayout = av.LayoutType(initialLayoutArg)
-	}
-
-	createIfNotExist := true
-	createIfNotExistArg := arg["createIfNotExist"]
-	if nil != createIfNotExistArg {
-		createIfNotExist = createIfNotExistArg.(bool)
-	}
-
-	ignoreRows := false
-	ignoreRowsArg := arg["ignoreRows"]
-	if nil != ignoreRowsArg {
-		ignoreRows = ignoreRowsArg.(bool)
-	}
-	targetItemID := ""
-	if targetItemIDArg := arg["targetItemID"]; nil != targetItemIDArg {
-		targetItemID = targetItemIDArg.(string)
-	}
-	targetGroupID := ""
-	if targetGroupIDArg := arg["targetGroupID"]; nil != targetGroupIDArg {
-		targetGroupID = targetGroupIDArg.(string)
-	}
-	if err := holdAttributeViewRequest(c, blockID, id); err != nil {
-		ret.Code = -1
-		ret.Msg = model.Conf.Language(314)
-		c.JSON(http.StatusOK, ret)
-		return
-	}
-
-	readOnlyRole := model.IsReadOnlyRoleContext(c)
-	publishAccess := model.PublishAccess(nil)
-	if readOnlyRole {
-		publishAccess = model.GetPublishAccess()
-		if !model.CheckAttributeViewBlockAccessableByPublishAccess(c, publishAccess, id, blockID) {
-			ret.Code = -1
-			ret.Msg = av.ErrAttributeViewNotFound.Error()
-			c.JSON(http.StatusOK, ret)
-			return
+	search := strings.ToLower(strings.TrimSpace(request.Search))
+	rows := make([]*av.TableRow, 0, len(calendar.UndatedRows))
+	for _, row := range calendar.UndatedRows {
+		if attributeViewRowMatchesTitle(row, search) {
+			rows = append(rows, row)
 		}
 	}
-
-	ret = renderAttrView(blockID, id, viewID, query, page, pageSize, groupPaging, initialLayout, createIfNotExist, ignoreRows, targetItemID, targetGroupID)
-	if ret.Code == 0 && readOnlyRole {
-		retDataMap := ret.Data.(map[string]any)
-		retDataMap["view"] = model.FilterAttributeViewByPublishAccess(c, publishAccess, id, blockID, retDataMap["view"].(av.Viewable))
-		// 发布只读渲染不暴露当前视图之外的实例筛选配置和关联字段元数据。
-		retDataMap["contextFilter"] = nil
-		retDataMap["contextFilterFields"] = []*av.AttributeViewContextFilterField{}
-	}
-
-	// 大体量响应（如全量数据库视图）用 goccy 序列化后直接写字节，跳过 gin 内部基于标准库的二次序列化
-	marshalBytes, marshalErr := goccyJSON.Marshal(ret)
-	if nil != marshalErr || 0 == len(marshalBytes) {
-		c.JSON(http.StatusOK, ret)
-		return
-	}
-	c.Data(http.StatusOK, "application/json; charset=utf-8", marshalBytes)
-}
+	total := len(rows)
+	rows = paginateAttributeViewRows(rows, avPage(request.Page, 1), avPage(request.PageSize, 50))
+	return apicontract.Success(apicontract.AVCalendarUndatedData{
+		Rows: avContractSlice(rows, toContractAVTableRow), Total: total,
+	})
+})
 
 func holdAttributeViewRequest(c *gin.Context, blockID, avID string) error {
 	if blockID != "" {
@@ -1410,225 +545,97 @@ func holdAttributeViewRequest(c *gin.Context, blockID, avID string) error {
 	return nil
 }
 
-func renderAttrView(blockID, avID, viewID, query string, page, pageSize int, groupPaging map[string]any, initialLayout av.LayoutType, createIfNotExist, ignoreRows bool, targetItemID, targetGroupID string) (ret *gulu.Result) {
-	ret = gulu.Ret.NewResult()
-	view, attrView, target, err := model.RenderAttributeViewWithTarget(blockID, avID, viewID, query, page, pageSize, groupPaging, initialLayout, createIfNotExist, ignoreRows, targetItemID, targetGroupID)
+var getCurrentAttrViewImages = contractHandler(apicontract.GetCurrentAttrViewImages, func(c *gin.Context, request apicontract.GetCurrentAttrViewImagesRequest) apicontract.Response[[]string] {
+	if err := holdAttributeViewRequest(c, request.BlockID, request.ID); err != nil {
+		return apicontract.Failure[[]string](-1, model.Conf.Language(314))
+	}
+	images, err := model.GetCurrentAttributeViewImages(c, request.ID, request.BlockID, request.ViewID, request.Query, request.GroupID)
 	if err != nil {
-		ret.Code = -1
-		if errors.Is(err, av.ErrSpecTooNew) {
-			ret.Msg = model.Conf.Language(215)
-		} else {
-			ret.Msg = err.Error()
-		}
-		if errors.Is(err, av.ErrViewNotFound) {
-			ret.Data = map[string]any{"error": "viewNotFound"}
-		}
-		return
+		return apicontract.Failure[[]string](-1, err.Error())
 	}
+	return apicontract.Success(images)
+})
 
-	var views []*av.ViewData
-	for _, v := range attrView.Views {
-		views = append(views, &av.ViewData{
-			ID:               v.ID,
-			Icon:             v.Icon,
-			Name:             v.Name,
-			Desc:             v.Desc,
-			HideAttrViewName: v.HideAttrViewName,
-			Type:             v.LayoutType,
-			PageSize:         v.PageSize,
-		})
-	}
-	contextFilter, err := model.GetAttributeViewContextFilter(attrView, blockID)
-	if nil != err {
-		ret.Code = -1
-		ret.Msg = err.Error()
-		return
-	}
-
-	retData := map[string]any{
-		"name":                   attrView.Name,
-		"id":                     attrView.ID,
-		"customColors":           attrView.Palette(),
-		"colorOrder":             attrView.PaletteOrder(),
-		"usedCustomColorIndexes": attrView.UsedCustomColorIndexes(),
-		"viewType":               view.GetType(),
-		"viewID":                 view.GetID(),
-		"views":                  views,
-		"view":                   view,
-		"isMirror":               av.IsMirror(attrView.ID),
-		"newItemTemplates":       attrView.NewItemTemplates,
-		"defaultTemplateID":      attrView.DefaultTemplateID,
-		"contextFilter":          contextFilter,
-		"contextFilterFields":    attrView.ContextFilterFields(),
-	}
-	if nil != target {
-		retData["target"] = target
-	}
-	ret.Data = retData
-	return
-}
-
-func getCurrentAttrViewImages(c *gin.Context) {
-	ret := gulu.Ret.NewResult()
-	defer c.JSON(http.StatusOK, ret)
-
-	arg, ok := util.JsonArg(c, ret)
-	if !ok {
-		return
-	}
-
-	id := arg["id"].(string)
-	blockID, _ := arg["blockID"].(string)
-	viewIDArg := arg["viewID"]
-	var viewID string
-	if nil != viewIDArg {
-		viewID = viewIDArg.(string)
-	}
-
-	query := ""
-	queryArg := arg["query"]
-	if nil != queryArg {
-		query = queryArg.(string)
-	}
-
-	if err := holdAttributeViewRequest(c, blockID, id); err != nil {
-		ret.Code = -1
-		ret.Msg = model.Conf.Language(314)
-		return
-	}
-
-	images, err := model.GetCurrentAttributeViewImages(c, id, blockID, viewID, query)
-	if err != nil {
-		ret.Code = -1
-		ret.Msg = err.Error()
-		return
-	}
-	ret.Data = images
-}
-
-func getAttributeViewKeys(c *gin.Context) {
-	ret := gulu.Ret.NewResult()
-	defer c.JSON(http.StatusOK, ret)
-
-	arg, ok := util.JsonArg(c, ret)
-	if !ok {
-		return
-	}
-
-	id, _ := arg["id"].(string)
-	avID, _ := arg["avID"].(string)
-	itemID, _ := arg["itemID"].(string)
-	valueID, _ := arg["valueID"].(string)
-	var blockAttributeViewKeys []*model.BlockAttributeViewKeys
-	if "" != avID && ("" != itemID || "" != valueID) {
-		blockAttributeViewKeys = model.GetAttributeViewItemKeys(avID, itemID, valueID)
+var getAttributeViewKeys = contractHandler(apicontract.GetAttributeViewKeys, func(c *gin.Context, request apicontract.GetAttributeViewKeysRequest) apicontract.Response[[]*apicontract.AVBlockAttributeViewKeys] {
+	var values []*model.BlockAttributeViewKeys
+	if request.AvID != "" && (request.ItemID != "" || request.ValueID != "") {
+		values = model.GetAttributeViewItemKeys(request.AvID, request.ItemID, request.ValueID)
 	} else {
-		blockAttributeViewKeys = model.GetBlockAttributeViewKeys(id)
+		values = model.GetBlockAttributeViewKeys(request.ID)
 	}
 	if model.IsReadOnlyRoleContext(c) {
-		publishAccess := model.GetPublishAccess()
-		blockAttributeViewKeys = model.FilterBlockAttributeViewKeysByPublishAccess(c, publishAccess, blockAttributeViewKeys)
+		values = model.FilterBlockAttributeViewKeysByPublishAccess(c, model.GetPublishAccess(), values)
 	}
-	ret.Data = blockAttributeViewKeys
+	return apicontract.Success(avContractSlice(values, toContractAVBlockAttributeViewKeys))
+})
+
+var getAttributeViewSearchTarget = contractHandler(apicontract.GetAttributeViewSearchTarget, func(c *gin.Context, request apicontract.GetAttributeViewSearchTargetRequest) apicontract.Response[*apicontract.AVAttributeViewSearchTarget] {
+	return apicontract.Success(toContractAVAttributeViewSearchTarget(model.GetAttributeViewSearchTarget(request.ID, append([]string(nil), request.Keywords...))))
+})
+
+var getAttributeViewBacklinks = contractHandler(apicontract.GetAttributeViewBacklinks, func(c *gin.Context, request apicontract.GetAttributeViewBacklinksRequest) apicontract.Response[*apicontract.AVAttributeViewBacklinks] {
+	values := model.GetAttributeViewBacklinks(request.ID, request.AvID, request.ItemID, request.ValueID)
+	if model.IsReadOnlyRoleContext(c) {
+		values = model.FilterAttributeViewBacklinksByPublishAccess(c, model.GetPublishAccess(), values)
+	}
+	return apicontract.Success(toContractAVAttributeViewBacklinks(values))
+})
+
+var setAttributeViewBlockAttr = contractHandler(apicontract.SetAttributeViewBlockAttr, func(c *gin.Context, request apicontract.SetAttributeViewBlockAttrRequest) apicontract.Response[apicontract.AVValueData] {
+	itemID := ""
+	if request.ItemID != nil {
+		itemID = *request.ItemID
+	} else if request.RowID != nil {
+		msg := fmt.Sprintf("[%s] parameter [%s] is deprecated, visit [https://github.com/siyuan-note/siyuan/issues/15727] for details", c.Request.RequestURI, "rowID")
+		logging.LogWarn(msg)
+		return apicontract.Failure[apicontract.AVValueData](-1, msg)
+	}
+	if err := model.PerformAttributeViewOperations([]*model.Operation{{Action: "updateAttrViewCell", AvID: request.AvID,
+		KeyID: request.KeyID, RowID: itemID, Data: request.Value}}); err != nil {
+		return apicontract.Failure[apicontract.AVValueData](-1, err.Error())
+	}
+	view, err := av.ParseAttributeView(request.AvID)
+	if err != nil {
+		return apicontract.Failure[apicontract.AVValueData](-1, err.Error())
+	}
+	value := view.GetValue(request.KeyID, itemID)
+	model.ReloadAttrView(request.AvID)
+	return apicontract.Success(apicontract.AVValueData{Value: toContractAVValue(value)})
+})
+
+var batchSetAttributeViewBlockAttrs = contractHandler(apicontract.BatchSetAttributeViewBlockAttrs, func(c *gin.Context, request apicontract.BatchSetAttributeViewBlockAttrsRequest) apicontract.Response[apicontract.Null] {
+	operations := make([]*model.Operation, len(request.Values))
+	for i, value := range request.Values {
+		itemID := ""
+		if value.ItemID != nil {
+			itemID = *value.ItemID
+		} else if value.RowID != nil {
+			msg := fmt.Sprintf("[%s] parameter [%s] is deprecated, visit [https://github.com/siyuan-note/siyuan/issues/15727] for details", c.Request.RequestURI, "rowID")
+			logging.LogWarn(msg)
+			return apicontract.Failure[apicontract.Null](-1, msg)
+		}
+		operations[i] = &model.Operation{Action: "updateAttrViewCell", AvID: request.AvID, KeyID: value.KeyID,
+			RowID: itemID, Data: value.Value}
+	}
+	if err := model.PerformAttributeViewOperations(operations); err != nil {
+		return apicontract.Failure[apicontract.Null](-1, err.Error())
+	}
+	model.ReloadAttrView(request.AvID)
+	return apicontract.Success(apicontract.Null{})
+})
+
+func avPage(value *float64, fallback int) int {
+	if value == nil {
+		return fallback
+	}
+	return int(*value)
 }
-
-func getAttributeViewSearchTarget(c *gin.Context) {
-	ret := gulu.Ret.NewResult()
-	defer c.JSON(http.StatusOK, ret)
-
-	arg, ok := util.JsonArg(c, ret)
-	if !ok {
-		return
-	}
-
-	id, _ := arg["id"].(string)
-	keywordsArg, _ := arg["keywords"].([]any)
-	var keywords []string
-	for _, keywordArg := range keywordsArg {
-		if keyword, ok := keywordArg.(string); ok {
-			keywords = append(keywords, keyword)
+func avNonemptyStrings(values []string) []string {
+	var ret []string
+	for _, value := range values {
+		if value != "" {
+			ret = append(ret, value)
 		}
 	}
-	ret.Data = model.GetAttributeViewSearchTarget(id, keywords)
-}
-
-func getAttributeViewBacklinks(c *gin.Context) {
-	ret := gulu.Ret.NewResult()
-	defer c.JSON(http.StatusOK, ret)
-
-	arg, ok := util.JsonArg(c, ret)
-	if !ok {
-		return
-	}
-
-	id, _ := arg["id"].(string)
-	avID, _ := arg["avID"].(string)
-	itemID, _ := arg["itemID"].(string)
-	valueID, _ := arg["valueID"].(string)
-	backlinks := model.GetAttributeViewBacklinks(id, avID, itemID, valueID)
-	if model.IsReadOnlyRoleContext(c) {
-		publishAccess := model.GetPublishAccess()
-		backlinks = model.FilterAttributeViewBacklinksByPublishAccess(c, publishAccess, backlinks)
-	}
-	ret.Data = backlinks
-}
-
-func setAttributeViewBlockAttr(c *gin.Context) {
-	ret := gulu.Ret.NewResult()
-	defer c.JSON(http.StatusOK, ret)
-
-	arg, ok := util.JsonArg(c, ret)
-	if !ok {
-		return
-	}
-
-	avID := arg["avID"].(string)
-	keyID := arg["keyID"].(string)
-	var itemID string
-	if _, ok := arg["itemID"]; ok {
-		itemID = arg["itemID"].(string)
-	} else if _, ok := arg["rowID"]; ok {
-		// TODO 该参数将于 2026 年 12 月 1 日后删除
-		msg := fmt.Sprintf("[%s] parameter [%s] is deprecated, visit [https://github.com/siyuan-note/siyuan/issues/15727] for details",
-			c.Request.RequestURI, "rowID")
-		logging.LogWarn(msg)
-		ret.Code = -1
-		ret.Msg = msg
-		return
-	}
-	value := arg["value"].(any)
-	updatedVal, err := model.UpdateAttributeViewCell(nil, avID, keyID, itemID, value)
-	if err != nil {
-		ret.Code = -1
-		ret.Msg = err.Error()
-		return
-	}
-
-	ret.Data = map[string]any{
-		"value": updatedVal,
-	}
-
-	model.ReloadAttrView(avID)
-}
-
-func batchSetAttributeViewBlockAttrs(c *gin.Context) {
-	// Add kernel API `/api/av/batchSetAttributeViewBlockAttrs` https://github.com/siyuan-note/siyuan/issues/15310
-	ret := gulu.Ret.NewResult()
-	defer c.JSON(http.StatusOK, ret)
-
-	arg, ok := util.JsonArg(c, ret)
-	if !ok {
-		return
-	}
-
-	avID := arg["avID"].(string)
-	values := arg["values"].([]any)
-	err := model.BatchUpdateAttributeViewCells(nil, avID, values)
-	if err != nil {
-		ret.Code = -1
-		ret.Msg = err.Error()
-		return
-	}
-
-	model.ReloadAttrView(avID)
+	return ret
 }

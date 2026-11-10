@@ -1,18 +1,6 @@
-// SiYuan - From thought to insight, with agents
+// SiYuan - https://github.com/siyuan-note/siyuan
 // Copyright (c) 2020-present, b3log.org
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU Affero General Public License for more details.
-//
-// You should have received a copy of the GNU Affero General Public License
-// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+// SPDX-License-Identifier: AGPL-3.0-or-later
 
 package sql
 
@@ -117,6 +105,12 @@ func TestRefsFromTreeIncludesAttributeViewRichTextReferences(t *testing.T) {
 	}
 
 	root := &ast.Node{Type: ast.NodeDocument, ID: rootID}
+	originalPalette := av.LoadWorkspacePalette
+	av.LoadWorkspacePalette = func() ([]*av.AttributeViewCustomColor, []string) {
+		t.Fatal("reference indexing must not load the workspace palette")
+		return nil, nil
+	}
+	t.Cleanup(func() { av.LoadWorkspacePalette = originalPalette })
 	databaseNode := &ast.Node{Type: ast.NodeAttributeView, ID: databaseID, AttributeViewID: attributeView}
 	root.AppendChild(databaseNode)
 	tree := &parse.Tree{Root: root, ID: rootID, Box: "20260904009004-box0001", Path: "/" + rootID + ".sy"}

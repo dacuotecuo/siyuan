@@ -62,7 +62,7 @@ export const openExportOptionsDialog = (onConfirm: (options: IExportMdOptionsPay
     ${row(window.siyuan.languages.removeAssetsID, window.siyuan.languages.removeAssetsIDTip, bool("removeAssetsID"))}
     <!-- 其他 -->
     ${row(window.siyuan.languages.export31, window.siyuan.languages.export32, bool("inlineMemo"))}
-    ${row(window.siyuan.languages.ref, window.siyuan.languages.export11,
+    ${row(window.siyuan.languages.exportBlockRefMode, window.siyuan.languages.export11,
         select("blockRefMode", [
             {value: 2, label: window.siyuan.languages.export2},
             {value: 3, label: window.siyuan.languages.export3},
@@ -144,7 +144,7 @@ interface IExportMdOptionsPayload {
 // exportMarkdownZip 为 Markdown .zip 导出入口：弹参数对话框，确认后按文档、文档集合或笔记本集合调用对应 API。
 // 单文档时先查询文档信息，若无子文档/关联文档则隐藏对应配置项，减少干扰。
 export const exportMarkdownZip = async(options: IExportMdOptions) => {
-    if (!getHostCapabilities().importExport) {
+    if (!getHostCapabilities().documentImportExport) {
         return;
     }
     let showSubDocs = true;
@@ -153,6 +153,9 @@ export const exportMarkdownZip = async(options: IExportMdOptions) => {
     if (options.id) {
         // 查询文档是否有子文档、引用及绑定的数据库，无则隐藏对应配置项 #17031
         const docInfo = await fetchSyncPost("/api/block/getDocInfo", {id: options.id});
+        if (docInfo.code !== 0) {
+            return;
+        }
         const data = docInfo.data;
         showSubDocs = 0 < data.subFileCount;
         showRelatedDocs = 0 < (data.refCount || 0) || 0 < (data.attrViews?.length || 0);

@@ -1,18 +1,6 @@
-// SiYuan - From thought to insight, with agents
+// SiYuan - https://github.com/siyuan-note/siyuan
 // Copyright (c) 2020-present, b3log.org
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU Affero General Public License for more details.
-//
-// You should have received a copy of the GNU Affero General Public License
-// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+// SPDX-License-Identifier: AGPL-3.0-or-later
 
 package util
 
@@ -130,7 +118,7 @@ func isGoogleGeminiOpenAICompatibleEndpoint(apiBaseURL, model string) bool {
 }
 
 // WrapGeminiThoughtSignatureTransport 为 Google OpenAI 兼容端点补充工具调用签名往返支持。
-// 该函数导出仅用于 Agent 集成测试构造本地上游，生产代码通过 NewOpenAIClientWithModel 使用。
+// 该函数导出仅用于 Agent 集成测试构造本地上游，生产代码通过 NewAIClientWithModel 使用。
 func WrapGeminiThoughtSignatureTransport(base openai.HTTPDoer) openai.HTTPDoer {
 	return &geminiThoughtSignatureTransport{base: base}
 }
@@ -383,8 +371,8 @@ func (r *geminiThoughtSignatureReadCloser) captureLine(line []byte) {
 	if len(line) == 0 {
 		return
 	}
-	if bytes.HasPrefix(line, []byte("data:")) {
-		line = bytes.TrimSpace(bytes.TrimPrefix(line, []byte("data:")))
+	if after, ok := bytes.CutPrefix(line, []byte("data:")); ok {
+		line = bytes.TrimSpace(after)
 	}
 	if len(line) == 0 || bytes.Equal(line, []byte("[DONE]")) {
 		return
@@ -452,6 +440,6 @@ type geminiChatToolCall struct {
 	ExtraContent struct {
 		Google struct {
 			ThoughtSignature string `json:"thought_signature,omitempty"`
-		} `json:"google,omitempty"`
-	} `json:"extra_content,omitempty"`
+		} `json:"google"`
+	} `json:"extra_content"`
 }

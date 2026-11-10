@@ -1,25 +1,119 @@
-// SiYuan - From thought to insight, with agents
+// SiYuan - https://github.com/siyuan-note/siyuan
 // Copyright (c) 2020-present, b3log.org
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU Affero General Public License for more details.
-//
-// You should have received a copy of the GNU Affero General Public License
-// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+// SPDX-License-Identifier: AGPL-3.0-or-later
 
 package sql
 
 import (
+	"context"
 	gosql "database/sql"
+	"reflect"
 	"testing"
 )
+
+func TestQueryWritesWithoutResultColumns(t *testing.T) {
+	for _, kind := range []string{"limited", "raw", "arguments", "row limit"} {
+		t.Run(kind, func(t *testing.T) {
+			testDB, err := gosql.Open("sqlite3_extended", ":memory:")
+			if err != nil {
+				t.Fatal(err)
+			}
+			testDB.SetMaxOpenConns(1)
+			previous := db
+			db = testDB
+			t.Cleanup(func() { db = previous; testDB.Close() })
+			run := func(stmt string) ([]map[string]any, error) {
+				switch kind {
+				case "limited":
+					rows, _, err := QueryWithLimitInfo(stmt, 2)
+					return rows, err
+				case "row limit":
+					rows, _, err := QueryWithRowLimitInfo(stmt, 2)
+					return rows, err
+				case "arguments":
+					return QueryNoLimitArgs(stmt)
+				default:
+					return QueryNoLimit(stmt)
+				}
+			}
+			testRawSQLWrites(t, testDB, run)
+		})
+	}
+}
+
+func testRawSQLWrites(t *testing.T, testDB *gosql.DB, run func(string) ([]map[string]any, error)) {
+	t.Helper()
+	exec := func(stmt string) {
+		t.Helper()
+		if rows, err := run(stmt); err != nil || len(rows) != 0 {
+			t.Fatalf("%s: rows=%v, err=%v", stmt, rows, err)
+		}
+	}
+	check := func(stmt string, want int) {
+		t.Helper()
+		var got int
+		if err := testDB.QueryRow(stmt).Scan(&got); err != nil || got != want {
+			t.Fatalf("%s: got=%d, want=%d, err=%v", stmt, got, want, err)
+		}
+	}
+	exec("CREATE TABLE query_write_items (id INTEGER PRIMARY KEY, n INTEGER NOT NULL)")
+	check("SELECT count(*) FROM sqlite_schema WHERE name = 'query_write_items'", 1)
+	exec("INSERT INTO query_write_items VALUES (1, 1)")
+	check("SELECT n FROM query_write_items WHERE id = 1", 1)
+	exec("UPDATE query_write_items SET n = n + 1 WHERE id = 1")
+	check("SELECT n FROM query_write_items WHERE id = 1", 2)
+	for _, stmt := range []string{
+		"INSERT INTO query_write_items VALUES (1, 3)",
+		"UPDATE query_write_items SET n = NULL WHERE id = 1",
+	} {
+		if _, err := run(stmt); err == nil {
+			t.Fatalf("execution failure was reported as success: %s", stmt)
+		}
+		check("SELECT n FROM query_write_items WHERE id = 1", 2)
+	}
+	exec("ALTER TABLE query_write_items ADD COLUMN extra TEXT")
+	check("SELECT count(*) FROM pragma_table_info('query_write_items') WHERE name = 'extra'", 1)
+	exec("DELETE FROM query_write_items WHERE id = 1")
+	check("SELECT count(*) FROM query_write_items", 0)
+	exec("DROP TABLE query_write_items")
+	check("SELECT count(*) FROM sqlite_schema WHERE name = 'query_write_items'", 0)
+	exec("; -- empty statement")
+}
+
+func TestQueryArgumentsExecuteWritesOnce(t *testing.T) {
+	testDB, boxID := useEncryptedQueryTestDB(t)
+	previous := db
+	db = testDB
+	t.Cleanup(func() { db = previous })
+	for _, kind := range []string{"global", "box", "context"} {
+		t.Run(kind, func(t *testing.T) {
+			if _, err := testDB.Exec("DROP TABLE IF EXISTS args_items; CREATE TABLE args_items (n INTEGER NOT NULL); INSERT INTO args_items VALUES (1)"); err != nil {
+				t.Fatal(err)
+			}
+			run := func(value any) ([]map[string]any, error) {
+				const stmt = "UPDATE args_items SET n = n + ?"
+				switch kind {
+				case "box":
+					return QueryNoLimitArgsInBox(stmt, boxID, value)
+				case "context":
+					return QueryNoLimitArgsInBoxContext(context.Background(), stmt, boxID, value)
+				default:
+					return QueryNoLimitArgs(stmt, value)
+				}
+			}
+			if rows, err := run(2); err != nil || len(rows) != 0 {
+				t.Fatalf("parameterized write failed: %v, %v", rows, err)
+			}
+			if _, err := run(nil); err == nil {
+				t.Fatal("constraint failure was ignored")
+			}
+			var n int
+			if err := testDB.QueryRow("SELECT n FROM args_items").Scan(&n); err != nil || n != 3 {
+				t.Fatalf("parameterized write skipped or repeated: %d, %v", n, err)
+			}
+		})
+	}
+}
 
 func createGraphTestBlocksTable(t *testing.T) *gosql.DB {
 	t.Helper()
@@ -102,13 +196,36 @@ func TestGraphChildBlocksAcceptNormalCondition(t *testing.T) {
 
 func TestRootBlockExactMatchCondition(t *testing.T) {
 	condition, arg := rootBlockExactMatchCondition("Math%_\\", true)
-	if "content = ?" != condition || "Math%_\\" != arg {
+	if "content = ? OR name = ? OR instr(',' || alias || ',', ?) > 0" != condition || !reflect.DeepEqual(arg, []any{"Math%_\\", "Math%_\\", ",Math%_\\,"}) {
 		t.Fatalf("unexpected case-sensitive exact match: condition=%q arg=%q", condition, arg)
 	}
 
 	condition, arg = rootBlockExactMatchCondition("Math%_\\", false)
-	if "content LIKE ? ESCAPE '\\'" != condition || "Math\\%\\_\\\\" != arg {
+	if "content LIKE ? ESCAPE '\\' OR name LIKE ? ESCAPE '\\' OR (',' || alias || ',') LIKE ? ESCAPE '\\'" != condition || !reflect.DeepEqual(arg, []any{"Math\\%\\_\\\\", "Math\\%\\_\\\\", "%,Math\\%\\_\\\\,%"}) {
 		t.Fatalf("unexpected case-insensitive exact match: condition=%q arg=%q", condition, arg)
+	}
+}
+
+func TestDocumentSearchDepthUsesIdentityPath(t *testing.T) {
+	testDB := createGraphTestBlocksTable(t)
+	previousDB := db
+	db = testDB
+	t.Cleanup(func() { db = previousDB })
+	for _, doc := range []struct{ id, dataPath, displayPath string }{
+		{"nested", "/parent/nested.sy", "/Parent/Child"},
+		{"literal", "/literal.sy", "/Literal/title/with/separators"},
+	} {
+		_, err := testDB.Exec(`INSERT INTO blocks SELECT ?, '', ?, '', 'box', ?, ?, '', '', '', '',
+			'Title', '', '', 0, 'd', '', '', 0, '', ''`, doc.id, doc.id, doc.dataPath, doc.displayPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, result := range [][]*Block{QueryRootBlockByCondition("1=1", "no exact match", 10),
+		QueryRootBlockByConditionInBox("1=1", "no exact match", 10, "box")} {
+		if len(result) != 2 || result[0].ID != "literal" || result[1].ID != "nested" {
+			t.Fatalf("display title changed structural depth: %+v", result)
+		}
 	}
 }
 
@@ -144,6 +261,36 @@ func TestQueryLikeEscape(t *testing.T) {
 		}
 		if 1 != len(rows) || "literal" != rows[0]["id"] {
 			t.Fatalf("unexpected query result [stmt=%s]: %#v", stmt, rows)
+		}
+	}
+}
+
+func TestRootBlockExactMatchBeforeLimit(t *testing.T) {
+	testDB := createGraphTestBlocksTable(t)
+	for _, sensitive := range []bool{true, false} {
+		for _, field := range []string{"content", "name", "alias"} {
+			if _, err := testDB.Exec("DELETE FROM blocks"); err != nil {
+				t.Fatal(err)
+			}
+			keyword := "Math%_\\'"
+			value := keyword
+			if field == "alias" {
+				value = "Other," + value + ",Last"
+			}
+			if _, err := testDB.Exec("INSERT INTO blocks (id, content, name, alias) VALUES ('partial', 'Higher Math', 'Higher Math', 'Higher Math')"); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := testDB.Exec("INSERT INTO blocks (id, "+field+") VALUES ('exact', ?)", value); err != nil {
+				t.Fatal(err)
+			}
+			condition, args := rootBlockExactMatchCondition(keyword, sensitive)
+			var id string
+			if err := testDB.QueryRow("SELECT id FROM blocks ORDER BY CASE WHEN "+condition+" THEN 0 ELSE 1 END, rowid LIMIT 1", args...).Scan(&id); err != nil {
+				t.Fatal(err)
+			}
+			if id != "exact" {
+				t.Fatalf("exact %s match lost before limit (sensitive=%t): %s", field, sensitive, id)
+			}
 		}
 	}
 }

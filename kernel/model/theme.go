@@ -1,18 +1,6 @@
-// SiYuan - From thought to insight, with agents
+// SiYuan - https://github.com/siyuan-note/siyuan
 // Copyright (c) 2020-present, b3log.org
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU Affero General Public License for more details.
-//
-// You should have received a copy of the GNU Affero General Public License
-// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+// SPDX-License-Identifier: AGPL-3.0-or-later
 
 package model
 
@@ -33,16 +21,18 @@ const maxCSSVarResolveDepth = 64
 
 // 将文档中的 CSS 变量替换为具体的主题样式值
 func fillThemeStyleVar(tree *parse.Tree) {
+	confAppearanceSnapshot := Conf.LoadAppearance()
+
 	if nil == tree || nil == tree.Root {
 		return
 	}
 
-	isDarkMode := 1 == Conf.Appearance.Mode
+	isDarkMode := 1 == confAppearanceSnapshot.Mode
 	var themeStyles map[string]string
 	if isDarkMode {
-		themeStyles = getThemeStyleVar(Conf.Appearance.ThemeDark, true)
+		themeStyles = getThemeStyleVar(confAppearanceSnapshot.ThemeDark, true)
 	} else {
-		themeStyles = getThemeStyleVar(Conf.Appearance.ThemeLight, false)
+		themeStyles = getThemeStyleVar(confAppearanceSnapshot.ThemeLight, false)
 	}
 	inlineStyles, err := GetInlineStyles()
 	if err != nil {
@@ -358,7 +348,7 @@ func isCSSIdentifierByte(value byte) bool {
 		'a' <= value && value <= 'z' || 'A' <= value && value <= 'Z'
 }
 
-// 获取主题的样式变量映射表
+// getThemeStyleVar 读取主题 CSS 变量；第三方主题缺基础变量时以 daylight/midnight 兜底。
 func getThemeStyleVar(theme string, isDarkMode bool) (ret map[string]string) {
 	ret = map[string]string{}
 
@@ -367,7 +357,7 @@ func getThemeStyleVar(theme string, isDarkMode bool) (ret map[string]string) {
 	// 第三方主题可能缺少基础变量，先加载默认主题作为基础
 	defaultTheme := map[bool]string{false: "daylight", true: "midnight"}[isDarkMode]
 	if theme != defaultTheme {
-		defaultData, err := os.ReadFile(filepath.Join(util.ThemesPath, defaultTheme, "theme.css"))
+		defaultData, err := os.ReadFile(filepath.Join(util.AppearancePackagePath("themes", defaultTheme), "theme.css"))
 		if err != nil {
 			logging.LogErrorf("read default theme [%s] css file failed: %s", defaultTheme, err)
 		} else {
@@ -376,7 +366,11 @@ func getThemeStyleVar(theme string, isDarkMode bool) (ret map[string]string) {
 	}
 
 	// 拼接主题 CSS，后面的规则覆盖前面的规则
-	userData, err := os.ReadFile(filepath.Join(util.ThemesPath, theme, "theme.css"))
+	themePath := util.AppearancePackagePath("themes", theme)
+	if themePath == "" {
+		return ret
+	}
+	userData, err := os.ReadFile(filepath.Join(themePath, "theme.css"))
 	if err != nil {
 		logging.LogErrorf("read theme [%s] css file failed: %s", theme, err)
 		return ret

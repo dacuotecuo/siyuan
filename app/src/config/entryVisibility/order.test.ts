@@ -2,6 +2,7 @@ import * as assert from "node:assert/strict";
 import test from "node:test";
 import {getEntryCatalogChildren} from "./catalog";
 import {
+    isValidEntryOrder,
     mergeEntryOrder,
     mergeEntryOrderPreservingUnknown,
     moveEntryOrder,
@@ -10,8 +11,193 @@ import {
     resolveEntryOrderWithBoundaryDefaults,
 } from "./order";
 
+test("new OCR actions merge into saved image menus while retaining plugin slots and valid separators", () => {
+    const entries = getEntryCatalogChildren("inline.image.ocr");
+    const defaults = entries.map(item => item.key);
+    const saved = ["copyOCRText", "plugin:example:item", "ocrResult", "separator_reOCR", "reOCR"];
+    const separators = new Set(entries.filter(item => item.type === "separator").map(item => item.key));
+    const merged = mergeEntryOrderPreservingUnknown(defaults, saved, undefined, separators);
+    assert.deepEqual(merged, ["copyOCRText", "plugin:example:item", "clearOCRText", "ocrResult", "separator_reOCR", "reOCR", "reAIOCR"]);
+    assert.deepEqual(resolveEntryOrder([...defaults, "plugin:example:item"], merged, separators), merged);
+    assert.equal(isValidEntryOrder(merged, separators), true);
+});
+
+test("super block creation merges into saved menu orders and preserves plugin slots", () => {
+    const groups: Array<[string, string[]]> = [
+        ["gutter.single.superBlock", ["prependSuperBlockColumn", "prependSuperBlockChild", "appendSuperBlockColumn", "appendSuperBlockChild"]],
+        ["gutter.single", ["createSuperBlockLeft", "createSuperBlockRight"]],
+        ["editor.slash.menu", ["horizontalSuperBlock", "verticalSuperBlock"]],
+    ];
+    groups.forEach(([path, added]) => {
+        const entries = getEntryCatalogChildren(path);
+        const defaults = entries.map(item => item.key);
+        const saved = defaults.filter(key => !added.includes(key)).reverse();
+        saved.splice(1, 0, "plugin:example:item");
+        const merged = mergeEntryOrderPreservingUnknown(defaults, saved);
+        assert.deepEqual(merged.filter(key => !added.includes(key)), saved);
+        added.forEach(key => {
+            assert.equal(merged.filter(item => item === key).length, 1);
+            assert.equal(entries.find(item => item.key === key).simple, true);
+        });
+        const separators = new Set(entries.filter(item => item.type === "separator").map(item => item.key));
+        const resolved = resolveEntryOrder([...defaults, "plugin:example:item"], merged, separators);
+        assert.equal(resolved.includes("plugin:example:item"), true);
+        assert.equal(separators.has(resolved[0]), false);
+        assert.equal(separators.has(resolved[resolved.length - 1]), false);
+        resolved.forEach((key, index) => {
+            assert.equal(separators.has(key) && separators.has(resolved[index + 1]), false);
+        });
+    });
+});
+
+test("document tree duplication merges into saved orders and retains plugin slots", () => {
+    const entries = getEntryCatalogChildren("docTree.document.copy");
+    const defaults = entries.map(item => item.key);
+    const saved = defaults.filter(key => key !== "duplicateTree");
+    saved.splice(1, 0, "plugin:example:item");
+    const merged = mergeEntryOrderPreservingUnknown(defaults, saved);
+    assert.deepEqual(merged.filter(key => key !== "duplicateTree"), saved);
+    assert.equal(merged[merged.indexOf("duplicate") + 1], "duplicateTree");
+    const separators = new Set(entries.filter(item => item.type === "separator").map(item => item.key));
+    assert.deepEqual(resolveEntryOrder([...defaults, "plugin:example:item"], merged, separators), merged);
+    assert.deepEqual(resolveEntryOrder(["duplicate", "duplicateTree"], merged, separators),
+        ["duplicate", "duplicateTree"]);
+});
+
 test("entry order keeps custom order and inserts new entries by their default neighbors", () => {
     assert.deepEqual(mergeEntryOrder(["a", "new", "b", "c"], ["c", "a", "b"]), ["c", "a", "new", "b"]);
+});
+
+test("database calendar view merges into saved slash orders and preserves plugin slots", () => {
+    const entries = getEntryCatalogChildren("editor.slash.menu");
+    const defaults = entries.map(item => item.key);
+    const saved = defaults.filter(key => key !== "databaseCalendarView");
+    saved.splice(1, 0, "plugin:example:item");
+    const merged = mergeEntryOrderPreservingUnknown(defaults, saved);
+    assert.deepEqual(merged.filter(key => key !== "databaseCalendarView"), saved);
+    assert.equal(merged[merged.indexOf("databaseKanbanView") + 1], "databaseCalendarView");
+    const separators = new Set(entries.filter(item => item.type === "separator").map(item => item.key));
+    assert.deepEqual(resolveEntryOrder([...defaults, "plugin:example:item"], merged, separators), merged);
+    assert.deepEqual(resolveEntryOrder(["databaseCalendarView", "databaseListView"], merged, separators),
+        ["databaseListView", "databaseCalendarView"]);
+    assert.equal(entries.find(item => item.key === "databaseCalendarView").simple, true);
+});
+
+test("database list view merges into saved slash orders and preserves plugin slots", () => {
+    const entries = getEntryCatalogChildren("editor.slash.menu");
+    const defaults = entries.map(item => item.key);
+    const saved = defaults.filter(key => key !== "databaseListView");
+    saved.splice(1, 0, "plugin:example:item");
+    const merged = mergeEntryOrderPreservingUnknown(defaults, saved);
+    assert.deepEqual(merged.filter(key => key !== "databaseListView"), saved);
+    assert.equal(merged[merged.indexOf("databaseTableView") + 1], "databaseListView");
+    const separators = new Set(entries.filter(item => item.type === "separator").map(item => item.key));
+    assert.deepEqual(resolveEntryOrder([...defaults, "plugin:example:item"], merged, separators), merged);
+    assert.deepEqual(resolveEntryOrder(["databaseTableView", "databaseListView"], merged, separators),
+        ["databaseTableView", "databaseListView"]);
+});
+
+test("retired database map entry stays hidden without changing saved slash or plugin order", () => {
+    const entries = getEntryCatalogChildren("editor.slash.menu");
+    const defaults = entries.map(item => item.key);
+    const saved = [...defaults];
+    saved.splice(saved.indexOf("databaseCalendarView") + 1, 0, "databaseMapView", "plugin:example:item");
+    const merged = mergeEntryOrderPreservingUnknown(defaults, saved);
+    const separators = new Set(entries.filter(item => item.type === "separator").map(item => item.key));
+    assert.equal(defaults.includes("databaseMapView"), false);
+    assert.deepEqual(resolveEntryOrder([...defaults, "plugin:example:item"], merged, separators),
+        saved.filter(key => key !== "databaseMapView"));
+});
+
+test("custom task status merges into saved list menus without moving existing entries", () => {
+    const entries = getEntryCatalogChildren("gutter.single.listBlock");
+    const defaults = entries.map(item => item.key);
+    const saved = ["appendListItem", "listMindmap", "plugin:example:item", "orderedListStart", "continueListNumbering",
+        "separator_numbering", "prependListItem"];
+    const merged = mergeEntryOrderPreservingUnknown(defaults, saved);
+    const added = ["taskStatusTodo", "taskStatusInProgress", "taskStatusDone", "taskStatusCanceled", "customTaskStatus", "separator_taskStatus"];
+    assert.deepEqual(merged.filter(key => !added.includes(key)), saved);
+    assert.deepEqual(merged.slice(merged.indexOf("taskStatusTodo"), merged.indexOf("orderedListStart")), added);
+    assert.deepEqual(resolveEntryOrder(["customTaskStatus", "prependListItem", "appendListItem", "plugin:example:item"],
+        merged, new Set(["separator_numbering"])), ["appendListItem", "plugin:example:item", "customTaskStatus", "prependListItem"]);
+});
+
+test("remove list merges into saved conversion menus and preserves plugin slots", () => {
+    for (const path of ["gutter.single.turnInto", "gutter.multi.turnInto"]) {
+        const entries = getEntryCatalogChildren(path);
+        const defaults = entries.map(item => item.key);
+        const saved = defaults.filter(key => key !== "removeList").reverse();
+        saved.splice(1, 0, "plugin:example:item");
+        const merged = mergeEntryOrderPreservingUnknown(defaults, saved);
+        assert.deepEqual(merged.filter(key => key !== "removeList"), saved);
+        assert.equal(merged[merged.indexOf("heading6") + 1], "removeList");
+        const separators = new Set(entries.filter(item => item.type === "separator").map(item => item.key));
+        assert.deepEqual(resolveEntryOrder([...defaults, "plugin:example:item"], merged, separators), merged);
+        assert.deepEqual(resolveEntryOrder(["paragraph", "removeList"], merged, separators), ["removeList", "paragraph"]);
+    }
+});
+
+test("recursive remove list merges without changing saved actions or plugin slots", () => {
+    for (const root of ["gutter.single", "gutter.multi"]) {
+        const defaults = getEntryCatalogChildren(`${root}.turnInto.includeSublists`).map(item => item.key);
+        const saved = ["recursiveParagraph", "plugin:example:item", "recursiveList", "recursiveOrderedList", "recursiveCheck"];
+        const merged = mergeEntryOrderPreservingUnknown(defaults, saved);
+        assert.deepEqual(merged.filter(key => key !== "recursiveRemoveList"), saved);
+        assert.equal(merged[1], "plugin:example:item");
+        assert.equal(merged[merged.indexOf("recursiveList") - 1], "recursiveRemoveList");
+        assert.deepEqual(resolveEntryOrder([...defaults, "plugin:example:item"], merged, new Set()), merged);
+    }
+});
+
+test("list mind map view merges into conversion menus and preserves plugin slots", () => {
+    const entries = getEntryCatalogChildren("gutter.single.turnInto");
+    const defaults = entries.map(item => item.key);
+    const saved = defaults.filter(key => key !== "listMindmap");
+    saved.splice(1, 0, "plugin:example:item");
+    const merged = mergeEntryOrderPreservingUnknown(defaults, saved);
+    const separators = new Set(entries.filter(item => item.type === "separator").map(item => item.key));
+    assert.deepEqual(merged.filter(key => key !== "listMindmap"), saved);
+    assert.equal(merged[1], "plugin:example:item");
+    assert.equal(merged[merged.indexOf("check") + 1], "listMindmap");
+    assert.deepEqual(resolveEntryOrder([...defaults, "plugin:example:item"], merged, separators), merged);
+    assert.deepEqual(resolveEntryOrder(["list", "check", "listMindmap"], merged, separators),
+        ["list", "check", "listMindmap"]);
+});
+
+test("definition conversion submenus preserve custom order and plugin slots", () => {
+    for (const id of ["defBlock", "defBlockChildren"]) {
+        const entries = getEntryCatalogChildren(`inline.ref.turnInto.${id}`);
+        const defaults = entries.map(item => item.key);
+        assert.deepEqual(mergeEntryOrder(defaults, []), ["originalToRef", "originalToEmbed"]);
+        const saved = ["originalToEmbed", "plugin:example:item", "originalToRef"];
+        const merged = mergeEntryOrderPreservingUnknown(defaults, saved);
+        assert.deepEqual(merged, saved);
+        assert.deepEqual(resolveEntryOrder([...defaults, "plugin:example:item"], merged, new Set()), saved);
+    }
+});
+
+test("missing table and image actions merge into saved orders while preserving plugin slots", () => {
+    [
+        {path: "gutter.single.table", added: ["cancelMerged", "transposeTable"]},
+        {path: "inline.text.more", added: ["cancelMerged"]},
+        {path: "inline.image", added: ["openBy"]},
+        {path: "gutter.single.copy", added: ["copyMirror"]},
+        {path: "gutter.single.blockEmbed", added: ["refPopover", "embedHeadingLevel", "embedBlockBreadcrumbParentPath"]},
+        {path: "gutter.single.blockEmbed.embedBlockBreadcrumb", added: ["enable", "disable", "default"]},
+        {path: "gutter.single.blockEmbed.embedBlockBreadcrumbParentPath", added: ["enable", "disable", "default"]},
+    ].forEach(({path, added}) => {
+        const entries = getEntryCatalogChildren(path);
+        const defaults = entries.map(item => item.key);
+        const saved = defaults.filter(key => !added.includes(key));
+        saved.splice(2, 0, "plugin:example:item");
+        const merged = mergeEntryOrderPreservingUnknown(defaults, saved);
+        assert.equal(merged.indexOf("plugin:example:item"), saved.indexOf("plugin:example:item"));
+        assert.deepEqual(merged.filter(key => !added.includes(key) && key !== "plugin:example:item"),
+            saved.filter(key => key !== "plugin:example:item"));
+        added.forEach(key => assert.ok(merged.includes(key)));
+        const separators = new Set(entries.filter(item => item.type === "separator").map(item => item.key));
+        assert.deepEqual(resolveEntryOrder([...defaults, "plugin:example:item"], merged, separators), merged);
+    });
 });
 
 test("entry order inserts the code block Tab setting before the existing code options", () => {
@@ -28,6 +214,58 @@ test("entry order inserts document sorting after attributes in existing profiles
     ), ["search", "rename", "attr", "sort", "riffCard"]);
 });
 
+test("pin entries merge into document menus without moving existing plugin slots", () => {
+    const entries = getEntryCatalogChildren("docTree.document");
+    const defaults = entries.map(item => item.key);
+    const saved = defaults.filter(key => !["pinDoc", "unpinDoc"].includes(key));
+    saved.splice(1, 0, "plugin:example:item");
+    const merged = mergeEntryOrderPreservingUnknown(defaults, saved);
+    assert.deepEqual(merged.filter(key => !["pinDoc", "unpinDoc"].includes(key)), saved);
+    assert.deepEqual(merged.slice(merged.indexOf("attr"), merged.indexOf("sort") + 1), ["attr", "pinDoc", "unpinDoc", "sort"]);
+    const separators = new Set(entries.filter(item => item.type === "separator").map(item => item.key));
+    assert.deepEqual(resolveEntryOrder([...defaults, "plugin:example:item"], merged, separators), merged);
+});
+
+test("notebook pin actions merge into saved menus and preserve plugin slots", () => {
+    const entries = getEntryCatalogChildren("docTree.notebook");
+    const defaults = entries.map(item => item.key);
+    const saved = defaults.filter(key => !["pinDoc", "unpinDoc"].includes(key));
+    saved.splice(1, 0, "plugin:example:item");
+    const merged = mergeEntryOrderPreservingUnknown(defaults, saved);
+    assert.deepEqual(merged.filter(key => !["pinDoc", "unpinDoc"].includes(key)), saved);
+    assert.deepEqual(merged.slice(merged.indexOf("config"), merged.indexOf("sort") + 1),
+        ["config", "pinDoc", "unpinDoc", "sort"]);
+    const separators = new Set(entries.filter(item => item.type === "separator").map(item => item.key));
+    assert.deepEqual(resolveEntryOrder([...defaults, "plugin:example:item"], merged, separators), merged);
+});
+
+test("removed pinned area switch is not rendered while plugin slots are preserved", () => {
+    const entries = getEntryCatalogChildren("docTree.panel");
+    const defaults = entries.map(item => item.key);
+    const saved = [...defaults, "pinnedDocs"];
+    saved.splice(1, 0, "plugin:example:item");
+    const merged = mergeEntryOrderPreservingUnknown(defaults, saved);
+    assert.deepEqual(merged.filter(key => key !== "pinnedDocs" && key !== "plugin:example:item"),
+        saved.filter(key => key !== "pinnedDocs" && key !== "plugin:example:item"));
+    assert.equal(merged[1], "plugin:example:item");
+    const rendered = resolveEntryOrder([...defaults, "plugin:example:item"], merged, new Set<string>());
+    assert.deepEqual(rendered, saved.filter(key => key !== "pinnedDocs"));
+});
+
+test("multi-document pin actions merge without losing plugin slots or separators", () => {
+    const entries = getEntryCatalogChildren("docTree.multi");
+    const defaults = entries.map(item => item.key);
+    const saved = defaults.filter(key => key !== "pinDoc" && key !== "unpinDoc");
+    saved.splice(1, 0, "plugin:example:item");
+    const merged = mergeEntryOrderPreservingUnknown(defaults, saved);
+    const separators = new Set(entries.filter(item => item.type === "separator").map(item => item.key));
+    const rendered = resolveEntryOrder([...defaults, "plugin:example:item"], merged, separators);
+    assert.equal(rendered[1], "plugin:example:item");
+    assert.deepEqual(rendered.slice(rendered.indexOf("delete"), rendered.indexOf("separator_1") + 1),
+        ["delete", "pinDoc", "unpinDoc", "separator_1"]);
+    assert.deepEqual(rendered.filter(key => key !== "pinDoc" && key !== "unpinDoc"), saved);
+});
+
 test("entry order ignores unknown and duplicate keys", () => {
     assert.deepEqual(mergeEntryOrder(["a", "b", "c"], ["missing", "c", "c", "a"]), ["c", "a", "b"]);
 });
@@ -35,9 +273,22 @@ test("entry order ignores unknown and duplicate keys", () => {
 test("tab task action merges into saved layout menus while preserving plugin slots", () => {
     const defaults = getEntryCatalogChildren("gutter.single.tabs").map(item => item.key);
     const saved = ["tabsPositionLeft", "plugin:example:item", "tabsPositionTop"];
-    const merged = mergeEntryOrderPreservingUnknown(defaults, saved);
-    assert.deepEqual(merged.filter(key => key !== "tabsTask"), saved);
-    assert.deepEqual(merged, ["tabsPositionLeft", "plugin:example:item", "tabsTask", "tabsPositionTop"]);
+    const separators = new Set(["separator_tabsTask"]);
+    const merged = mergeEntryOrderPreservingUnknown(defaults, saved, undefined, separators);
+    assert.deepEqual(merged.filter(key => key !== "tabsTask" && key !== "separator_tabsTask"), saved);
+    assert.deepEqual(merged, ["tabsPositionLeft", "plugin:example:item", "separator_tabsTask", "tabsTask", "tabsPositionTop"]);
+    assert.deepEqual(resolveEntryOrder(merged, merged, separators), merged);
+});
+
+test("tab task separator merges into existing task menus with valid placement", () => {
+    const defaults = getEntryCatalogChildren("gutter.single.tabs").map(item => item.key);
+    const separators = new Set(["separator_tabsTask"]);
+    const merged = mergeEntryOrderPreservingUnknown(defaults,
+        ["tabsPositionTop", "plugin:example:item", "tabsPositionLeft", "tabsTask"], undefined, separators);
+    assert.deepEqual(merged.filter(key => key !== "separator_tabsTask"),
+        ["tabsPositionTop", "plugin:example:item", "tabsPositionLeft", "tabsTask"]);
+    assert.notEqual(merged[0], "separator_tabsTask");
+    assert.notEqual(merged[merged.length - 1], "separator_tabsTask");
 });
 
 test("tab conversion merges into saved block menus without moving plugin slots", () => {
@@ -48,7 +299,7 @@ test("tab conversion merges into saved block menus without moving plugin slots",
     const merged = mergeEntryOrderPreservingUnknown(defaults, saved);
     assert.deepEqual(merged.filter(key => key !== "tabs"), saved);
     assert.equal(merged[1], "plugin:example:item");
-    assert.equal(merged[merged.indexOf("tabs") + 1], "list");
+    assert.equal(merged[merged.indexOf("tabs") + 1], "superBlock");
 });
 
 test("document tree profiles merge sibling creation while preserving custom order and plugin slots", () => {

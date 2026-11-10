@@ -1,3 +1,7 @@
+// SiYuan - https://github.com/siyuan-note/siyuan
+// Copyright (c) 2020-present, b3log.org
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 package api
 
 import (
@@ -9,9 +13,37 @@ import (
 	"testing"
 
 	"github.com/gin-gonic/gin"
+	"github.com/siyuan-note/siyuan/kernel/conf"
+	"github.com/siyuan-note/siyuan/kernel/internal/testutil"
 	"github.com/siyuan-note/siyuan/kernel/model"
 	"github.com/siyuan-note/siyuan/kernel/util"
 )
+
+func TestResolveRequestAppID(t *testing.T) {
+	tests := []struct {
+		name     string
+		header   string
+		body     string
+		expected string
+	}{
+		{name: "header takes precedence", header: "header-app", body: "body-app", expected: "header-app"},
+		{name: "body remains compatible", body: "body-app", expected: "body-app"},
+		{name: "missing app remains external", expected: ""},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			context, _ := gin.CreateTestContext(httptest.NewRecorder())
+			context.Request = httptest.NewRequest(http.MethodPost, "/api/file/putFile", nil)
+			if test.header != "" {
+				context.Request.Header.Set(siyuanAppIDHeader, test.header)
+			}
+			if actual := resolveRequestAppID(context, test.body); actual != test.expected {
+				t.Fatalf("expected app [%s], got [%s]", test.expected, actual)
+			}
+		})
+	}
+}
 
 func TestGetFileAllowsWorkspaceTemp(t *testing.T) {
 	originalWorkspaceDir := util.WorkspaceDir
@@ -139,12 +171,16 @@ func TestGetFileAdminCanFollowAssetsSymlinkOutsideWorkspace(t *testing.T) {
 // 直接读取显式隐藏（Visible:false）笔记本下的普通文件与 .sy 文档，
 // 隐藏仅控制发布文件树中的列出，不构成访问控制边界。
 func TestGetFileReaderCanReadHiddenNotebookFile(t *testing.T) {
-	workspaceDir := t.TempDir()
+	previousConf := model.Conf
+	model.Conf = model.NewAppConf()
+	model.Conf.Sync.Store(conf.NewSync())
+	t.Cleanup(func() { model.Conf = previousConf })
+	workspaceDir := testutil.PublicDataDir(t)
 	origWorkspaceDir, origDataDir := util.WorkspaceDir, util.DataDir
 	util.WorkspaceDir = workspaceDir
 	util.DataDir = filepath.Join(workspaceDir, "data")
 	t.Cleanup(func() {
-		util.WorkspaceDir, util.DataDir = origWorkspaceDir, origDataDir
+		defer func() { util.WorkspaceDir, util.DataDir = origWorkspaceDir, origDataDir }()
 		if err := model.SetPublishAccess(model.PublishAccess{}); err != nil {
 			t.Errorf("reset publish access failed: %v", err)
 		}
@@ -189,12 +225,16 @@ func TestGetFileReaderCanReadHiddenNotebookFile(t *testing.T) {
 // TestGetFileReaderCanReadVisibleNotebookFile 验证 reader 仍可读取可见笔记本下的文件，
 // 防止 Visible 校验误伤正常发布访问。
 func TestGetFileReaderCanReadVisibleNotebookFile(t *testing.T) {
-	workspaceDir := t.TempDir()
+	previousConf := model.Conf
+	model.Conf = model.NewAppConf()
+	model.Conf.Sync.Store(conf.NewSync())
+	t.Cleanup(func() { model.Conf = previousConf })
+	workspaceDir := testutil.PublicDataDir(t)
 	origWorkspaceDir, origDataDir := util.WorkspaceDir, util.DataDir
 	util.WorkspaceDir = workspaceDir
 	util.DataDir = filepath.Join(workspaceDir, "data")
 	t.Cleanup(func() {
-		util.WorkspaceDir, util.DataDir = origWorkspaceDir, origDataDir
+		defer func() { util.WorkspaceDir, util.DataDir = origWorkspaceDir, origDataDir }()
 		if err := model.SetPublishAccess(model.PublishAccess{}); err != nil {
 			t.Errorf("reset publish access failed: %v", err)
 		}
@@ -234,12 +274,16 @@ func TestGetFileReaderCanReadVisibleNotebookFile(t *testing.T) {
 // TestGetFileEditorCanReadHiddenNotebookFile 验证编辑者不受发布可见性限制，
 // 仍可通过原始文件 API 读取隐藏笔记本下的普通文件。
 func TestGetFileEditorCanReadHiddenNotebookFile(t *testing.T) {
-	workspaceDir := t.TempDir()
+	previousConf := model.Conf
+	model.Conf = model.NewAppConf()
+	model.Conf.Sync.Store(conf.NewSync())
+	t.Cleanup(func() { model.Conf = previousConf })
+	workspaceDir := testutil.PublicDataDir(t)
 	origWorkspaceDir, origDataDir := util.WorkspaceDir, util.DataDir
 	util.WorkspaceDir = workspaceDir
 	util.DataDir = filepath.Join(workspaceDir, "data")
 	t.Cleanup(func() {
-		util.WorkspaceDir, util.DataDir = origWorkspaceDir, origDataDir
+		defer func() { util.WorkspaceDir, util.DataDir = origWorkspaceDir, origDataDir }()
 		if err := model.SetPublishAccess(model.PublishAccess{}); err != nil {
 			t.Errorf("reset publish access failed: %v", err)
 		}
@@ -279,12 +323,16 @@ func TestGetFileEditorCanReadHiddenNotebookFile(t *testing.T) {
 // TestGetFileDeniesNotebookSiyuanConf 验证非管理员无法通过原始文件 API 读取笔记本
 // .siyuan 目录下的内部文件（与发布可见性无关，黑名单独立拦截）。
 func TestGetFileDeniesNotebookSiyuanConf(t *testing.T) {
-	workspaceDir := t.TempDir()
+	previousConf := model.Conf
+	model.Conf = model.NewAppConf()
+	model.Conf.Sync.Store(conf.NewSync())
+	t.Cleanup(func() { model.Conf = previousConf })
+	workspaceDir := testutil.PublicDataDir(t)
 	origWorkspaceDir, origDataDir := util.WorkspaceDir, util.DataDir
 	util.WorkspaceDir = workspaceDir
 	util.DataDir = filepath.Join(workspaceDir, "data")
 	t.Cleanup(func() {
-		util.WorkspaceDir, util.DataDir = origWorkspaceDir, origDataDir
+		defer func() { util.WorkspaceDir, util.DataDir = origWorkspaceDir, origDataDir }()
 		if err := model.SetPublishAccess(model.PublishAccess{}); err != nil {
 			t.Errorf("reset publish access failed: %v", err)
 		}

@@ -2,6 +2,14 @@ export const isSameDragEditor = (targetEditor: Pick<Element, "contains">, source
     return targetEditor.contains(sourceElement);
 };
 
+export const isCopyBlockDrag = (lite: boolean, ctrlKey: boolean, targetEditor: Element, sourceEditor?: Element) => {
+    // 片段块没有独立的持久化 ID，跨编辑器时创建新块，仅在片段内部移动。
+    return ctrlKey || (sourceEditor !== targetEditor && (lite || isFragmentBlockDrag(sourceEditor)));
+};
+
+export const isFragmentBlockDrag = (sourceEditor?: Element) =>
+    !!sourceEditor?.closest(".protyle-lite-fragment");
+
 export type TBlockDragData = {
     html: string,
     notebookID: string,
@@ -117,6 +125,22 @@ export const getAVRowDropTarget = (targetElement: HTMLElement | false): HTMLElem
     return rowElement || targetElement;
 };
 
+export const getTabsContentDropTarget = (target: HTMLElement, hit: HTMLElement): HTMLElement | null => {
+    let item: HTMLElement;
+    if (target.getAttribute("data-type") === "NodeTabItem") {
+        item = target;
+    } else if (target.getAttribute("data-type") === "NodeTabs" &&
+        hit.closest(".tabs-header")?.parentElement === target) {
+        item = target.querySelector<HTMLElement>(':scope > .tab-item[data-tabs-hidden="false"]') ||
+            target.querySelector<HTMLElement>(":scope > .tab-item");
+    } else {
+        return target;
+    }
+    const content = item?.querySelector<HTMLElement>(":scope > .tab-item-content");
+    const blocks = content?.querySelectorAll<HTMLElement>(":scope > [data-node-id]");
+    return blocks?.[target === item ? blocks.length - 1 : 0] || content || null;
+};
+
 export const isSameSiblingMove = <T>(siblings: T[], sources: T[], target: T, isBottom: boolean) => {
     if (sources.length === 0 || sources.includes(target)) {
         return sources.includes(target);
@@ -170,9 +194,10 @@ export const getTopListDragTarget = (targetElement: Element) => {
     return topList;
 };
 
-export const shouldKeepListBlockDragTarget = (sourceType: string, isHorizontalDrop: boolean,
+export const shouldKeepListBlockDragTarget = (sourceType: string, targetClasses: string[],
                                                isColumnSuperBlockChild: boolean) =>
-    sourceType === "nodelist" && (isHorizontalDrop || isColumnSuperBlockChild);
+    sourceType === "nodelist" && (isColumnSuperBlockChild ||
+        targetClasses.some(className => ["dragover__top", "dragover__bottom", "dragover__left", "dragover__right"].includes(className)));
 
 export const replaceDragUndoOperation = <T>(operations: T[], operation: T, replacements: T[]) => {
     const index = operations.indexOf(operation);

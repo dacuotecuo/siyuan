@@ -1,8 +1,11 @@
+import {toggleMenu} from "../../../menus/menuToggle";
+import {fetchWithAppId} from "../../../util/fetchWithAppId";
 import {Model} from "../../Model";
 import type {App} from "../../../index";
 import {AgentHttpError, fetchAgentSSE, IEditorContext, ISSEResult, IToolEffects} from "./agentSSE";
 import {genUUID} from "../../../util/genID";
 import {mountComposer, type AgentComposerData} from "./AgentComposer";
+import {bindAgentComposerResize} from "./AgentComposerResize";
 import {disabledWYSIWYG} from "../../../protyle/util/disabledWYSIWYG";
 import {getAllEditor} from "../../getAll";
 import {isCapabilityEnabled, listCapabilityManifests, lookupCapability} from "./frontendCapabilities";
@@ -11,12 +14,13 @@ import {genAgentConfirmActionButtons} from "./agentConfirmActions";
 import {AgentSessionPanel} from "./AgentSessionPanel";
 import {updateHotkeyAfterTip} from "../../../protyle/util/compatibility";
 import {getAgentLute} from "../../../protyle/render/setLute";
-import {escapeAriaLabel, escapeHtml} from "../../../util/escape";
+import {escapeAriaLabel, escapeHtml, escapeHtmlTextAndAttr} from "../../../util/escape";
+import {hideTooltip, showTooltip} from "../../../dialog/tooltip";
 import {setPosition} from "../../../util/setPosition";
 import {fetchPost} from "../../../util/fetch";
 import {confirmDialog} from "../../../dialog/confirmDialog";
 import {showMessage} from "../../../dialog/message";
-import * as dayjs from "dayjs";
+import dayjs from "dayjs";
 import {sendNotification} from "../../../plugin/platformUtils";
 import {
     applyAgentUserEdit,
@@ -24,6 +28,7 @@ import {
     findAgentUserEntryIndex,
     getAgentThinkingDisplaySeconds,
     getAgentThinkingToolGroups,
+    getAgentTurnContent,
     hasAgentExecutedToolsAfter,
     hasAgentModelSpecificContext,
     hasAgentThinkingStepDetails,
@@ -31,6 +36,7 @@ import {
     isAgentRegenerateStateCurrent
 } from "./AgentHistory";
 import {
+    bindAgentMessageEvents,
     copyAgentText,
     createThinkingCardElement,
     postRender,
@@ -40,15 +46,24 @@ import {
     renderToolsLineHTML,
     renderWelcomeHTML
 } from "./AgentMessageRenderer";
-import {bindThinkingCardToggle} from "../../../ai/thinkingCard";
-import {getAgentReasoningEffortOptions} from "./AgentReasoning";
+import {bindThinkingCardToggle, updateThinkingBody} from "../../../ai/thinkingCard";
+import {getAgentReasoningEffort, setAgentReasoningEffort} from "./AgentReasoning";
+import {getReasoningEffortOptions} from "../../../ai/reasoningEffort";
 import {mountGroupedModelPicker, type IGroupedModelPicker} from "../../../config/tabs/ai/aiProviderUi";
 import {AI_CONFIG_CHANGED_EVENT} from "../../../config/tabs/ai/aiRuntime";
+import {
+    AGENT_STREAMING_MARKDOWN_CHANGED_EVENT,
+    isAgentStreamingMarkdownEnabled
+} from "../../../config/tabs/ai/agentStreamingMarkdown";
+import {AgentStreamingMarkdown} from "./AgentStreamingMarkdown";
 import {isEncryptedBox} from "../../../util/pathName";
 import {Menu} from "../../../plugin/Menu";
 import {getAgentDefaultModelID, getUsableAgentModels} from "./agentModel";
 import {AgentScrollStateMode, resolveAgentScrollState} from "./AgentScrollState";
-import {AgentSessionRun, AgentSessionRuns} from "./AgentSessionRuns";
+import {AgentSessionRuns} from "./AgentSessionRuns";
+import {AgentRunController, ManagedAgentRun, PendingAgentInteraction} from "./AgentRunController";
+import {fullscreen} from "../../../protyle/breadcrumb/action";
+import {AgentWelcomeGreeting} from "./AgentWelcomeGreeting";
 
 // 限制注入用户轮次上下文的可见块 ID 数量，以控制 token 开销。
 // 与 kernel/agent/agent.go 中的 maxVisibleBlockIDs 保持一致。
@@ -71,7 +86,6 @@ export interface AgentChatHost {
 
 type EntryBase = { id?: string };
 type AgentReference = { id: string; title: string };
-type PendingAgentInteraction = Extract<ISSEResult, {type: "confirm" | "question"}>;
 type UserEntry = EntryBase & {
     type: "user";
     content: string;
@@ -99,6 +113,7 @@ type SessionEntry =
     type: "assistant";
     content?: string;
     reasoningContent?: string;
+    nativeContent?: {protocol: string; version: number; blocks: Array<Record<string, unknown>>};
     responseOutput?: Array<Record<string, unknown>>;
     responseOutputTokens?: number;
     roundID?: string;
@@ -175,13 +190,16 @@ type AgentSessionRunViewState = {
     permissionMode: AgentPermissionMode;
 };
 
-type ManagedAgentSessionRun = AgentSessionRun<PendingAgentInteraction, ISSEResult, AgentSessionRunViewState>;
+type ManagedAgentSessionRun = ManagedAgentRun<AgentSessionRunViewState>;
 
 export class AgentChat extends Model {
+    private welcomeGreeting = new AgentWelcomeGreeting();
+    private welcomeObserver: IntersectionObserver;
     private host: AgentChatHost;
     private panelElement: HTMLElement;
     private messagesContainer: HTMLElement;
     private composerHost: HTMLElement;
+    private composerResize?: ReturnType<typeof bindAgentComposerResize>;
     private composer: ReturnType<typeof mountComposer> | null = null;
     private sendBtn: HTMLElement;
     private stopBtn: HTMLElement;
@@ -206,8 +224,13 @@ export class AgentChat extends Model {
     private currentRoundID = "";
     private recoveryCommitTurnIDs = new Map<string, string>();
     private pendingRecoverySessionIDs = new Set<string>();
+    // 错误提示按会话和用户轮次保留，恢复重绘时重新显示，不参与模型上下文。
+    private sessionErrors = new Map<string, {message: string; userEntryID?: string}>();
     private recoveryInFlightSessionIDs = new Set<string>();
     private lute: Lute;
+    private streamingMarkdownEnabled = isAgentStreamingMarkdownEnabled();
+    private streamingMarkdown: AgentStreamingMarkdown | undefined;
+    private streamingMarkdownBody: HTMLElement | undefined;
     private currentContent = "";
     private fullContent = "";
     private contextTokens = 0;
@@ -247,9 +270,9 @@ export class AgentChat extends Model {
     private selectedModel: string;
     private defaultModelID = "";
     private modelOptions: Array<{ id: string; name: string }> = [];
-    // 推理努力度（iconBrain + 菜单），仅实例记忆，刷新后回到默认。
+    // 思考等级菜单使用本地保存的偏好初始化。
     private reasoningEffortButton: HTMLButtonElement;
-    private selectedReasoningEffort = "";
+    private selectedReasoningEffort = getAgentReasoningEffort();
     private permissionButton: HTMLButtonElement;
     private permissionMode: AgentPermissionMode = "confirm";
     private buttonOptions: HTMLElement;
@@ -269,12 +292,11 @@ export class AgentChat extends Model {
     private settingDialogObserver: MutationObserver | null = null;
     private scrollBottomBtn: HTMLElement;
     private navRail: HTMLElement;
-    private navExpandTimer = 0;
     // 镜像态：当前会话正由其他实例流式对话，本实例处于只读占位锁定，期间不重绘当前视图。
     // 由 ws 的 streamStart/streamEnd 事件驱动，与发起者的 isStreaming 互斥（发起者走 SSE）。
     private mirrorLocked = false;
     private mirrorPlaceholderEl: HTMLElement | null = null;
-    // 思考计时器：流式进行时每 100ms 刷新未完成思考卡片的标题为「思考中... X.Xs」。
+    // 思考计时器：流式进行时每秒刷新未完成思考卡片的标题。
     private thinkingTimerId = 0;
     // 上一个 thinking step 快照时 currentToolCalls 的长度基准，
     // 用于计算本轮新增的工具（避免 step.toolNames 累积重复历史工具）。
@@ -302,6 +324,7 @@ export class AgentChat extends Model {
         // AI 配置保存后主动刷新模型列表；window focus 和设置对话框关闭监听用于兜底其他配置更新入口。
         window.addEventListener(AI_CONFIG_CHANGED_EVENT, this.checkConfigChangedHandler);
         window.addEventListener("focus", this.checkConfigChangedHandler);
+        window.addEventListener(AGENT_STREAMING_MARKDOWN_CHANGED_EVENT, this.checkStreamingMarkdownChanged);
         // 设置对话框是 SiYuan 内部模态，关闭时 window 不失焦，focus 事件不触发。
         // 监听 body 子节点变化，当含 .config__panel 的设置 dialog 被移除时即时刷新。
         this.settingDialogObserver = new MutationObserver(() => {
@@ -310,6 +333,28 @@ export class AgentChat extends Model {
             }
         });
         this.settingDialogObserver.observe(document.body, {childList: true, subtree: false});
+        // 桌面只观察聊天面板；移动端由侧栏确认展开状态驱动，避免将滑动预览记作打开。
+        if (!host.mobile) {
+            this.welcomeObserver = new IntersectionObserver(entries => {
+                const entry = entries[entries.length - 1];
+                this.setWelcomeVisible(entry.isIntersecting && entry.intersectionRatio >= 0.01 &&
+                    entry.intersectionRect.width > 0 && entry.intersectionRect.height > 0);
+            }, {threshold: 0.01});
+            this.welcomeObserver.observe(this.panelElement);
+        }
+    }
+
+    public destroy() {
+        this.composerResize?.destroy();
+        this.welcomeObserver?.disconnect();
+        super.destroy();
+    }
+
+    public setWelcomeVisible(visible: boolean) {
+        if (this.welcomeGreeting.setVisible(visible, this.entries.length === 0) &&
+            this.messagesContainer.querySelector(".agent-welcome")) {
+            this.showWelcome();
+        }
     }
 
     private checkConfigChangedHandler = () => {
@@ -320,6 +365,7 @@ export class AgentChat extends Model {
     // 仅当处于欢迎页（无会话内容）时重渲染，以便从无模型提示块切回示例或反之；
     // 有会话内容时不重绘（避免破坏对话），refreshModelOptions 内已刷新 trigger 显示。
     private checkConfigChanged() {
+        this.checkStreamingMarkdownChanged();
         const actualOptions = getUsableAgentModels(window.siyuan.config.ai);
         const actualDefaultModelID = getAgentDefaultModelID(window.siyuan.config.ai, actualOptions);
         const optionsChanged = actualOptions.length !== this.modelOptions.length || actualOptions.some((option, index) =>
@@ -334,6 +380,25 @@ export class AgentChat extends Model {
         }
     }
 
+    private checkStreamingMarkdownChanged = () => {
+        const enabled = isAgentStreamingMarkdownEnabled();
+        if (enabled === this.streamingMarkdownEnabled) {
+            return;
+        }
+        this.streamingMarkdownEnabled = enabled;
+        this.cancelTokenUpdate();
+        const body = this.currentAIElement?.querySelector<HTMLElement>(".agent-chat__body--streaming");
+        if (!body) {
+            return;
+        }
+        if (enabled) {
+            this.updateStreamingMarkdown(body);
+        } else {
+            body.classList.remove("agent-chat__body--streaming-markdown");
+            body.textContent = this.currentContent;
+        }
+    };
+
     private initUI() {
         const panel = this.panelElement;
         panel.classList.add("fn__flex-column", "file-tree", "sy__agentChat", "dockPanel");
@@ -341,8 +406,7 @@ export class AgentChat extends Model {
 
         const L = window.siyuan.languages;
 
-        panel.innerHTML = '<div class="agent-chat fn__flex-column fn__flex-1">' +
-            '<div class="block__icons fn__hidescrollbar">' +
+        panel.innerHTML = '<div class="block__icons fn__hidescrollbar">' +
             (this.host.mobile && !this.host.mobileSidebar ? '<span data-type="back" class="block__icon ariaLabel" aria-label="' + L.back + '">' +
                 '<svg><use xlink:href="#iconLeft"></use></svg></span>' : "") +
             '<div class="block__logo fn__flex-1 agent-chat__title">' + (L.agentChat || "Agent") + "</div>" +
@@ -354,6 +418,8 @@ export class AgentChat extends Model {
             '<svg><use xlink:href="#iconFolderClock"></use></svg>' +
             "</span>" +
             '<span class="fn__space"></span>' +
+            (!this.host.mobile ? '<span data-type="fullscreen" class="block__icon ariaLabel" data-position="north" aria-label="' + L.fullscreen + '">' +
+                '<svg><use xlink:href="#iconFullscreen"></use></svg></span><span class="fn__space"></span>' : "") +
             (!this.host.mobile || !this.host.mobileSidebar ? '<span data-type="' + (this.host.mobile ? "close" : "min") +
                 '" class="block__icon ariaLabel" data-position="north" aria-label="' +
                 (this.host.mobile ? window.siyuan.languages.close : window.siyuan.languages.min +
@@ -361,11 +427,14 @@ export class AgentChat extends Model {
                 '<svg><use xlink:href="#' + (this.host.mobile ? "iconCloseRound" : "iconMin") + '"></use></svg>' +
                 "</span>" : "") +
             "</div>" +
+            '<div class="agent-chat fn__flex-column fn__flex-1">' +
             '<div class="agent-chat__messages-wrap">' +
             '<div class="agent-chat__messages fn__flex-1"></div>' +
             '<span class="agent-chat__scroll-bottom ariaLabel" data-position="west" aria-label="' + L.scrollToBottom + '"><svg><use xlink:href="#iconArrowDown"></use></svg></span>' +
             "</div>" +
             '<div class="agent-chat__input-area">' +
+            '<div class="agent-chat__input-resize" data-prevent-swipe="true"><span class="protyle-block-resize" data-resize-axis="height" ' +
+            'role="separator" aria-orientation="horizontal" tabindex="0" aria-label="' + escapeAriaLabel(L.height) + '"></span></div>' +
             '<div class="agent-chat__composer-host"></div>' +
             '<div class="agent-chat__buttons">' +
             '<div class="agent-chat__button-options">' +
@@ -402,6 +471,9 @@ export class AgentChat extends Model {
 
         this.messagesContainer = panel.querySelector(".agent-chat__messages") as HTMLElement;
         this.composerHost = panel.querySelector(".agent-chat__composer-host") as HTMLElement;
+        this.composerResize?.destroy();
+        this.composerResize = bindAgentComposerResize(panel, this.composerHost,
+            panel.querySelector(".agent-chat__input-resize .protyle-block-resize"));
         this.sendBtn = panel.querySelector(".agent-chat__send") as HTMLElement;
         this.stopBtn = panel.querySelector(".agent-chat__stop") as HTMLElement;
         this.imageUploadButton = panel.querySelector(".agent-chat__image-upload") as HTMLButtonElement;
@@ -417,6 +489,13 @@ export class AgentChat extends Model {
         this.initPermissionMenu();
         this.initReasoningEffortMenu();
         this.scrollBottomBtn = panel.querySelector(".agent-chat__scroll-bottom") as HTMLElement;
+        this.messagesContainer.addEventListener("wheel", (event: WheelEvent) => {
+            if (event.deltaY < 0) {
+                this.programmaticScrollGeneration++;
+                this.programmaticScroll = false;
+                this.userScrolledUp = true;
+            }
+        }, {passive: true});
         this.messagesContainer.addEventListener("scroll", () => {
             const {scrollTop, scrollHeight, clientHeight} = this.messagesContainer;
             // 仅在面板有效展开时记录滚动位置：dock 折叠过渡期间容器尺寸归零、浏览器把 scrollTop
@@ -476,7 +555,6 @@ export class AgentChat extends Model {
                 },
                 getStatus: (id) => this.sessionRuns.resolveStatus(id),
                 getTitle: (id) => this.pendingSessionTitles.get(id),
-                onClose: this.host.mobile ? this.host.close : undefined,
             },
             !!this.host.mobile,
         );
@@ -487,12 +565,17 @@ export class AgentChat extends Model {
         this.layoutResizeObserver = new ResizeObserver(() => {
             const collapsed = this.messagesContainer.clientWidth === 0 || this.messagesContainer.clientHeight === 0;
             if (collapsed) {
+                this.streamingMarkdown?.cancel();
                 this.layoutVisible = false;
                 return;
             }
             // 仅在「刚从折叠恢复」时启动一次校正循环，避免干扰正常滚动 / 流式输出。
             if (!this.layoutVisible) {
                 this.layoutVisible = true;
+                const body = this.currentAIElement?.querySelector<HTMLElement>(".agent-chat__body--streaming");
+                if (this.streamingMarkdownEnabled && body) {
+                    this.updateStreamingMarkdown(body);
+                }
                 const saved = this.scrollBottomBySession.get(this.sessionId) ?? 0;
                 this.restoreScrollToBottom(saved);
                 return;
@@ -564,6 +647,8 @@ export class AgentChat extends Model {
         const existing = window.siyuan.dialogs.find(d => d.element.querySelector(".config__tab-container"));
         if (!existing) {
             openSetting(this.app, "ai");
+        } else {
+            existing.element.querySelector<HTMLElement>(".config__tab-scroll [data-name='ai']")?.click();
         }
     }
 
@@ -686,55 +771,68 @@ export class AgentChat extends Model {
     private initPermissionMenu() {
         this.applyPermissionMode(this.permissionMode);
         this.permissionButton.addEventListener("click", (event: MouseEvent) => {
-            event.stopPropagation();
-            const menu = new Menu("agent-chat-permission");
-            if (menu.isOpen) {
-                return;
-            }
-            (["confirm", "allowSession"] as AgentPermissionMode[]).forEach(mode => {
-                menu.addItem({
-                    iconHTML: "",
-                    label: escapeHtml(this.permissionLabel(mode)),
-                    current: mode === this.permissionMode,
-                    click: () => {
-                        void this.changePermissionMode(mode);
-                    },
-                });
+            toggleMenu({
+                target: this.permissionButton,
+                build: (_menu, session) => {
+                    event.stopPropagation();
+                    const menu = new Menu("agent-chat-permission");
+                    if (menu.isOpen) {
+                        return;
+                    }
+                    (["confirm", "allowSession"] as AgentPermissionMode[]).forEach(mode => {
+                        menu.addItem({
+                            iconHTML: "",
+                            label: escapeHtml(this.permissionLabel(mode)),
+                            current: mode === this.permissionMode,
+                            click: () => {
+                                void this.changePermissionMode(mode);
+                            },
+                        });
+                    });
+                    const rect = this.permissionButton.getBoundingClientRect();
+                    menu.element.style.minWidth = `${rect.width}px`;
+                    session.show(() => menu.open({x: rect.left, y: rect.bottom, h: rect.height, w: rect.width, target: this.permissionButton}));
+
+                },
             });
-            const rect = this.permissionButton.getBoundingClientRect();
-            menu.element.style.minWidth = `${rect.width}px`;
-            menu.open({x: rect.left, y: rect.bottom, h: rect.height, w: rect.width, target: this.permissionButton});
         });
     }
 
-    // 初始化思考强度菜单：提供各供应商使用的标准档位，选择结果仅在当前实例中生效。
+    // 初始化思考强度菜单：提供各供应商使用的标准档位，并在本地保存选择结果。
     private initReasoningEffortMenu() {
-        const options = getAgentReasoningEffortOptions(window.siyuan.languages);
+        const options = getReasoningEffortOptions(window.siyuan.languages);
         const updateLabel = () => {
             const selected = options.find(option => option.value === this.selectedReasoningEffort) || options[0];
             this.reasoningEffortButton.querySelector(".agent-chat__reasoning-effort-label").textContent = selected.label;
         };
         updateLabel();
         this.reasoningEffortButton.addEventListener("click", (event: MouseEvent) => {
-            event.stopPropagation();
-            const menu = new Menu("agent-chat-reasoning-effort");
-            if (menu.isOpen) {
-                return;
-            }
-            options.forEach(option => {
-                menu.addItem({
-                    iconHTML: "",
-                    label: escapeHtml(option.label),
-                    current: option.value === this.selectedReasoningEffort,
-                    click: () => {
-                        this.selectedReasoningEffort = option.value;
-                        updateLabel();
-                    },
-                });
+            toggleMenu({
+                target: this.reasoningEffortButton,
+                build: (_menu, session) => {
+                    event.stopPropagation();
+                    const menu = new Menu("agent-chat-reasoning-effort");
+                    if (menu.isOpen) {
+                        return;
+                    }
+                    options.forEach(option => {
+                        menu.addItem({
+                            iconHTML: "",
+                            label: escapeHtml(option.label),
+                            current: option.value === this.selectedReasoningEffort,
+                            click: () => {
+                                this.selectedReasoningEffort = option.value;
+                                setAgentReasoningEffort(option.value);
+                                updateLabel();
+                            },
+                        });
+                    });
+                    const rect = this.reasoningEffortButton.getBoundingClientRect();
+                    menu.element.style.minWidth = `${Math.max(rect.width, 120)}px`;
+                    session.show(() => menu.open({x: rect.left, y: rect.bottom, h: rect.height, w: rect.width, target: this.reasoningEffortButton}));
+
+                },
             });
-            const rect = this.reasoningEffortButton.getBoundingClientRect();
-            menu.element.style.minWidth = `${Math.max(rect.width, 120)}px`;
-            menu.open({x: rect.left, y: rect.bottom, h: rect.height, w: rect.width, target: this.reasoningEffortButton});
         });
     }
 
@@ -750,7 +848,7 @@ export class AgentChat extends Model {
     private showWelcome() {
         this.destroyEditingComposer();
         const hasModel = this.modelOptions.length > 0;
-        this.messagesContainer.innerHTML = renderWelcomeHTML(hasModel);
+        this.messagesContainer.innerHTML = renderWelcomeHTML(hasModel, this.welcomeGreeting.getKey(this.sessionId));
         if (!hasModel) {
             // 无模型：绑定「去配置」按钮，点击打开设置 - 人工智能面板。
             const goBtn = this.messagesContainer.querySelector(".agent-welcome__go-setting");
@@ -759,6 +857,16 @@ export class AgentChat extends Model {
                     this.openAiSetting();
                 });
             }
+            this.messagesContainer.querySelector("[data-type='go-chatgpt']")?.addEventListener("click", async () => {
+                if (this.host.openAiSetting || window.siyuan.dialogs.some(dialog => dialog.element.querySelector(".config__tab-container"))) {
+                    await this.openAiSetting();
+                    const {openChatGPTProvider} = await import("../../../config/tabs/ai/aiProviderUi");
+                    openChatGPTProvider();
+                } else {
+                    const {openSetting} = await import("../../../config");
+                    openSetting(this.app, "ai", {aiProvider: "chatgpt"});
+                }
+            });
             return;
         }
         const examples = this.messagesContainer.querySelectorAll(".agent-welcome__example");
@@ -780,11 +888,11 @@ export class AgentChat extends Model {
                     this.currentRoundID = "";
                     const selectedModel = this.getSelectedModel();
                     const reasoningEffort = this.selectedReasoningEffort;
-                    const run = this.beginSessionRun();
+                    const run = this.runController.begin();
                     try {
                         await this.saveSession();
                     } catch (e) {
-                        this.discardSessionRun(run);
+                        this.runController.discard(run);
                         if (this.sessionId === run.sessionID) {
                             this.rollbackUserEntry(userEntryId);
                             await this.reloadFromDisk();
@@ -794,7 +902,7 @@ export class AgentChat extends Model {
                     void this.sessionPanel?.refresh();
                     try {
                         await fetchAgentSSE(text, window.siyuan.config.appearance.lang, [],
-                            (event: ISSEResult) => this.handleSessionRunEvent(run, event),
+                            (event: ISSEResult) => this.runController.handleEvent(run, event),
                             (err: Error) => this.handleSessionRunError(run, err, userEntryId),
                             run.controller.signal,
                             run.sessionID,
@@ -806,7 +914,7 @@ export class AgentChat extends Model {
                             userEntryId,
                             SessionStore.getRevision(run.sessionID));
                     } finally {
-                        await this.finishSessionRun(run);
+                        await this.runController.finish(run);
                     }
                 }
             });
@@ -817,15 +925,17 @@ export class AgentChat extends Model {
         this.navRail = document.createElement("div");
         this.navRail.className = "agent-chat__nav-rail";
 
-        this.navRail.addEventListener("mouseenter", () => {
-            this.navExpandTimer = window.setTimeout(() => {
-                this.navRail.classList.add("agent-chat__nav-rail--expanded");
-            }, 200);
+        this.navRail.addEventListener("mouseover", (event: MouseEvent) => {
+            const marker = (event.target as HTMLElement).closest(".agent-chat__nav-rail-marker");
+            if (!marker) {
+                return;
+            }
+            // 单条消息预览复用提示框，不扩大导航的点击区域。
+            event.stopPropagation();
+            showTooltip(escapeHtmlTextAndAttr(marker.getAttribute("aria-label") || ""), marker, "agent-nav", event);
         });
-        this.navRail.addEventListener("mouseleave", () => {
-            clearTimeout(this.navExpandTimer);
-            this.navRail.classList.remove("agent-chat__nav-rail--expanded");
-        });
+        this.navRail.addEventListener("mouseleave", hideTooltip);
+        this.navRail.addEventListener("scroll", hideTooltip, {passive: true});
         this.navRail.addEventListener("click", (e: MouseEvent) => {
             const marker = (e.target as HTMLElement).closest(".agent-chat__nav-rail-marker") as HTMLElement;
             if (!marker) {
@@ -838,6 +948,9 @@ export class AgentChat extends Model {
     }
 
     private rebuildNavMarkers() {
+        if (this.navRail.childElementCount > 0 && this.navRail.matches(":hover")) {
+            hideTooltip();
+        }
         this.navRail.innerHTML = "";
         const userEntries = this.entries.filter((entry): entry is UserEntry => entry.type === "user");
         if (userEntries.length === 0) {
@@ -849,11 +962,10 @@ export class AgentChat extends Model {
 
         for (const entry of userEntries) {
             const marker = document.createElement("div");
-            marker.className = "agent-chat__nav-rail-marker ariaLabel";
+            marker.className = "agent-chat__nav-rail-marker";
             marker.dataset.messageId = entry.id || "";
             marker.setAttribute("data-position", "west");
-            marker.setAttribute("aria-label", escapeAriaLabel(escapeHtml(entry.content)));
-            marker.textContent = entry.content.slice(0, 120);
+            marker.setAttribute("aria-label", entry.content);
             this.navRail.appendChild(marker);
         }
         this.updateActiveMarker();
@@ -962,6 +1074,16 @@ export class AgentChat extends Model {
             while (target && !target.isEqualNode(this.panelElement)) {
                 if (target.classList.contains("block__icon")) {
                     const type = target.getAttribute("data-type");
+                    if (type === "fullscreen" && !this.host.mobile) {
+                        e.stopPropagation();
+                        fullscreen(this.panelElement, target);
+                        const minElement = this.panelElement.querySelector('.block__icons [data-type="min"]') as HTMLElement;
+                        const isFullscreen = this.panelElement.classList.contains("fullscreen");
+                        minElement.style.transition = isFullscreen ? "none" : "";
+                        minElement.classList.toggle("fn__none", isFullscreen);
+                        minElement.previousElementSibling.classList.toggle("fn__none", isFullscreen);
+                        return;
+                    }
                     if (type === "back") {
                         e.stopPropagation();
                         this.host.close();
@@ -989,6 +1111,10 @@ export class AgentChat extends Model {
                 return;
             }
             if (t.closest(".b3-select")) {
+                return;
+            }
+            // 编辑器及浮层内的点击保留原有焦点和选区，避免聚焦到不可编辑的滚动容器。
+            if (t.closest(".protyle-util, .protyle-wysiwyg, .agent-chat__input-resize")) {
                 return;
             }
             if (this.composer) {
@@ -1066,190 +1192,89 @@ export class AgentChat extends Model {
         return result.session ?? null;
     }
 
-    private beginSessionRun(): ManagedAgentSessionRun {
-        const run = this.sessionRuns.begin(this.sessionId);
-        this.abortController = run.controller;
-        this.sessionRuns.markRead(this.sessionId);
-        this.updateHostRunStatus();
-        this.updateSendButtonState();
-        void this.sessionPanel?.refresh();
-        return run;
+    private sessionRunController: AgentRunController<AgentSessionRunViewState>;
+
+    private get runController(): AgentRunController<AgentSessionRunViewState> {
+        if (!this.sessionRunController) {
+            this.sessionRunController = new AgentRunController(this.sessionRuns, {
+                currentSessionID: () => this.sessionId,
+                beforeBegin: () => {
+                    this.sessionErrors.delete(this.sessionId);
+                    this.messagesContainer.querySelectorAll(".agent-chat__msg--error").forEach(el => el.remove());
+                },
+                activate: run => { this.abortController = run.controller; },
+                detached: run => {
+                    this.pendingRecoverySessionIDs.add(run.sessionID);
+                    this.clearRunAbortController(run);
+                },
+                completed: run => this.clearRunAbortController(run),
+                discarded: (run, current) => {
+                    this.clearRunAbortController(run);
+                    if (current) {
+                        this.setStreaming(false);
+                    }
+                },
+                changed: () => {
+                    this.updateHostRunStatus();
+                    this.updateSendButtonState();
+                    void this.sessionPanel?.refresh();
+                },
+                finishedDetached: (run, attached) => this.finishDetachedRunView(run, attached),
+                snapshot: () => this.captureRunViewState(),
+                prepareDetach: () => this.prepareRunViewForDetach(),
+                captureView: state => this.captureRunView(state),
+                restore: (state, consumed) => this.restoreRunView(state, consumed),
+                notifyInteraction: () => this.notifyRunInteraction(),
+                renderInteraction: event => this.renderRunInteractionView(event),
+                handleEvent: event => this.handleSSEEvent(event),
+                handleBrowserCall: event => this.handleBrowserCapabilityCall(event.callID, event.capabilityID, event.generation, event.arguments),
+                startReplay: run => {
+                    this.abortController = run.controller;
+                    this.currentTurnID = run.turnID;
+                    this.removeMirrorPlaceholder();
+                    this.setStreaming(true);
+                },
+                prepareReplayContent: () => {
+                    if (!this.currentContent.trim() && this.messagesContainer.querySelector(
+                        ".agent-chat__msg--thinking:not(.agent-chat__msg--thinking-done)")) {
+                        this.finishActiveThinking();
+                        this.flushThinkingStep();
+                    }
+                },
+                idleReplay: () => {
+                    const activeThinking = this.messagesContainer.querySelector(
+                        ".agent-chat__msg--thinking:not(.agent-chat__msg--thinking-done)"
+                    );
+                    if (this.isStreaming && activeThinking) {
+                        this.startThinkingTimer();
+                    }
+                },
+                recoverUnavailable: run => {
+                    if (this.sessionId === run.sessionID && this.pendingRecoverySessionIDs.has(run.sessionID)) {
+                        void this.recoverInterruptedTurn(run.sessionID, run.turnID);
+                    }
+                },
+            });
+        }
+        return this.sessionRunController;
     }
 
-    private detachSessionRun(sessionID: string): boolean {
-        const run = this.sessionRuns.get(sessionID);
-        if (!run) {
-            return false;
-        }
-        this.sessionRuns.detach(sessionID);
-        this.pendingRecoverySessionIDs.add(sessionID);
+    private clearRunAbortController(run: ManagedAgentSessionRun) {
         if (this.abortController === run.controller) {
             this.abortController = null;
         }
-        this.updateHostRunStatus();
-        this.updateSendButtonState();
-        void this.sessionPanel?.refresh();
-        return true;
     }
 
-    private snapshotSessionRunState(run: ManagedAgentSessionRun) {
-        this.flushTokenUpdate();
-        this.flushReasoningUpdate();
-        run.viewState = {
-            entries: this.entries,
-            hasTitled: this.hasTitled,
-            currentAIElement: this.currentAIElement,
-            currentAssistantEntryId: this.currentAssistantEntryId,
-            currentThinkingEntryId: this.currentThinkingEntryId,
-            currentRoundID: this.currentRoundID,
-            currentContent: this.currentContent,
-            fullContent: this.fullContent,
-            contextTokens: this.contextTokens,
-            contextTokenBreakdown: this.contextTokenBreakdown,
-            contextCachedTokens: this.contextCachedTokens,
-            contextLimit: this.contextLimit,
-            requestStartTime: this.requestStartTime,
-            currentToolCalls: this.currentToolCalls,
-            toolCallStartedAt: this.toolCallStartedAt,
-            currentThinkingText: this.currentThinkingText,
-            currentThinkingReasoning: this.currentThinkingReasoning,
-            currentThinkingReasoningContent: this.currentThinkingReasoningContent,
-            currentThinkingSteps: this.currentThinkingSteps,
-            currentThinkingDuration: this.currentThinkingDuration,
-            pendingConfirms: this.pendingConfirms,
-            renderedToolNames: this.renderedToolNames,
-            hasInterveningCard: this.hasInterveningCard,
-            lastStepToolCount: this.lastStepToolCount,
-            permissionMode: this.permissionMode,
-        };
-    }
-
-    private prepareSessionRunForDetach(run: ManagedAgentSessionRun) {
-        this.flushTokenUpdate();
-        this.flushReasoningUpdate();
-        if (this.currentContent.trim()) {
-            this.finishActiveThinking();
-            this.flushThinkingStep();
-        } else {
-            this.stopThinkingTimer();
-        }
-        this.snapshotSessionRunState(run);
-    }
-
-    private captureSessionRunView(run: ManagedAgentSessionRun) {
-        if (!run.viewState) {
-            return;
-        }
-        const view = document.createDocumentFragment();
-        this.observeStickTarget(null);
-        while (this.messagesContainer.firstChild) {
-            view.appendChild(this.messagesContainer.firstChild);
-        }
-        run.viewState.view = view;
-    }
-
-    private restoreSessionRunState(run: ManagedAgentSessionRun): boolean {
-        const state = run.viewState;
-        if (!state) {
-            return false;
-        }
-        this.observeStickTarget(null);
-        if (state.view?.hasChildNodes()) {
-            this.messagesContainer.innerHTML = "";
-            this.messagesContainer.appendChild(state.view);
-        }
-        this.entries = state.entries;
-        this.hasTitled = state.hasTitled;
-        this.currentAIElement = state.currentAIElement;
-        this.currentAssistantEntryId = state.currentAssistantEntryId;
-        this.currentThinkingEntryId = state.currentThinkingEntryId;
-        this.currentRoundID = state.currentRoundID;
-        this.currentContent = state.currentContent;
-        this.fullContent = state.fullContent;
-        this.contextTokens = state.contextTokens;
-        this.contextTokenBreakdown = state.contextTokenBreakdown;
-        this.contextCachedTokens = state.contextCachedTokens;
-        this.contextLimit = state.contextLimit;
-        this.requestStartTime = state.requestStartTime;
-        this.currentToolCalls = state.currentToolCalls;
-        this.toolCallStartedAt = state.toolCallStartedAt;
-        this.currentThinkingText = state.currentThinkingText;
-        this.currentThinkingReasoning = state.currentThinkingReasoning;
-        this.currentThinkingReasoningContent = state.currentThinkingReasoningContent;
-        this.currentThinkingSteps = state.currentThinkingSteps;
-        this.currentThinkingDuration = state.currentThinkingDuration;
-        this.pendingConfirms = state.pendingConfirms;
-        this.renderedToolNames = state.renderedToolNames;
-        this.hasInterveningCard = state.hasInterveningCard;
-        this.lastStepToolCount = state.lastStepToolCount;
-        this.applyPermissionMode(state.permissionMode);
-        run.viewState = undefined;
-        this.updateTokenDisplay();
-        this.rebuildNavMarkers();
-        return true;
-    }
-
-    private persistPendingSessionTitle(sessionID: string) {
-        const title = this.pendingSessionTitles.get(sessionID);
-        if (!title || this.sessionTitleSaveInFlight.has(sessionID)) {
-            return;
-        }
-        this.sessionTitleSaveInFlight.add(sessionID);
-        void SessionStore.rename(sessionID, title).then(() => {
-            if (this.pendingSessionTitles.get(sessionID) === title) {
-                this.pendingSessionTitles.delete(sessionID);
-            }
-            return this.sessionPanel?.refresh();
-        }).catch((e) => {
-            console.error("save background agent title failed:", e);
-        }).finally(() => {
-            this.sessionTitleSaveInFlight.delete(sessionID);
-            const nextTitle = this.pendingSessionTitles.get(sessionID);
-            if (nextTitle && nextTitle !== title) {
-                this.persistPendingSessionTitle(sessionID);
-            }
-        });
-    }
-
-    private interactionKey(event: PendingAgentInteraction): string {
-        return event.type === "confirm" ? `confirm:${event.confirmID}` : `question:${event.questionID}`;
-    }
-
-    private queueRunInteraction(run: ManagedAgentSessionRun, event: PendingAgentInteraction,
-                                notify = true) {
-        const key = this.interactionKey(event);
-        if (!run.pendingInteractions.some(item => this.interactionKey(item) === key)) {
-            run.pendingInteractions.push(event);
-            if (notify) {
-                if (this.host.notify) {
-                    this.host.notify("confirm");
-                } else if (!document.hasFocus() || document.hidden) {
-                    const L = window.siyuan.languages;
-                    sendNotification({title: L.agentNotifyConfirm, body: "", timeoutType: "default"});
-                }
-            }
+    private notifyRunInteraction() {
+        if (this.host.notify) {
+            this.host.notify("confirm");
+        } else if (!document.hasFocus() || document.hidden) {
+            const L = window.siyuan.languages;
+            sendNotification({title: L.agentNotifyConfirm, body: "", timeoutType: "default"});
         }
     }
 
-    private removeRunInteraction(sessionID: string, type: PendingAgentInteraction["type"], id: string) {
-        const run = this.sessionRuns.get(sessionID);
-        if (!run) {
-            return;
-        }
-        const key = `${type}:${id}`;
-        run.pendingInteractions = run.pendingInteractions.filter(item => this.interactionKey(item) !== key);
-        run.renderedInteractionKeys.delete(key);
-    }
-
-    private async renderRunInteraction(run: ManagedAgentSessionRun, event: PendingAgentInteraction) {
-        if (this.sessionId !== run.sessionID || !run.interactionViewReady) {
-            return;
-        }
-        const key = this.interactionKey(event);
-        if (run.renderedInteractionKeys.has(key)) {
-            return;
-        }
-        run.renderedInteractionKeys.add(key);
+    private async renderRunInteractionView(event: PendingAgentInteraction) {
         this.removeMirrorPlaceholder();
         if (event.type === "confirm") {
             await this.appendConfirm(event.name, event.arguments, event.confirmID, event.effects, event.forced, false);
@@ -1258,103 +1283,7 @@ export class AgentChat extends Model {
         }
     }
 
-    private async renderPendingRunInteractions(run: ManagedAgentSessionRun) {
-        for (const event of run.pendingInteractions) {
-            await this.renderRunInteraction(run, event);
-        }
-    }
-
-    private async processSessionRunView(run: ManagedAgentSessionRun, task: () => Promise<void>) {
-        const processingPromise = task();
-        run.processingPromise = processingPromise;
-        try {
-            await processingPromise;
-        } finally {
-            if (run.processingPromise === processingPromise) {
-                run.processingPromise = undefined;
-            }
-        }
-    }
-
-    private async waitForSessionRunView(run: ManagedAgentSessionRun) {
-        const pending = [run.processingPromise, run.replayPromise].filter(Boolean) as Promise<void>[];
-        await Promise.all(pending.map(promise => promise.catch(() => undefined)));
-    }
-
-    private async handleSessionRunError(run: ManagedAgentSessionRun, err: Error, userEntryId?: string,
-                                        restoreSession = false) {
-        if (run.detached || this.sessionId !== run.sessionID) {
-            return;
-        }
-        await this.processSessionRunView(run, async () => {
-            if (err instanceof AgentHttpError && err.status === 409) {
-                await this.handleConflictReject();
-                return;
-            }
-            await this.handleConfigError(err, userEntryId, restoreSession);
-        });
-    }
-
-    private enqueueSessionRunEvent(run: ManagedAgentSessionRun, event: ISSEResult) {
-        if (this.sessionRuns.get(run.sessionID) !== run) {
-            return;
-        }
-        const lastIndex = run.pendingEvents.length - 1;
-        const lastEvent = run.pendingEvents[lastIndex];
-        if (event.type === "content" && lastEvent?.type === "content") {
-            run.pendingEvents[lastIndex] = {...lastEvent, token: lastEvent.token + event.token};
-            return;
-        }
-        if (event.type === "reasoning" && lastEvent?.type === "reasoning") {
-            run.pendingEvents[lastIndex] = {...lastEvent, token: lastEvent.token + event.token};
-            return;
-        }
-        this.sessionRuns.enqueue(run, event);
-    }
-
-    private async handleSessionRunEvent(run: ManagedAgentSessionRun, event: ISSEResult) {
-        if (event.type === "turn") {
-            run.turnID = event.turnID;
-        }
-        if (!run.detached && !run.replaying && this.sessionId === run.sessionID) {
-            if (event.type === "confirm" || event.type === "question") {
-                this.queueRunInteraction(run, event, false);
-                run.renderedInteractionKeys.add(this.interactionKey(event));
-            }
-            await this.processSessionRunView(run, () => this.handleSSEEvent(event));
-            return;
-        }
-        if (event.type === "browser_capability_call") {
-            await this.handleBrowserCapabilityCall(event.callID, event.capabilityID, event.generation, event.arguments);
-            return;
-        }
-        if (event.type === "confirm" || event.type === "question") {
-            this.queueRunInteraction(run, event, this.sessionId !== run.sessionID);
-            return;
-        }
-        this.enqueueSessionRunEvent(run, event);
-    }
-
-    private async finishSessionRun(run: ManagedAgentSessionRun) {
-        const replayPromise = run.replayPromise;
-        if (replayPromise) {
-            await replayPromise;
-        }
-        const current = this.sessionId === run.sessionID;
-        const detached = run.detached;
-        const attached = current && run.interactionViewReady;
-        if (!this.sessionRuns.complete(run, detached && !attached)) {
-            return;
-        }
-        if (this.abortController === run.controller) {
-            this.abortController = null;
-        }
-        this.updateHostRunStatus();
-        this.updateSendButtonState();
-        void this.sessionPanel?.refresh();
-        if (!detached) {
-            return;
-        }
+    private finishDetachedRunView(run: ManagedAgentSessionRun, attached: boolean) {
         this.pendingRecoverySessionIDs.add(run.sessionID);
         if (attached) {
             const pendingTitle = this.pendingSessionTitles.get(run.sessionID);
@@ -1388,87 +1317,139 @@ export class AgentChat extends Model {
         }
     }
 
-    private discardSessionRun(run: ManagedAgentSessionRun) {
-        this.sessionRuns.complete(run, false);
-        if (this.abortController === run.controller) {
-            this.abortController = null;
-        }
-        if (this.sessionId === run.sessionID) {
-            this.setStreaming(false);
-        }
-        this.updateHostRunStatus();
-        this.updateSendButtonState();
-        void this.sessionPanel?.refresh();
+    private captureRunViewState(): AgentSessionRunViewState {
+        this.flushTokenUpdate();
+        this.flushReasoningUpdate();
+        return {
+            entries: this.entries,
+            hasTitled: this.hasTitled,
+            currentAIElement: this.currentAIElement,
+            currentAssistantEntryId: this.currentAssistantEntryId,
+            currentThinkingEntryId: this.currentThinkingEntryId,
+            currentRoundID: this.currentRoundID,
+            currentContent: this.currentContent,
+            fullContent: this.fullContent,
+            contextTokens: this.contextTokens,
+            contextTokenBreakdown: this.contextTokenBreakdown,
+            contextCachedTokens: this.contextCachedTokens,
+            contextLimit: this.contextLimit,
+            requestStartTime: this.requestStartTime,
+            currentToolCalls: this.currentToolCalls,
+            toolCallStartedAt: this.toolCallStartedAt,
+            currentThinkingText: this.currentThinkingText,
+            currentThinkingReasoning: this.currentThinkingReasoning,
+            currentThinkingReasoningContent: this.currentThinkingReasoningContent,
+            currentThinkingSteps: this.currentThinkingSteps,
+            currentThinkingDuration: this.currentThinkingDuration,
+            pendingConfirms: this.pendingConfirms,
+            renderedToolNames: this.renderedToolNames,
+            hasInterveningCard: this.hasInterveningCard,
+            lastStepToolCount: this.lastStepToolCount,
+            permissionMode: this.permissionMode,
+        };
     }
 
-    private hasUnrenderedRunInteraction(run: ManagedAgentSessionRun): boolean {
-        return run.pendingInteractions.some(event => !run.renderedInteractionKeys.has(this.interactionKey(event)));
-    }
-
-    private async replaySessionRun(run: ManagedAgentSessionRun) {
-        run.replaying = true;
-        this.restoreSessionRunState(run);
-        run.interactionViewReady = true;
-        this.abortController = run.controller;
-        this.currentTurnID = run.turnID;
-        this.removeMirrorPlaceholder();
-        this.setStreaming(true);
-        try {
-            while (this.sessionId === run.sessionID && run.interactionViewReady &&
-                this.sessionRuns.get(run.sessionID) === run) {
-                const events = this.sessionRuns.drain(run);
-                for (const event of events) {
-                    if (event.type === "content" && !this.currentContent.trim() &&
-                        this.messagesContainer.querySelector(
-                            ".agent-chat__msg--thinking:not(.agent-chat__msg--thinking-done)")) {
-                        this.finishActiveThinking();
-                        this.flushThinkingStep();
-                    }
-                    await this.handleSSEEvent(event);
-                    if (this.sessionId !== run.sessionID || !run.interactionViewReady ||
-                        this.sessionRuns.get(run.sessionID) !== run) {
-                        return;
-                    }
-                }
-                await this.renderPendingRunInteractions(run);
-                if (run.pendingEvents.length === 0 && !this.hasUnrenderedRunInteraction(run)) {
-                    run.detached = false;
-                    const activeThinking = this.messagesContainer.querySelector(
-                        ".agent-chat__msg--thinking:not(.agent-chat__msg--thinking-done)"
-                    );
-                    if (this.isStreaming && activeThinking) {
-                        this.startThinkingTimer();
-                    }
-                    return;
-                }
-            }
-        } finally {
-            run.replaying = false;
-            if (this.sessionId !== run.sessionID || !run.interactionViewReady) {
-                run.detached = true;
-                run.interactionViewReady = false;
-            }
+    private prepareRunViewForDetach() {
+        this.flushTokenUpdate();
+        this.flushReasoningUpdate();
+        if (this.currentContent.trim()) {
+            this.finishActiveThinking();
+            this.flushThinkingStep();
+        } else {
+            this.stopThinkingTimer();
         }
     }
 
-    private attachSessionRun(run: ManagedAgentSessionRun) {
-        if (this.sessionRuns.get(run.sessionID) !== run) {
-            if (this.sessionId === run.sessionID && this.pendingRecoverySessionIDs.has(run.sessionID)) {
-                void this.recoverInterruptedTurn(run.sessionID, run.turnID);
+    private captureRunView(state: AgentSessionRunViewState) {
+        this.cancelTokenUpdate();
+        const view = document.createDocumentFragment();
+        this.observeStickTarget(null);
+        while (this.messagesContainer.firstChild) {
+            view.appendChild(this.messagesContainer.firstChild);
+        }
+        state.view = view;
+    }
+
+    private restoreRunView(state: AgentSessionRunViewState, consumed: () => void): boolean {
+        this.cancelTokenUpdate();
+        this.observeStickTarget(null);
+        if (state.view?.hasChildNodes()) {
+            this.messagesContainer.innerHTML = "";
+            this.messagesContainer.appendChild(state.view);
+        }
+        this.entries = state.entries;
+        this.hasTitled = state.hasTitled;
+        this.currentAIElement = state.currentAIElement;
+        this.currentAssistantEntryId = state.currentAssistantEntryId;
+        this.currentThinkingEntryId = state.currentThinkingEntryId;
+        this.currentRoundID = state.currentRoundID;
+        this.currentContent = state.currentContent;
+        this.fullContent = state.fullContent;
+        this.contextTokens = state.contextTokens;
+        this.contextTokenBreakdown = state.contextTokenBreakdown;
+        this.contextCachedTokens = state.contextCachedTokens;
+        this.contextLimit = state.contextLimit;
+        this.requestStartTime = state.requestStartTime;
+        this.currentToolCalls = state.currentToolCalls;
+        this.toolCallStartedAt = state.toolCallStartedAt;
+        this.currentThinkingText = state.currentThinkingText;
+        this.currentThinkingReasoning = state.currentThinkingReasoning;
+        this.currentThinkingReasoningContent = state.currentThinkingReasoningContent;
+        this.currentThinkingSteps = state.currentThinkingSteps;
+        this.currentThinkingDuration = state.currentThinkingDuration;
+        this.pendingConfirms = state.pendingConfirms;
+        this.renderedToolNames = state.renderedToolNames;
+        this.hasInterveningCard = state.hasInterveningCard;
+        this.lastStepToolCount = state.lastStepToolCount;
+        this.applyPermissionMode(state.permissionMode);
+        consumed();
+        this.updateTokenDisplay();
+        this.rebuildNavMarkers();
+        const body = this.currentAIElement?.querySelector<HTMLElement>(".agent-chat__body--streaming");
+        if (body) {
+            if (this.streamingMarkdownEnabled) {
+                this.updateStreamingMarkdown(body);
+            } else {
+                body.classList.remove("agent-chat__body--streaming-markdown");
+                body.textContent = this.currentContent;
             }
+        }
+        return true;
+    }
+
+    private persistPendingSessionTitle(sessionID: string) {
+        const title = this.pendingSessionTitles.get(sessionID);
+        if (!title || this.sessionTitleSaveInFlight.has(sessionID)) {
             return;
         }
-        if (run.replayPromise) {
-            return;
-        }
-        const replayPromise = this.replaySessionRun(run).catch((e) => {
-            console.error("replay background agent events failed:", e);
+        this.sessionTitleSaveInFlight.add(sessionID);
+        void SessionStore.rename(sessionID, title).then(() => {
+            if (this.pendingSessionTitles.get(sessionID) === title) {
+                this.pendingSessionTitles.delete(sessionID);
+            }
+            return this.sessionPanel?.refresh();
+        }).catch((e) => {
+            console.error("save background agent title failed:", e);
+        }).finally(() => {
+            this.sessionTitleSaveInFlight.delete(sessionID);
+            const nextTitle = this.pendingSessionTitles.get(sessionID);
+            if (nextTitle && nextTitle !== title) {
+                this.persistPendingSessionTitle(sessionID);
+            }
         });
-        run.replayPromise = replayPromise;
-        void replayPromise.finally(() => {
-            if (run.replayPromise === replayPromise) {
-                run.replayPromise = undefined;
+    }
+
+    private async handleSessionRunError(run: ManagedAgentSessionRun, err: Error, userEntryId?: string,
+                                        restoreSession = false) {
+        if (run.detached || this.sessionId !== run.sessionID) {
+            return;
+        }
+        await this.runController.processView(run, async () => {
+            if (err instanceof AgentHttpError && err.status === 409) {
+                await this.handleConflictReject();
+                return;
             }
+            await this.handleConfigError(err, userEntryId, restoreSession);
         });
     }
 
@@ -1488,6 +1469,7 @@ export class AgentChat extends Model {
     // - streamEnd：后端 eventCh 关闭（流结束），只解除占位锁定；已提交内容由 saveSession 的 update
     //   同步，未提交内容由后端紧随其后的恢复 update 同步。
     // - permission：只刷新当前会话权限，不重绘正在流式生成的消息。
+    // - pin：只刷新列表，不影响当前对话或输入草稿。
     // - delete：当前会话被删除则清空视图。
     private onWsMessage(data: IWebSocketData) {
         if (!data || data.cmd !== "agentSessionChanged") {
@@ -1562,7 +1544,7 @@ export class AgentChat extends Model {
         const el = document.createElement("div");
         el.className = "agent-chat__msg agent-chat__msg--mirror";
         el.innerHTML = '<div class="agent-chat__body agent-chat__body--mirror">' +
-            '<span class="agent-chat__mirror-spinner"></span>' +
+            '<span class="b3-loading b3-loading--small agent-chat__mirror-spinner" aria-hidden="true"></span>' +
             "<span>" + escapeHtml(message) + "</span>" +
             "</div>";
         this.messagesContainer.appendChild(el);
@@ -1598,6 +1580,7 @@ export class AgentChat extends Model {
         const atBottom = this.isScrolledToBottom();
         const savedScroll = this.messagesContainer.scrollTop;
         if (forceRender) {
+            this.cancelTokenUpdate();
             this.currentAIElement = null;
             this.observeStickTarget(null);
             this.currentAssistantEntryId = "";
@@ -1654,6 +1637,12 @@ export class AgentChat extends Model {
                     console.error("recover interrupted agent turn failed:", e);
                     continue;
                 }
+                if (this.sessionId !== sessionID || this.isStreaming) {
+                    return;
+                }
+                if (session) {
+                    this.updateSessionRunLock(session);
+                }
                 if (!session?.recoveryTurnID) {
                     if (session && !session.agentRunning) {
                         this.pendingRecoverySessionIDs.delete(sessionID);
@@ -1708,8 +1697,9 @@ export class AgentChat extends Model {
         }
     }
 
-    // 从 session 更新标题/时间戳/token 计数/model 等元数据，不动 entries 与 DOM。
+    // 从 session 更新运行锁、标题/时间戳/token 计数/model 等元数据，保留消息内容。
     private updateMetaFromSession(session: AgentSession) {
+        this.updateSessionRunLock(session);
         this.sessionTitle = this.pendingSessionTitle || session.title || this.defaultTitle;
         this.hasTitled = session.titled !== false;
         this.sessionCreatedAt = session.createdAt || this.sessionCreatedAt;
@@ -1730,6 +1720,23 @@ export class AgentChat extends Model {
         this.updateTokenDisplay();
     }
 
+    // 根据权威运行状态更新当前会话的镜像锁，本地运行由 sessionRuns 独立管理。
+    private updateSessionRunLock(session: AgentSession) {
+        if (session.id !== this.sessionId) {
+            return;
+        }
+        const locked = !!session.agentRunning && !this.sessionRuns.get(session.id);
+        if (this.mirrorLocked === locked) {
+            return;
+        }
+        this.mirrorLocked = locked;
+        this.updateRegenerateButtons();
+        this.updateSendButtonState();
+        if (!locked) {
+            this.removeMirrorPlaceholder();
+        }
+    }
+
     // 浅比较两个 entries 数组是否等价（用于判断是否需要重绘）。用 JSON 序列化比较，简单可靠。
     private entriesEqual(a: SessionEntry[], b: SessionEntry[]): boolean {
         if (a === b) {
@@ -1748,6 +1755,7 @@ export class AgentChat extends Model {
 
     // 当前会话被其他实例删除时，清空到欢迎页。不调 saveSession（会话已不存在于磁盘）。
     private handleCurrentSessionDeleted() {
+        this.cancelTokenUpdate();
         this.destroyEditingComposer();
         this.pendingEditDraft = null;
         const deletedSessionID = this.sessionId;
@@ -1762,6 +1770,7 @@ export class AgentChat extends Model {
         this.pendingSessionTitle = null;
         this.applyPermissionMode("confirm");
         this.pendingRecoverySessionIDs.delete(deletedSessionID);
+        this.sessionErrors.delete(deletedSessionID);
         this.recoveryCommitTurnIDs.delete(deletedSessionID);
         this.pendingSessionTitles.delete(deletedSessionID);
         this.hasTitled = false;
@@ -1802,15 +1811,15 @@ export class AgentChat extends Model {
             this.pendingRecoverySessionIDs.add(previousSessionID);
         }
         if (previousRun) {
-            this.detachSessionRun(previousSessionID);
-            await this.waitForSessionRunView(previousRun);
+            this.runController.detach(previousSessionID);
+            await this.runController.waitForView(previousRun);
         }
         this.abortController = null;
         this.setStreaming(false);
         this.mirrorLocked = false;
         this.removeMirrorPlaceholder();
         if (previousRun) {
-            this.prepareSessionRunForDetach(previousRun);
+            this.runController.prepareForDetach(previousRun);
         } else {
             this.finishActiveThinking();
             this.flushThinkingStep();
@@ -1822,7 +1831,7 @@ export class AgentChat extends Model {
         if (!session) {
             if (previousRun) {
                 this.sessionRuns.markRead(previousSessionID);
-                this.attachSessionRun(previousRun);
+                this.runController.attach(previousRun);
                 void this.sessionPanel?.refresh();
             }
             return;
@@ -1898,7 +1907,7 @@ export class AgentChat extends Model {
                         return;
                     }
                     if (previousRun) {
-                        this.captureSessionRunView(previousRun);
+                        this.runController.captureView(previousRun);
                     }
                     this.messagesContainer.innerHTML = "";
                     this.titleElement.textContent = session.title;
@@ -1912,7 +1921,7 @@ export class AgentChat extends Model {
                     }
                     const activeRun = this.sessionRuns.get(session.id);
                     if (activeRun) {
-                        this.attachSessionRun(activeRun);
+                        this.runController.attach(activeRun);
                     } else if (this.mirrorLocked) {
                         this.showMirrorPlaceholder();
                     } else {
@@ -2094,12 +2103,13 @@ export class AgentChat extends Model {
         });
         // 恢复已提交的选中状态（answers 中存的是选项 value）。
         if (entry.answers && entry.answers.length > 0) {
-            el.querySelectorAll("input[type=radio], input[type=checkbox]").forEach((inp) => {
-                (inp as HTMLInputElement).checked = entry.answers!.includes((inp as HTMLInputElement).value);
+            const optionInputs = Array.from(el.querySelectorAll<HTMLInputElement>("input[type=radio], input[type=checkbox]"));
+            optionInputs.forEach((inp) => {
+                inp.checked = entry.answers!.includes(inp.value);
             });
             const customInput = el.querySelector(".agent-chat__question-custom") as HTMLInputElement | null;
             if (customInput) {
-                const customAnswer = entry.answers.find(a => el.querySelector('input[value="' + a + '"]') === null);
+                const customAnswer = entry.answers.find(a => !optionInputs.some(inp => inp.value === a));
                 if (customAnswer) {
                     customInput.value = customAnswer;
                 }
@@ -2201,6 +2211,15 @@ export class AgentChat extends Model {
                     break;
             }
         }
+        const error = this.sessionErrors.get(session.id);
+        if (error) {
+            const lastUser = [...displayEntries].reverse().find(entry => entry.type === "user");
+            if (error.userEntryID === lastUser?.id) {
+                this.renderError(error.message);
+            } else {
+                this.sessionErrors.delete(session.id);
+            }
+        }
     }
 
     private buildEntriesFromSession(session: AgentSession): SessionEntry[] {
@@ -2248,15 +2267,15 @@ export class AgentChat extends Model {
             this.pendingRecoverySessionIDs.add(previousSessionID);
         }
         if (previousRun) {
-            this.detachSessionRun(previousSessionID);
-            await this.waitForSessionRunView(previousRun);
+            this.runController.detach(previousSessionID);
+            await this.runController.waitForView(previousRun);
         }
         this.abortController = null;
         this.setStreaming(false);
         this.mirrorLocked = false;
         this.removeMirrorPlaceholder();
         if (previousRun) {
-            this.prepareSessionRunForDetach(previousRun);
+            this.runController.prepareForDetach(previousRun);
         } else {
             this.finishActiveThinking();
             this.flushThinkingStep();
@@ -2301,7 +2320,7 @@ export class AgentChat extends Model {
             this.tokenDisplayEl.classList.add("fn__none");
         }
         if (previousRun) {
-            this.captureSessionRunView(previousRun);
+            this.runController.captureView(previousRun);
         }
         this.messagesContainer.innerHTML = "";
         this.currentThinkingSteps = [];
@@ -2345,6 +2364,7 @@ export class AgentChat extends Model {
             await SessionStore.remove(id);
         }
         this.pendingRecoverySessionIDs.delete(id);
+        this.sessionErrors.delete(id);
         this.recoveryCommitTurnIDs.delete(id);
         this.pendingSessionTitles.delete(id);
     }
@@ -2371,6 +2391,7 @@ export class AgentChat extends Model {
         this.hasInterveningCard = false;
         this.currentRoundID = "";
         this.composer.clear();
+        this.composerResize?.reset();
         const selectedModel = this.getSelectedModel();
         const reasoningEffort = this.selectedReasoningEffort;
 
@@ -2397,11 +2418,11 @@ export class AgentChat extends Model {
         this.currentThinkingDuration = 0;
         this.currentTurnID = "";
         this.currentRoundID = "";
-        const run = this.beginSessionRun();
+        const run = this.runController.begin();
         try {
             await this.saveSession();
         } catch (e) {
-            this.discardSessionRun(run);
+            this.runController.discard(run);
             if (this.sessionId === run.sessionID) {
                 this.rollbackUserEntry(userEntryId);
                 await this.reloadFromDisk();
@@ -2415,7 +2436,7 @@ export class AgentChat extends Model {
                 text,
                 window.siyuan.config.appearance.lang,
                 refs,
-                (event: ISSEResult) => this.handleSessionRunEvent(run, event),
+                (event: ISSEResult) => this.runController.handleEvent(run, event),
                 (err: Error) => this.handleSessionRunError(run, err, userEntryId),
                 run.controller.signal,
                 run.sessionID,
@@ -2428,7 +2449,7 @@ export class AgentChat extends Model {
                 SessionStore.getRevision(run.sessionID),
             );
         } finally {
-            await this.finishSessionRun(run);
+            await this.runController.finish(run);
         }
     }
 
@@ -2832,6 +2853,11 @@ export class AgentChat extends Model {
     }
 
     private async appendConfigurableError(message: string) {
+        if (this.streamingMarkdownEnabled && this.currentContent &&
+            this.currentAIElement?.querySelector(".agent-chat__body--streaming")) {
+            this.finalizeStreamingBody(this.currentContent, Date.now());
+        }
+        this.cancelTokenUpdate();
         this.finishActiveThinking();
         this.clearThinking();
         if (this.currentAIElement && !this.currentContent) {
@@ -2975,6 +3001,7 @@ export class AgentChat extends Model {
     }
 
     private createAIMessagePlaceholder(): HTMLElement {
+        this.cancelTokenUpdate();
         this.currentContent = "";
         this.currentAssistantEntryId = SessionStore.newSessionId();
         const el = document.createElement("div");
@@ -3000,6 +3027,14 @@ export class AgentChat extends Model {
         this.currentContent += token;
         this.fullContent += token;
 
+        if (this.streamingMarkdownEnabled) {
+            const body = this.currentAIElement.querySelector<HTMLElement>(".agent-chat__body");
+            if (body) {
+                this.updateStreamingMarkdown(body);
+            }
+            return;
+        }
+
         if (!this.pendingTokenUpdate) {
             this.pendingTokenUpdate = true;
             // 流式期间只用 textContent 写入纯文本，跳过 Lute 解析与 postRender 富渲染。
@@ -3016,6 +3051,7 @@ export class AgentChat extends Model {
     }
 
     private flushTokenUpdate() {
+        this.streamingMarkdown?.flush();
         if (this.pendingTokenUpdate) {
             this.pendingTokenUpdate = false;
             cancelAnimationFrame(this.rafId);
@@ -3023,6 +3059,30 @@ export class AgentChat extends Model {
             if (bodyEl) {
                 bodyEl.textContent = this.currentContent;
             }
+        }
+    }
+
+    private updateStreamingMarkdown(body: HTMLElement) {
+        if (!this.layoutVisible) {
+            // 面板折叠时保留最新内容，重新展开后再解析，避免不可见预览占用主线程。
+            return;
+        }
+        if (!this.streamingMarkdown || this.streamingMarkdownBody !== body) {
+            this.streamingMarkdown?.cancel();
+            this.streamingMarkdownBody = body;
+            bindAgentMessageEvents(body, this.app, this.host.onNavigate);
+            this.streamingMarkdown = new AgentStreamingMarkdown(body, () => this.scrollToBottom());
+        }
+        this.streamingMarkdown.update(this.currentContent);
+    }
+
+    private cancelTokenUpdate() {
+        this.streamingMarkdown?.cancel();
+        this.streamingMarkdown = undefined;
+        this.streamingMarkdownBody = undefined;
+        if (this.pendingTokenUpdate) {
+            cancelAnimationFrame(this.rafId);
+            this.pendingTokenUpdate = false;
         }
     }
 
@@ -3040,16 +3100,17 @@ export class AgentChat extends Model {
         }
 
         this.renderedToolNames[name] = true;
-        const lastElement = body.lastElementChild as HTMLElement;
-        if (lastElement?.classList.contains("agent-chat__thinking-tools-line")) {
-            const toolElement = document.createElement("span");
-            toolElement.className = "agent-chat__thinking-tool agent-chat__thinking-tool--running";
-            toolElement.textContent = name;
-            lastElement.appendChild(toolElement);
-        } else {
-            body.insertAdjacentHTML("beforeend", renderToolsLineHTML([{name, running: true}]));
-        }
-        body.scrollTop = body.scrollHeight;
+        updateThinkingBody(body, () => {
+            const lastElement = body.lastElementChild as HTMLElement;
+            if (lastElement?.classList.contains("agent-chat__thinking-tools-line")) {
+                const toolElement = document.createElement("span");
+                toolElement.className = "agent-chat__thinking-tool agent-chat__thinking-tool--running";
+                toolElement.textContent = name;
+                lastElement.appendChild(toolElement);
+            } else {
+                body.insertAdjacentHTML("beforeend", renderToolsLineHTML([{name, running: true}]));
+            }
+        });
         this.scrollToBottom();
     }
 
@@ -3094,7 +3155,7 @@ export class AgentChat extends Model {
 
         const el = this.createTodoElement(result, SessionStore.newSessionId());
         this.insertBeforeAI(el);
-        this.scrollToBottom(true);
+        this.scrollToBottom();
         this.hasInterveningCard = true;
     }
 
@@ -3308,7 +3369,7 @@ export class AgentChat extends Model {
         this.pendingReasoningUpdate = false;
         cancelAnimationFrame(this.reasoningRafId);
         this.reasoningRafId = 0;
-        const thinking = this.pendingReasoningElement;
+        const thinking = this.pendingReasoningElement as HTMLElement | null;
         this.pendingReasoningElement = null;
         if (!thinking) {
             return;
@@ -3316,16 +3377,13 @@ export class AgentChat extends Model {
         const allReasoning = thinking.querySelectorAll(".agent-chat__thinking-reasoning-text");
         const reasoningEl = allReasoning[allReasoning.length - 1] as HTMLElement;
         if (reasoningEl) {
-            reasoningEl.textContent = this.currentThinkingReasoningContent;
+            updateThinkingBody(thinking, () => {
+                reasoningEl.textContent = this.currentThinkingReasoningContent;
+            });
             const latestElement = thinking.parentElement?.querySelector(".agent-chat__thinking-latest") as HTMLElement | null;
             if (latestElement) {
                 latestElement.textContent = this.currentThinkingReasoningContent.replace(/\s+/g, " ").trim();
                 latestElement.scrollLeft = latestElement.scrollWidth;
-            }
-            // 预览态固定高度，滚到底部让最新 reasoning 内容可见。
-            const body = reasoningEl.closest(".agent-chat__thinking-body") as HTMLElement | null;
-            if (body) {
-                body.scrollTop = body.scrollHeight;
             }
         }
     }
@@ -3351,7 +3409,9 @@ export class AgentChat extends Model {
         copyBtn.innerHTML = '<svg><use xlink:href="#iconCopy"></use></svg>';
         copyBtn.addEventListener("click", (e: Event) => {
             e.stopPropagation();
-            void copyAgentText(content);
+            const userEntryID = this.findUserEntryIDBeforeElement(el);
+            const turnContent = userEntryID && getAgentTurnContent(buildAgentPresentationEntries(this.entries), userEntryID);
+            void copyAgentText(turnContent || content);
         });
         actions.appendChild(copyBtn);
 
@@ -3491,13 +3551,13 @@ export class AgentChat extends Model {
         const editorContext = this.captureEditorContext();
         lastUserEntry.editorContext = editorContext;
         const frontendCapabilities = listCapabilityManifests();
-        const run = this.beginSessionRun();
+        const run = this.runController.begin();
         try {
             await fetchAgentSSE(
                 lastUserText,
                 window.siyuan.config.appearance.lang,
                 lastUserEntry.references || [],
-                (event: ISSEResult) => this.handleSessionRunEvent(run, event),
+                (event: ISSEResult) => this.runController.handleEvent(run, event),
                 (err: Error) => this.handleSessionRunError(run, err, undefined, true),
                 run.controller.signal,
                 run.sessionID,
@@ -3511,13 +3571,13 @@ export class AgentChat extends Model {
                 editedData?.blockHTML,
             );
         } finally {
-            await this.finishSessionRun(run);
+            await this.runController.finish(run);
         }
     }
 
-    // 流式结束时把 currentAIElement 的 body 从纯文本一次性转为富渲染（Lute + postRender）。
-    // 由 finishResponse（正常结束）与 error 路径（中断）共用，保证流式期轻渲染后仍得到完整富文本。
+    // 结束、停止和错误路径统一使用完整原文渲染，并只在收尾时执行高亮、公式和图表等增强。
     private finalizeStreamingBody(content: string, ts: number, showActions = true) {
+        this.cancelTokenUpdate();
         if (!this.currentAIElement) {
             return;
         }
@@ -3525,7 +3585,7 @@ export class AgentChat extends Model {
         if (!bodyEl) {
             return;
         }
-        bodyEl.classList.remove("agent-chat__body--streaming");
+        bodyEl.classList.remove("agent-chat__body--streaming", "agent-chat__body--streaming-markdown");
         if (content) {
             // 富渲染只在此处执行一次，避免流式期间每帧 O(n²) 重建带来的卡顿。
             bodyEl.innerHTML = this.lute.ProtylePreviewStr("", content) || escapeHtml(content);
@@ -3533,7 +3593,7 @@ export class AgentChat extends Model {
             if (showActions) {
                 this.addCopyButton(this.currentAIElement, undefined, ts);
             }
-            this.scrollToBottom(true);
+            this.scrollToBottom();
         }
     }
 
@@ -3546,7 +3606,7 @@ export class AgentChat extends Model {
         const savedContent = this.currentContent;
         const savedFullContent = this.fullContent;
         const ts = Date.now();
-        // 流式结束：把 body 从流式期的纯文本转为一次性完整富渲染（Lute + postRender）。
+        // 流式结束：从原始 Markdown 完整渲染，确保待处理预览或未闭合语法不影响最终结果。
         // 场景一：内容在流式期间落到了思考卡片里（currentAIElement 仍为空），需新建普通 AI 消息承载。
         if (!this.currentAIElement && savedContent) {
             const thinkBody = this.messagesContainer.querySelector(".agent-chat__msg--thinking:not(.agent-chat__msg--thinking-done) .agent-chat__thinking-body");
@@ -3571,10 +3631,10 @@ export class AgentChat extends Model {
             if (activeThinkCard?.isConnected) {
                 this.scrollToThinkingCardBelow(activeThinkCard);
             } else {
-                this.scrollToBottom(true);
+                this.scrollToBottom();
             }
         } else if (this.currentAIElement) {
-            // 场景二：普通流式元素（createAIMessagePlaceholder 创建，body 仍是纯文本），一次性富渲染。
+            // 场景二：普通流式元素，一次性完整渲染并补齐增强功能。
             this.finalizeStreamingBody(savedContent, ts);
         }
         this.flushThinkingStep();
@@ -3697,7 +3757,7 @@ export class AgentChat extends Model {
         const requestSessionID = this.sessionId;
         const userEntry = this.entries.find((e): e is { type: "user"; content: string } => e.type === "user");
         const userMsg = userEntry?.content?.slice(0, 500) || "";
-        fetch("/api/ai/agent/title", {
+        fetchWithAppId("/api/ai/agent/title", {
             method: "POST",
             headers: {"Content-Type": "application/json"},
             body: JSON.stringify({
@@ -3730,18 +3790,30 @@ export class AgentChat extends Model {
     }
 
     private appendError(message: string) {
+        if (this.streamingMarkdownEnabled && this.currentContent &&
+            this.currentAIElement?.querySelector(".agent-chat__body--streaming")) {
+            this.finalizeStreamingBody(this.currentContent, Date.now());
+        }
+        this.cancelTokenUpdate();
+        const lastUser = [...this.entries].reverse().find(entry => entry.type === "user");
+        this.sessionErrors.set(this.sessionId, {message, userEntryID: lastUser?.id});
         this.finishActiveThinking();
         this.clearThinking();
         if (this.currentAIElement && !this.currentContent) {
             this.currentAIElement.remove();
         }
         this.currentAIElement = null;
+        this.renderError(message);
+        this.scrollToBottom();
+        this.flushThinkingStep();
+    }
+
+    private renderError(message: string) {
+        this.messagesContainer.querySelectorAll(".agent-chat__msg--error").forEach(el => el.remove());
         const el = document.createElement("div");
         el.className = "agent-chat__msg agent-chat__msg--error";
         el.innerHTML = '<div class="agent-chat__body agent-chat__body--error"><svg class="agent-chat__error-icon"><use xlink:href="#iconTriangleAlert"></use></svg><span>' + escapeHtml(message) + "</span></div>";
         this.messagesContainer.appendChild(el);
-        this.scrollToBottom(true);
-        this.flushThinkingStep();
     }
 
     private appendRetry(attempt: number, maxRetries: number) {
@@ -3753,7 +3825,7 @@ export class AgentChat extends Model {
         el.className = "agent-chat__msg agent-chat__msg--retry";
         el.innerHTML = renderRetryCardHTML(attempt, maxRetries);
         this.insertBeforeAI(el);
-        this.scrollToBottom(true);
+        this.scrollToBottom();
         this.hasInterveningCard = true;
     }
 
@@ -3785,7 +3857,7 @@ export class AgentChat extends Model {
         });
         // 快照在工具执行前产生，应显示在触发写操作的思考和确认内容之后。
         this.insertBeforeAI(el);
-        this.scrollToBottom(true);
+        this.scrollToBottom();
         this.hasInterveningCard = true;
     }
 
@@ -3851,6 +3923,8 @@ export class AgentChat extends Model {
             this.fullContent = savedFullContent;
             this.addCopyButton(el, undefined, ts);
             this.scrollToBottom(true);
+        } else if (this.currentAIElement && this.streamingMarkdownEnabled) {
+            this.finalizeStreamingBody(savedContent, ts);
         }
         this.flushThinkingStep();
         if (this.currentContent) {
@@ -3992,7 +4066,7 @@ export class AgentChat extends Model {
             });
         }
         this.insertBeforeAI(el);
-        this.scrollToBottom(true);
+        this.scrollToBottom();
         this.hasInterveningCard = true;
         if (notify) {
             if (this.host.notify) {
@@ -4010,7 +4084,7 @@ export class AgentChat extends Model {
             body.always = true;
         }
         try {
-            const resp = await fetch("/api/ai/agent/confirm", {
+            const resp = await fetchWithAppId("/api/ai/agent/confirm", {
                 method: "POST",
                 headers: {"Content-Type": "application/json"},
                 body: JSON.stringify(body),
@@ -4024,7 +4098,7 @@ export class AgentChat extends Model {
             console.error("agent confirm request error:", e);
             return false;
         }
-        this.removeRunInteraction(sessionID, "confirm", confirmID);
+        this.runController.removeInteraction(sessionID, "confirm", confirmID);
         if (this.sessionId !== sessionID) {
             return true;
         }
@@ -4077,7 +4151,7 @@ export class AgentChat extends Model {
                                               structuredContentSet: boolean, isError: boolean) {
         for (let attempt = 0; attempt < 3; attempt++) {
             try {
-                const resp = await fetch("/api/ai/agent/browserCapabilityResult", {
+                const resp = await fetchWithAppId("/api/ai/agent/browserCapabilityResult", {
                     method: "POST",
                     headers: {"Content-Type": "application/json"},
                     body: JSON.stringify({callID, result, structuredContent, structuredContentSet, isError}),
@@ -4150,17 +4224,26 @@ export class AgentChat extends Model {
             const input = option.querySelector("input") as HTMLInputElement;
             if (!input) return;
             let wasChecked = false;
-            option.addEventListener("mousedown", () => {
+            option.addEventListener("pointerdown", () => {
                 wasChecked = input.checked;
             });
+            input.addEventListener("keydown", (e) => {
+                if (e.key === " " && !e.repeat) {
+                    wasChecked = input.checked;
+                }
+            });
             option.addEventListener("click", (e) => {
-                if (el.classList.contains("agent-chat__msg--confirmed")) {
+                if (input.disabled || el.classList.contains("agent-chat__msg--confirmed")) {
                     return;
                 }
                 if (input.type === "radio" && wasChecked) {
-                    e.preventDefault();
+                    // 标签点击需阻止转发，直接点击单选框时保留默认行为，避免浏览器恢复选中状态。
+                    if (e.target !== input) {
+                        e.preventDefault();
+                    }
                     input.checked = false;
                 }
+                wasChecked = false;
             });
         });
 
@@ -4200,14 +4283,14 @@ export class AgentChat extends Model {
         }
 
         this.insertBeforeAI(el);
-        this.scrollToBottom(true);
+        this.scrollToBottom();
         this.hasInterveningCard = true;
     }
 
     private async postQuestionAnswer(questionID: string, answers: string[],
                                      sessionID: string, questionEntryID: string): Promise<boolean> {
         try {
-            const resp = await fetch("/api/ai/agent/question", {
+            const resp = await fetchWithAppId("/api/ai/agent/question", {
                 method: "POST",
                 headers: {"Content-Type": "application/json"},
                 body: JSON.stringify({questionID: questionID, answers: answers}),
@@ -4221,7 +4304,7 @@ export class AgentChat extends Model {
             console.error("agent question request error:", e);
             return false;
         }
-        this.removeRunInteraction(sessionID, "question", questionID);
+        this.runController.removeInteraction(sessionID, "question", questionID);
         if (this.sessionId !== sessionID) {
             return true;
         }
@@ -4524,25 +4607,28 @@ export class AgentChat extends Model {
         }
     }
 
-    // 启动思考计时器，每 100ms 刷新所有未完成思考卡片的标题文本为「思考中... X.Xs」。
+    // 启动思考计时器，每秒刷新当前未完成思考卡片的标题文本。
     private startThinkingTimer() {
         this.stopThinkingTimer();
         if (!this.requestStartTime) {
             return;
         }
+        const cards = this.messagesContainer.querySelectorAll<HTMLElement>(
+            ".agent-chat__msg--thinking:not(.agent-chat__msg--thinking-done) .agent-chat__thinking-text"
+        );
         const tick = () => {
             const sec = Math.floor((Date.now() - this.requestStartTime) / 1000);
             const L = window.siyuan.languages;
             const live = (L.agentThinking || "Thinking") + " " + sec + "s";
-            const cards = this.messagesContainer.querySelectorAll(
-                ".agent-chat__msg--thinking:not(.agent-chat__msg--thinking-done) .agent-chat__thinking-text"
-            );
             for (let i = 0; i < cards.length; i++) {
-                (cards[i] as HTMLElement).textContent = live;
+                if (this.messagesContainer.contains(cards[i]) &&
+                    !cards[i].closest(".agent-chat__msg--thinking-done")) {
+                    cards[i].textContent = live;
+                }
             }
         };
         tick();
-        this.thinkingTimerId = window.setInterval(tick, 100);
+        this.thinkingTimerId = window.setInterval(tick, 1000);
     }
 
     // 停止思考计时器（思考结束/切换会话/停止生成时调用，避免泄漏）。
@@ -4604,6 +4690,10 @@ export class AgentChat extends Model {
     }
 
     private setStreaming(streaming: boolean) {
+        if (!streaming) {
+            this.flushTokenUpdate();
+            this.cancelTokenUpdate();
+        }
         this.isStreaming = streaming;
         this.updateRegenerateButtons();
         this.updateHostRunStatus();
@@ -4714,7 +4804,7 @@ export class AgentChat extends Model {
     // 其下方留出空间承载即将/已开始流式的正文。delay 用于等待卡片折叠的 max-height 过渡（约 0.2s）完成。
     private scrollToThinkingCardBelow(card: HTMLElement, delay = 220) {
         const align = () => {
-            if (!card.isConnected) {
+            if (!card.isConnected || this.userScrolledUp) {
                 return;
             }
             // 用 getBoundingClientRect 计算卡片底部相对滚动容器的偏移，
@@ -4808,6 +4898,7 @@ export class AgentChat extends Model {
             "dailynote": L.agentCatDailynote, "import": L.agentCatImport,
             "repo": L.agentCatRepo, "history": L.agentCatHistory,
             "sync": L.agentCatSync, "database": L.agentCatDatabase,
+            "bazaar": L.bazaar,
         };
         return m[name] || name || L.agentCatDefault;
     }

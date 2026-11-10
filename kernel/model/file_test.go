@@ -1,23 +1,13 @@
-// SiYuan - From thought to insight, with agents
+// SiYuan - https://github.com/siyuan-note/siyuan
 // Copyright (c) 2020-present, b3log.org
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU Affero General Public License for more details.
-//
-// You should have received a copy of the GNU Affero General Public License
-// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+// SPDX-License-Identifier: AGPL-3.0-or-later
 
 package model
 
 import (
 	"errors"
+	"maps"
+	"os"
 	"path"
 	"path/filepath"
 	"reflect"
@@ -29,6 +19,7 @@ import (
 	"github.com/siyuan-note/siyuan/kernel/cache"
 	"github.com/siyuan-note/siyuan/kernel/conf"
 	"github.com/siyuan-note/siyuan/kernel/filesys"
+	"github.com/siyuan-note/siyuan/kernel/sql"
 	"github.com/siyuan-note/siyuan/kernel/treenode"
 	"github.com/siyuan-note/siyuan/kernel/util"
 )
@@ -42,10 +33,11 @@ type fileOperationTestFixture struct {
 	childID    string
 }
 
-func setupFileOperationTest(t *testing.T) *fileOperationTestFixture {
+func setupFileOperationTest(t testing.TB) *fileOperationTestFixture {
 	originalConf := Conf
 	originalDataDir := util.DataDir
 	originalBlockTreeDBPath := util.BlockTreeDBPath
+	originalQueueDir := util.QueueDir
 	const testLang = "file-operation-test"
 	originalTimeLang, hadTimeLang := util.TimeLangs[testLang]
 	util.TimeLangs[testLang] = map[string]any{
@@ -57,11 +49,12 @@ func setupFileOperationTest(t *testing.T) *fileOperationTestFixture {
 	tempDir := t.TempDir()
 	util.DataDir = filepath.Join(tempDir, "data")
 	util.BlockTreeDBPath = filepath.Join(tempDir, "blocktree.db")
+	util.QueueDir = t.TempDir()
 	Conf = NewAppConf()
 	Conf.Lang = testLang
-	Conf.FileTree = conf.NewFileTree()
+	Conf.FileTree.Store(conf.NewFileTree())
 	Conf.NotebookCrypto = conf.NewNotebookCrypto()
-	Conf.Sync = conf.NewSync()
+	Conf.Sync.Store(conf.NewSync())
 
 	box := &Box{ID: "20260718000000-abcdefg"}
 	boxConf := conf.NewBoxConf()
@@ -84,6 +77,10 @@ func setupFileOperationTest(t *testing.T) *fileOperationTestFixture {
 	}
 
 	t.Cleanup(func() {
+		FlushTxQueue()
+		backgroundRefreshWaitGroup.Wait()
+		// 测试文档即将删除，其待处理索引不能留给后续用例刷新。
+		sql.ClearQueue()
 		cache.RemoveTreeData(sourceTree.ID)
 		cache.RemoveTreeData(targetTree.ID)
 		cache.RemoveDocIAL(sourceTree.Path)
@@ -97,6 +94,7 @@ func setupFileOperationTest(t *testing.T) *fileOperationTestFixture {
 		Conf = originalConf
 		util.DataDir = originalDataDir
 		util.BlockTreeDBPath = originalBlockTreeDBPath
+		util.QueueDir = originalQueueDir
 		if "" != originalBlockTreeDBPath {
 			treenode.InitBlockTree(false)
 		}
@@ -132,7 +130,10 @@ func addFileOperationTestDoc(t *testing.T, fixture *fileOperationTestFixture, id
 
 func TestListDocTreeUsesPathIDForInvalidPropertiesID(t *testing.T) {
 	fixture := setupFileOperationTest(t)
-	ial := filesys.DocIAL(filepath.Join(util.DataDir, fixture.box.ID, fixture.sourcePath))
+	ial, err := filesys.DocIAL(filepath.Join(util.DataDir, fixture.box.ID, fixture.sourcePath))
+	if err != nil {
+		t.Fatal(err)
+	}
 	tests := []struct {
 		name string
 		id   string
@@ -145,9 +146,7 @@ func TestListDocTreeUsesPathIDForInvalidPropertiesID(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			invalidIAL := make(map[string]string, len(ial))
-			for key, value := range ial {
-				invalidIAL[key] = value
-			}
+			maps.Copy(invalidIAL, ial)
 			if "" == test.id {
 				delete(invalidIAL, "id")
 			} else {
@@ -175,9 +174,42 @@ func TestListDocTreeUsesPathIDForInvalidPropertiesID(t *testing.T) {
 	}
 }
 
+func TestDocIALPreservesUnsupportedSpec(t *testing.T) {
+	fixture := setupFileOperationTest(t)
+	originalWorkspace := util.WorkspaceDir
+	util.WorkspaceDir = t.TempDir()
+	t.Cleanup(func() { util.WorkspaceDir = originalWorkspace })
+	absPath := filepath.Join(util.DataDir, fixture.box.ID, fixture.sourcePath)
+	for _, source := range []string{
+		`{"Spec":"999","Properties":{"title":"Future"}}`,
+		`{"Properties":{"title":"Future"},"Spec":"999"}`,
+		`{"Spec":"999","Properties":{}}`,
+		`{"Properties":{"title":{"text":"Future"}},"Spec":"999"}`,
+		`{"Properties":{"title":"Invalid version"},"Spec":{}}`,
+	} {
+		cache.RemoveDocIALInBox(fixture.sourcePath, fixture.box.ID)
+		if err := os.WriteFile(absPath, []byte(source), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if properties := fixture.box.docIAL(fixture.sourcePath); properties != nil {
+			t.Fatalf("unsupported source returned properties: %v", properties)
+		}
+		retained, err := os.ReadFile(absPath)
+		if err != nil || string(retained) != source {
+			t.Fatalf("unsupported source was changed or quarantined: %v", err)
+		}
+		if properties := cache.GetDocIALInBox(fixture.sourcePath, fixture.box.ID); properties != nil {
+			t.Fatalf("unsupported source published cached properties: %v", properties)
+		}
+		if _, err = os.Stat(filepath.Join(util.WorkspaceDir, "corrupted")); !os.IsNotExist(err) {
+			t.Fatalf("version error entered corruption recovery: %v", err)
+		}
+	}
+}
+
 func TestResolveDocTreeSortModeInheritance(t *testing.T) {
 	fixture := setupFileOperationTest(t)
-	Conf.FileTree.Sort = util.SortModeSizeDESC
+	Conf.FileTree.Load().Sort = util.SortModeSizeDESC
 	boxConf := fixture.box.GetConf()
 	boxConf.SortMode = util.SortModeCreatedASC
 	if err := fixture.box.SaveConf(boxConf); nil != err {
@@ -256,8 +288,8 @@ func TestResolveDocTreeSortModeInheritance(t *testing.T) {
 
 func TestCustomSortMaintenanceIgnoresEffectiveModeAndListLimit(t *testing.T) {
 	fixture := setupFileOperationTest(t)
-	Conf.FileTree.Sort = util.SortModeNameASC
-	Conf.FileTree.MaxListCount = 1
+	Conf.FileTree.Load().Sort = util.SortModeNameASC
+	Conf.FileTree.Load().MaxListCount = 1
 	boxConf := fixture.box.GetConf()
 	boxConf.SortMode = util.SortModeFileTree
 	if err := fixture.box.SaveConf(boxConf); nil != err {
@@ -293,8 +325,8 @@ func TestCustomSortMaintenanceIgnoresEffectiveModeAndListLimit(t *testing.T) {
 	if nil != err {
 		t.Fatalf("read custom sort after append failed: %v", err)
 	}
-	if 4 != sorts[maxID] {
-		t.Fatalf("append used effective display mode instead of complete custom order: got %d, want 4", sorts[maxID])
+	if 31 != sorts[maxID] || sorts[extraID] != 30 {
+		t.Fatalf("append did not preserve existing custom values: %v", sorts)
 	}
 
 	minID := "20260718000005-abcdefg"
@@ -304,7 +336,7 @@ func TestCustomSortMaintenanceIgnoresEffectiveModeAndListLimit(t *testing.T) {
 	if nil != err {
 		t.Fatalf("read custom sort after prepend failed: %v", err)
 	}
-	if 1 != sorts[minID] || 5 != sorts[maxID] {
+	if 9 != sorts[minID] || 31 != sorts[maxID] {
 		t.Fatalf("prepend did not preserve the complete custom order: prepend=%d, trailing=%d", sorts[minID], sorts[maxID])
 	}
 
@@ -323,7 +355,7 @@ func TestCustomSortMaintenanceIgnoresEffectiveModeAndListLimit(t *testing.T) {
 
 func TestReorderDocsUsesCompleteSiblingOrder(t *testing.T) {
 	fixture := setupFileOperationTest(t)
-	Conf.FileTree.MaxListCount = 2
+	Conf.FileTree.Load().MaxListCount = 2
 	hiddenTree := addFileOperationTestDoc(t, fixture, "20260718000003-abcdefg", "Hidden", true)
 	unlistedTree := addFileOperationTestDoc(t, fixture, "20260718000004-abcdefg", "Unlisted", false)
 	confPath := filepath.Join(util.DataDir, fixture.box.ID, ".siyuan", "sort.json")
@@ -463,8 +495,8 @@ func assertNotebookCustomOrder(t *testing.T, expected []string) {
 
 func TestGetDocOptionallyIncludesDocInfo(t *testing.T) {
 	fixture := setupFileOperationTest(t)
-	Conf.Editor = conf.NewEditor()
-	Conf.Export = conf.NewExport()
+	Conf.Editor.Store(conf.NewEditor())
+	Conf.Export.Store(conf.NewExport())
 	expected, err := GetDocInfo(fixture.sourceID)
 	if nil != err {
 		t.Fatalf("get standalone document info failed: %v", err)
@@ -572,6 +604,29 @@ func TestCreateDocByMdConvertsHTMLTagsToTextMarks(t *testing.T) {
 	})
 	if !foundKbd || !foundUnderline {
 		t.Fatalf("HTML tags were not converted to text marks: kbd=%t, underline=%t", foundKbd, foundUnderline)
+	}
+}
+
+func TestCreateDocByMdKeepsOrdinaryTableSpec(t *testing.T) {
+	fixture := setupFileOperationTest(t)
+	tree, err := CreateDocByMd(fixture.box.ID, "/20260718000004-abcdefg.sy", "Ordinary table",
+		"| Header |\n| --- |\n| **bold** |", nil, nil)
+	if nil != err {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		cache.RemoveTreeData(tree.ID)
+		cache.RemoveDocIAL(tree.Path)
+	})
+	if tree.Root.Spec != treenode.BaseSpec {
+		t.Fatalf("ordinary table must use base spec, got %s", tree.Root.Spec)
+	}
+	loaded, err := filesys.LoadTree(tree.Box, tree.Path, util.NewLute())
+	if nil != err {
+		t.Fatal(err)
+	}
+	if loaded.Root.Spec != treenode.BaseSpec {
+		t.Fatalf("persisted ordinary table must use base spec, got %s", loaded.Root.Spec)
 	}
 }
 
@@ -802,6 +857,21 @@ func TestPerformCreateDocTransactionSyncReturnsWriteError(t *testing.T) {
 	}
 }
 
+func TestCreateDocByMdSyncReturnsWriteError(t *testing.T) {
+	fixture := setupFileOperationTest(t)
+	docID := "20260718000009-abcdefg\x00"
+	tree, err := CreateDocByMdSync(fixture.box.ID, "/"+docID+".sy", "Inbox", "Keep the cloud original", nil, nil)
+	if tree == nil {
+		t.Fatal("expected document validation to succeed before the filesystem write fails")
+	}
+	if err == nil {
+		t.Fatal("expected Markdown document creation to return the write error")
+	}
+	if bt := treenode.GetBlockTree(docID); bt != nil {
+		t.Fatal("failed document remains in the block tree")
+	}
+}
+
 func TestGetHPathsByPathsUsesDocumentRoot(t *testing.T) {
 	fixture := setupFileOperationTest(t)
 	tree, err := LoadTreeByBlockID(fixture.sourceID)
@@ -954,6 +1024,38 @@ func TestMoveDocsRejectsInvalidPathsBeforeMoving(t *testing.T) {
 				t.Fatalf("target document was created for invalid source paths [%v]", test.fromPaths)
 			}
 		})
+	}
+}
+
+func TestMoveDocsRejectsSelfAndDescendantsBeforeMoving(t *testing.T) {
+	fixture := setupFileOperationTest(t)
+	childPath := strings.TrimSuffix(fixture.sourcePath, ".sy") + "/20260718000003-abcdefg.sy"
+	grandchildPath := strings.TrimSuffix(childPath, ".sy") + "/20260718000004-abcdefg.sy"
+	for _, docPath := range []string{childPath, grandchildPath} {
+		tree := treenode.NewTree(fixture.box.ID, docPath, "/Source/Descendant", "Descendant")
+		if _, err := filesys.WriteTree(tree); err != nil {
+			t.Fatal(err)
+		}
+		treenode.UpsertBlockTree(tree)
+		t.Cleanup(func() {
+			cache.RemoveTreeData(tree.ID)
+			cache.RemoveDocIAL(tree.Path)
+		})
+	}
+	for _, targetPath := range []string{fixture.sourcePath, childPath, grandchildPath} {
+		for _, sources := range [][]string{{fixture.sourcePath}, {fixture.targetPath, fixture.sourcePath}} {
+			if err := MoveDocs(sources, fixture.box.ID, targetPath, nil); err == nil || err.Error() != Conf.Language(87) {
+				t.Fatalf("expected invalid move target error for %v to %s, got %v", sources, targetPath, err)
+			}
+			for _, docPath := range []string{fixture.sourcePath, fixture.targetPath, childPath, grandchildPath} {
+				if !fixture.box.Exist(docPath) {
+					t.Fatalf("invalid move changed document %s", docPath)
+				}
+				if bt := treenode.GetBlockTree(util.GetTreeID(docPath)); bt == nil || bt.Path != docPath {
+					t.Fatalf("invalid move changed document index %s: %+v", docPath, bt)
+				}
+			}
+		}
 	}
 }
 
@@ -1121,6 +1223,32 @@ func TestSortSearchDocResults(t *testing.T) {
 		if hPath != results[i].data["hPath"] {
 			t.Fatalf("unexpected search result order at %d: got %q, want %q", i, results[i].data["hPath"], hPath)
 		}
+	}
+}
+
+func TestSearchDocBlockExactMatching(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		block     sql.Block
+		keyword   string
+		sensitive bool
+		want      bool
+	}{
+		{"title", sql.Block{Content: "Math"}, "Math", true, true},
+		{"name", sql.Block{Name: "Math"}, "Math", true, true},
+		{"alias", sql.Block{Alias: "Algebra,Math,Geometry"}, "Math", true, true},
+		{"partial alias", sql.Block{Alias: "Higher Math"}, "Math", true, false},
+		{"multiple aliases", sql.Block{Alias: "Math,Algebra"}, "Math,Algebra", true, false},
+		{"sensitive", sql.Block{Name: "Math", Alias: "Math"}, "math", true, false},
+		{"insensitive name", sql.Block{Name: "Math"}, "math", false, true},
+		{"insensitive alias", sql.Block{Alias: "Algebra,Math"}, "math", false, true},
+		{"literal", sql.Block{Alias: "Other,Math%_\\"}, "Math%_\\", true, true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := isExactSearchDocBlockMatch(&test.block, test.keyword, test.sensitive); got != test.want {
+				t.Fatalf("got %t, want %t", got, test.want)
+			}
+		})
 	}
 }
 

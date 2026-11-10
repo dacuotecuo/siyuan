@@ -1,18 +1,6 @@
-// SiYuan - From thought to insight, with agents
+// SiYuan - https://github.com/siyuan-note/siyuan
 // Copyright (c) 2020-present, b3log.org
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-// GNU Affero General Public License for more details.
-//
-// You should have received a copy of the GNU Affero General Public License
-// along with this program. If not, see <https://www.gnu.org/licenses/>.
+// SPDX-License-Identifier: AGPL-3.0-or-later
 
 package model
 
@@ -61,14 +49,81 @@ func TestTemplateFileManagement(t *testing.T) {
 	}
 	call(TemplateFileRequest{Action: "write", Path: "weekly/child.md", Content: "child"})
 	dir := call(TemplateFileRequest{Action: "read", Path: "weekly"}).(map[string]string)
-	deleted := call(TemplateFileRequest{Action: "remove", Path: "weekly", Revision: dir["revision"]}).(map[string]string)
-	content, err := os.ReadFile(filepath.Join(util.DataDir, "templates", deleted["recoveryPath"], "child.md"))
-	if err != nil || string(content) != "child" {
-		t.Fatalf("deleted directory is not recoverable: %s %v", content, err)
+	call(TemplateFileRequest{Action: "remove", Path: "weekly", Revision: dir["revision"]})
+	if _, err := os.Stat(filepath.Join(util.DataDir, "templates", "weekly")); !os.IsNotExist(err) {
+		t.Fatalf("directory was not deleted: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(util.DataDir, "templates", ".trash")); !os.IsNotExist(err) {
+		t.Fatalf("deletion created a trash directory: %v", err)
 	}
 	entries := call(TemplateFileRequest{Action: "list"}).([]TemplateFileEntry)
 	if len(entries) != 1 || entries[0].Path != "renamed.md" {
 		t.Fatalf("unexpected entries: %+v", entries)
+	}
+}
+
+func TestTemplateSourceDocumentID(t *testing.T) {
+	id := "20260921000000-abcdefg"
+	attrs := `{: id="` + id + `" title="Source" type="doc"}`
+	for _, test := range []struct {
+		name, content, want string
+	}{
+		{"exported", "Body\n\n" + attrs, id},
+		{"crlf", "Body\r\n\r\n" + attrs + "\r\n", id},
+		{"attribute order", `Body` + "\n\n" + `{: type="doc" title="Source" id="` + id + `"}`, id},
+		{"plain", "Body", ""},
+		{"block", "Body\n{: id=\"" + id + "\"}", ""},
+		{"code", "```markdown\n" + attrs + "\n```", ""},
+		{"indented code", "    " + attrs, ""},
+		{"standalone attributes", "```" + templateDocumentAttributeMarker + "\n" + attrs + "\n```", ""},
+		{"dynamic identity", "Body\n\n{: id=\".action{.id}\" type=\"doc\"}", ""},
+		{"invalid identity", "Body\n\n{: id=\"invalid\" type=\"doc\"}", ""},
+		{"unexecuted action", ".action{fail \"must not execute\"}\n\n" + attrs, id},
+		{"example and source", "```markdown\n{: id=\"20260921000000-example\" type=\"doc\"}\n```\n\n" + attrs, id},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := templateSourceDocumentID(test.content); got != test.want {
+				t.Fatalf("source document = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
+func TestTemplateDeletePreservesLegacyTrash(t *testing.T) {
+	previous := util.DataDir
+	util.DataDir = t.TempDir()
+	t.Cleanup(func() { util.DataDir = previous })
+	root, err := openTemplateRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	if err = root.MkdirAll(".trash/legacy", 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err = root.WriteFile(".trash/legacy/old.md", []byte("retained"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = ManageTemplateFiles(TemplateFileRequest{Action: "write", Path: "new.md", Content: "delete"}); err != nil {
+		t.Fatal(err)
+	}
+	read, err := ManageTemplateFiles(TemplateFileRequest{Action: "read", Path: "new.md"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = ManageTemplateFiles(TemplateFileRequest{Action: "remove", Path: "new.md", Revision: read.(map[string]string)["revision"]}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = root.Stat("new.md"); !os.IsNotExist(err) {
+		t.Fatalf("file was not deleted: %v", err)
+	}
+	content, err := root.ReadFile(".trash/legacy/old.md")
+	if err != nil || string(content) != "retained" {
+		t.Fatalf("legacy recovery data changed: %v", err)
+	}
+	items, err := os.ReadDir(filepath.Join(root.Name(), ".trash"))
+	if err != nil || len(items) != 1 || items[0].Name() != "legacy" {
+		t.Fatalf("deletion retained a new copy: %v", err)
 	}
 }
 
@@ -87,6 +142,34 @@ func TestTemplateFilePaths(t *testing.T) {
 	}
 	if _, err := ManageTemplateFiles(TemplateFileRequest{Action: "write", Path: "linked/outside.md"}); err == nil {
 		t.Fatal("symlink escape accepted")
+	}
+}
+
+func TestTemplateRenameWithinChineseDirectory(t *testing.T) {
+	previous := util.DataDir
+	util.DataDir = t.TempDir()
+	t.Cleanup(func() { util.DataDir = previous })
+	call := func(request TemplateFileRequest) any {
+		t.Helper()
+		ret, err := ManageTemplateFiles(request)
+		if err != nil {
+			t.Fatalf("%s %q: %v", request.Action, request.Path, err)
+		}
+		return ret
+	}
+	call(TemplateFileRequest{Action: "mkdir", Path: "子文件夹"})
+	call(TemplateFileRequest{Action: "write", Path: "子文件夹/模板.md", Content: "内容"})
+	read := call(TemplateFileRequest{Action: "read", Path: "子文件夹/模板.md"}).(map[string]string)
+	call(TemplateFileRequest{Action: "move", Path: "子文件夹/模板.md", Target: "子文件夹/新模板.md", Revision: read["revision"]})
+	read = call(TemplateFileRequest{Action: "read", Path: "子文件夹/新模板.md"}).(map[string]string)
+	if read["content"] != "内容" {
+		t.Fatal("renaming changed template contents")
+	}
+	read = call(TemplateFileRequest{Action: "read", Path: "子文件夹"}).(map[string]string)
+	call(TemplateFileRequest{Action: "move", Path: "子文件夹", Target: "新文件夹", Revision: read["revision"]})
+	read = call(TemplateFileRequest{Action: "read", Path: "新文件夹/新模板.md"}).(map[string]string)
+	if read["content"] != "内容" {
+		t.Fatal("renaming a directory lost its template")
 	}
 }
 
@@ -118,8 +201,8 @@ func TestPreviewTemplateUnsavedSource(t *testing.T) {
 
 func TestExportTemplateDocumentAttributesAndDirectory(t *testing.T) {
 	fixture := setupFileOperationTest(t)
-	Conf.Editor = conf.NewEditor()
-	Conf.Export = conf.NewExport()
+	Conf.Editor.Store(conf.NewEditor())
+	Conf.Export.Store(conf.NewExport())
 	tree, err := LoadTreeByBlockID(fixture.sourceID)
 	if err != nil {
 		t.Fatal(err)
@@ -174,6 +257,103 @@ func TestExportTemplateDocumentAttributesAndDirectory(t *testing.T) {
 	}
 }
 
+func TestDocSaveAsTemplateInfoAndRememberedAttrs(t *testing.T) {
+	fixture := setupFileOperationTest(t)
+	Conf.Editor.Store(conf.NewEditor())
+	Conf.Export.Store(conf.NewExport())
+
+	info, err := GetDocSaveAsTemplateInfo(fixture.sourceID)
+	if nil != err {
+		t.Fatal(err)
+	}
+	if "Source" != info.Name || "" != info.Directory || info.HasDatabase {
+		t.Fatalf("unexpected initial export info: %+v", info)
+	}
+
+	tree, err := LoadTreeByBlockID(fixture.sourceID)
+	if nil != err {
+		t.Fatal(err)
+	}
+	heading := &ast.Node{Type: ast.NodeHeading, ID: "20260907000000-heading", HeadingLevel: 2}
+	heading.SetIALAttr("id", heading.ID)
+	heading.AppendChild(&ast.Node{Type: ast.NodeText, Tokens: []byte("Database section")})
+	database := &ast.Node{
+		Type:            ast.NodeAttributeView,
+		ID:              "20260907000001-avblock",
+		AttributeViewID: "20260907000002-attrview",
+	}
+	database.SetIALAttr("id", database.ID)
+	tree.Root.AppendChild(heading)
+	tree.Root.AppendChild(database)
+	tree.Root.SetIALAttr(templateExportNameAttr, "weekly")
+	tree.Root.SetIALAttr(templateExportDirectoryAttr, "reviews")
+	if _, err = filesys.WriteTree(tree); nil != err {
+		t.Fatal(err)
+	}
+	treenode.UpsertBlockTree(tree)
+
+	childInfo, err := GetDocSaveAsTemplateInfo(fixture.childID)
+	if nil != err {
+		t.Fatal(err)
+	}
+	if "weekly" != childInfo.Name || "reviews" != childInfo.Directory || childInfo.HasDatabase {
+		t.Fatalf("unexpected child export info: %+v", childInfo)
+	}
+	headingInfo, err := GetDocSaveAsTemplateInfo(heading.ID)
+	if nil != err || !headingInfo.HasDatabase {
+		t.Fatalf("database in the exported heading subtree was not detected: %+v %v", headingInfo, err)
+	}
+	docInfo, err := GetDocSaveAsTemplateInfo(fixture.sourceID)
+	if nil != err || !docInfo.HasDatabase {
+		t.Fatalf("document database was not detected: %+v %v", docInfo, err)
+	}
+
+	if _, err = ManageTemplateFiles(TemplateFileRequest{Action: "mkdir", Path: "reviews"}); nil != err {
+		t.Fatal(err)
+	}
+	code, err := DocSaveAsTemplateInDirectory(fixture.sourceID, "weekly", "reviews", false,
+		TemplateDatabaseModeCopy)
+	if nil != err || 0 != code {
+		t.Fatalf("export failed: %d %v", code, err)
+	}
+	info, err = GetDocSaveAsTemplateInfo(fixture.childID)
+	if nil != err || "weekly" != info.Name || "reviews" != info.Directory {
+		t.Fatalf("document export settings were not remembered from a child: %+v %v", info, err)
+	}
+
+	if _, err = ManageTemplateFiles(TemplateFileRequest{Action: "write", Path: "existing.md", Content: "existing"}); nil != err {
+		t.Fatal(err)
+	}
+	code, err = DocSaveAsTemplateInDirectory(fixture.sourceID, "existing", "", false,
+		TemplateDatabaseModeCopy)
+	if nil != err || 1 != code {
+		t.Fatalf("existing template did not request overwrite: %d %v", code, err)
+	}
+	info, err = GetDocSaveAsTemplateInfo(fixture.sourceID)
+	if nil != err || "weekly" != info.Name || "reviews" != info.Directory {
+		t.Fatalf("rejected export changed remembered settings: %+v %v", info, err)
+	}
+
+	code, err = DocSaveAsTemplateInDirectory(fixture.sourceID, "weekly", "reviews", true,
+		TemplateDatabaseModeCopy)
+	if nil != err || 0 != code {
+		t.Fatalf("overwrite export failed: %d %v", code, err)
+	}
+	content, err := os.ReadFile(filepath.Join(util.DataDir, "templates", "reviews", "weekly.md"))
+	if nil != err {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(content), templateExportNameAttr) ||
+		strings.Contains(string(content), templateExportDirectoryAttr) {
+		t.Fatalf("remembered settings leaked into template: %s", content)
+	}
+	source, err := LoadTreeByBlockID(fixture.sourceID)
+	if nil != err || "weekly" != source.Root.IALAttr(templateExportNameAttr) ||
+		"reviews" != source.Root.IALAttr(templateExportDirectoryAttr) {
+		t.Fatalf("source document lost remembered settings: %+v %v", source.Root.KramdownIAL, err)
+	}
+}
+
 func TestTemplateExistingNames(t *testing.T) {
 	previous := util.DataDir
 	util.DataDir = t.TempDir()
@@ -217,7 +397,7 @@ func TestTemplatePackageIdentity(t *testing.T) {
 	previous, previousConf := util.DataDir, Conf
 	util.DataDir = t.TempDir()
 	Conf = NewAppConf()
-	Conf.Search = conf.NewSearch()
+	Conf.Search.Store(conf.NewSearch())
 	t.Cleanup(func() { util.DataDir, Conf = previous, previousConf })
 	root, err := openTemplateRoot()
 	if err != nil {
@@ -270,7 +450,11 @@ func TestExportTemplateDocumentAttributeScope(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			fixture := setupFileOperationTest(t)
-			Conf.Editor, Conf.Export = conf.NewEditor(), conf.NewExport()
+			{
+				confSectionValue0, confSectionValue1 := conf.NewEditor(), conf.NewExport()
+				Conf.Editor.Store(confSectionValue0)
+				Conf.Export.Store(confSectionValue1)
+			}
 			tree, err := LoadTreeByBlockID(fixture.sourceID)
 			if err != nil {
 				t.Fatal(err)
@@ -278,7 +462,9 @@ func TestExportTemplateDocumentAttributeScope(t *testing.T) {
 			tree.Root.SetIALAttr("icon", "default")
 			var markdown strings.Builder
 			for _, chunk := range test.chunks {
-				markdown.WriteString("```template\n" + chunk + "\n```\n\n")
+				markdown.WriteString("```template\n")
+				markdown.WriteString(chunk)
+				markdown.WriteString("\n```\n\n")
 			}
 			engine := NewLute()
 			codeTree := parse.Parse("", []byte(markdown.String()), engine.ParseOptions)
@@ -310,7 +496,11 @@ func TestExportTemplateDocumentAttributeScope(t *testing.T) {
 
 func TestTemplateDocumentAttributeFormats(t *testing.T) {
 	setupFileOperationTest(t)
-	Conf.Editor, Conf.Export = conf.NewEditor(), conf.NewExport()
+	{
+		confSectionValue0, confSectionValue1 := conf.NewEditor(), conf.NewExport()
+		Conf.Editor.Store(confSectionValue0)
+		Conf.Export.Store(confSectionValue1)
+	}
 	legacy, err := parseTemplateKTree([]byte(`Body
 
 {: id="20260718000001-abcdefg" icon="legacy" type="doc"}`))

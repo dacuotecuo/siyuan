@@ -1,17 +1,16 @@
 import {isHiddenTabContent} from "../render/tabsVisibility";
+import {prepareInlineElementBoundaryMutation} from "../util/inlineElementBoundary";
 import {captureTabsRemoval} from "./tabsRemoval";
 import {
     focusBlock,
     focusByOffset,
-    focusByRange,
     focusByWbr,
     getBlockRanges,
     getEditorRange,
-    getSelectionOffset,
     getUndoFocusContext,
-    restoreFocusContext,
-    setLastNodeRange
+    restoreFocusContext
 } from "../util/selection";
+import {focusByRange, getSelectionOffset, setLastNodeRange} from "../util/selectionOffsets";
 import {
     fixAdjacentTags,
     getContenteditableElement,
@@ -19,6 +18,7 @@ import {
     getEmbedChildOperationParentID,
     getLastBlock,
     getNextBlock,
+    getNextBlockSibling,
     getParentBlock,
     getPreviousBlock,
     getPreviousBlockSibling,
@@ -57,7 +57,7 @@ import {highlightRender} from "../render/highlightRender";
 import {processRender} from "../util/processCode";
 import {avRender} from "../render/av/render";
 import {blockRender} from "../render/blockRender";
-import * as dayjs from "dayjs";
+import dayjs from "dayjs";
 import {mergeSameInlineElement} from "../toolbar/util";
 import {
     getBlockRefCheckElementChain,
@@ -73,6 +73,7 @@ import {
 } from "./removeRange";
 import {confirmBlockRef} from "../../util/checkBlockRef";
 import {input} from "./input";
+import {getFoldedNavigationOwner} from "./verticalVisibility";
 import {isWindows} from "../util/compatibility";
 import {
     BLOCK_SELECTION_MODE_CLASS,
@@ -393,6 +394,7 @@ const deleteCrossBlockRangeContents = (rangesByBlock: ReturnType<typeof getCross
                 .filter(refElement => refElement.getAttribute("data-type")?.split(" ").includes("block-ref") &&
                     refElement.getAttribute("data-subtype") === "d")
                 .map(refElement => [refElement, refElement.textContent] as const));
+            prepareInlineElementBoundaryMutation(item.range);
             item.range.deleteContents();
             dynamicRefTexts.forEach((text, refElement) => {
                 if (refElement.isConnected && refElement.textContent !== text) {
@@ -1147,6 +1149,9 @@ export const removeBlock = async (protyle: IProtyle, blockElement: Element, rang
                         const foldTransaction = await fetchSyncPost("/api/block/getHeadingDeleteTransaction", {
                             id: foldId,
                         });
+                        if (foldTransaction.code !== 0) {
+                            return;
+                        }
                         unfoldData[foldId] = {
                             element: foldPreviousBlockElement,
                             previousID: foldTransaction.data.doOperations[foldTransaction.data.doOperations.length - 1].id
@@ -1175,6 +1180,9 @@ export const removeBlock = async (protyle: IProtyle, blockElement: Element, rang
                         const foldTransaction = await fetchSyncPost("/api/block/getHeadingDeleteTransaction", {
                             id: foldId,
                         });
+                        if (foldTransaction.code !== 0) {
+                            return;
+                        }
                         unfoldData[foldId] = {
                             element: previousBlockElement,
                             previousID: foldTransaction.data.doOperations[foldTransaction.data.doOperations.length - 1].id
@@ -1207,7 +1215,7 @@ export const removeBlock = async (protyle: IProtyle, blockElement: Element, rang
         }
         tabsRemoval.normalize();
         Object.keys(unfoldData).forEach(item => {
-            const foldOperations = setFold(protyle, unfoldData[item].element, true, false, false, true);
+            const foldOperations = setFold(protyle, unfoldData[item].element, true, false, true);
             deletes.push(...foldOperations.doOperations);
             inserts.splice(0, 0, ...foldOperations.undoOperations);
         });
@@ -1411,6 +1419,31 @@ export const removeBlock = async (protyle: IProtyle, blockElement: Element, rang
     }
 
     let isCallout = blockElement.parentElement.classList.contains("callout-content");
+    const nextCalloutBlock = isCallout && getNextBlockSibling(blockElement);
+    if (type === "Backspace" && blockType === "NodeParagraph" && isCallout &&
+        !getPreviousBlockSibling(blockElement) && nextCalloutBlock &&
+        !hasMeaningfulContent(getContenteditableElement(blockElement))) {
+        // 删除提示块首个空段落时保留容器和后续内容，光标停留在提示块内。
+        const id = blockElement.getAttribute("data-node-id");
+        if (!await confirmRefRemoval(protyle, [id], [blockElement]) ||
+            nextCalloutBlock.parentElement !== blockElement.parentElement) {
+            return;
+        }
+        range.insertNode(document.createElement("wbr"));
+        transaction(protyle, [{
+            action: "delete",
+            id,
+        }], [{
+            action: "insert",
+            id,
+            data: blockElement.outerHTML,
+            parentID: getOperationParentID(blockElement, protyle.block.parentID),
+            context: {setRange: "true"},
+        }]);
+        blockElement.remove();
+        focusBlock(nextCalloutBlock);
+        return;
+    }
     if (type === "Delete") {
         const bqCaElement = hasClosestByClassName(blockElement, "bq") || hasClosestByClassName(blockElement, "callout");
         if (bqCaElement && getContenteditableElement(bqCaElement) === getContenteditableElement(blockElement)) {
@@ -1495,7 +1528,7 @@ export const removeBlock = async (protyle: IProtyle, blockElement: Element, rang
         if (embedContext && !canRemoveLiInEmbed(blockElement, embedContext)) {
             return;
         }
-        removeLi(protyle, blockElement, range, type === "Delete");
+        await removeLi(protyle, blockElement, range, type === "Delete");
         return;
     }
     if (type === "Delete") {
@@ -1504,7 +1537,7 @@ export const removeBlock = async (protyle: IProtyle, blockElement: Element, rang
             if (embedContext && !canRemoveLiInEmbed(liElement.firstElementChild.nextElementSibling, embedContext)) {
                 return;
             }
-            removeLi(protyle, liElement.firstElementChild.nextElementSibling, range, true);
+            await removeLi(protyle, liElement.firstElementChild.nextElementSibling, range, true);
             return;
         }
     }
@@ -1544,11 +1577,11 @@ export const removeBlock = async (protyle: IProtyle, blockElement: Element, rang
         const previousBlockElement = getPreviousBlockSibling(blockElement);
         if (previousBlockElement?.getAttribute("data-type") === "NodeHeading" &&
             previousBlockElement.getAttribute("fold") === "1") {
-            setFold(protyle, previousBlockElement, true, false, false, false, false);
+            setFold(protyle, previousBlockElement, true, false, false, false);
         }
         if (blockType === "NodeHeading" &&
             blockElement.getAttribute("fold") === "1") {
-            setFold(protyle, blockElement, true, false, false, false, false);
+            setFold(protyle, blockElement, true, false, false, false);
         }
         turnsIntoTransaction({
             protyle: protyle,
@@ -1588,6 +1621,12 @@ export const removeBlock = async (protyle: IProtyle, blockElement: Element, rang
     const parentElement = hasClosestBlock(getParentBlock(blockElement));
     const editableElement = getContenteditableElement(blockElement);
     let previousLastElement = getLastBlock(previousElement) as HTMLElement;
+    const foldedListItem = getFoldedNavigationOwner(previousLastElement);
+    if (foldedListItem?.getAttribute("data-type") === "NodeListItem") {
+        // 删除合并定位到折叠列表项的可见文本，避免在隐藏子列表中插入光标。
+        previousLastElement = (hasClosestBlock(getContenteditableElement(foldedListItem)) ||
+            foldedListItem.querySelector("[data-node-id]")) as HTMLElement;
+    }
     if (range.toString() === "" && isMobile() && previousLastElement &&
         previousLastElement.classList.contains("hr") && editableElement && getSelectionOffset(editableElement).start === 0) {
         if (!await confirmRefRemoval(protyle,
@@ -1775,7 +1814,7 @@ export const removeBlock = async (protyle: IProtyle, blockElement: Element, rang
         // https://github.com/siyuan-note/siyuan/issues/12327
         if (removeParentElement.classList.contains("li") && removeParentElement.childElementCount === 4 &&
             removeParentElement.getAttribute("fold") === "1") {
-            const foldOperations = setFold(protyle, removeParentElement, true, false, false, true);
+            const foldOperations = setFold(protyle, removeParentElement, true, false, true);
             doOperations.push(...foldOperations.doOperations);
             undoOperations.splice(0, 0, ...foldOperations.undoOperations);
         }
@@ -1947,6 +1986,31 @@ const confirmRefRemoval = async (protyle: IProtyle, ids: string[], elements: Ele
 };
 
 const removeLi = async (protyle: IProtyle, blockElement: Element, range: Range, isDelete = false) => {
+    if (!isDelete && blockElement.getAttribute("data-type") === "NodeParagraph") {
+        const listItemElement = blockElement.parentElement;
+        const listElement = listItemElement.parentElement;
+        const nextListItem = getNextBlockSibling(listItemElement);
+        if (!getPreviousBlockSibling(listItemElement) && nextListItem &&
+            listElement.parentElement.classList.contains("sb") &&
+            listElement.parentElement.getAttribute("data-sb-layout") === "col" &&
+            !getNextBlockSibling(blockElement) && !hasMeaningfulContent(getContenteditableElement(blockElement))) {
+            // 横向超级块中的首个空列表项直接删除，保留列表及所在列的宽度。
+            const itemID = listItemElement.getAttribute("data-node-id");
+            if (!await confirmRefRemoval(protyle, [itemID, blockElement.getAttribute("data-node-id")],
+                [listItemElement], [itemID]) || listItemElement.parentElement !== listElement ||
+                nextListItem.parentElement !== listElement || blockElement.parentElement !== listItemElement) {
+                return;
+            }
+            range.insertNode(document.createElement("wbr"));
+            const html = listElement.outerHTML;
+            const start = getOrderedListStart(listElement);
+            listItemElement.remove();
+            updateListOrder(listElement, start);
+            updateTransaction(protyle, listElement, html);
+            focusBlock(nextListItem);
+            return;
+        }
+    }
     if (!blockElement.parentElement.previousElementSibling && blockElement.parentElement.nextElementSibling && blockElement.parentElement.nextElementSibling.classList.contains("protyle-attr")) {
         await listOutdent(protyle, [blockElement.parentElement], range, isDelete, blockElement);
         return;
@@ -2169,7 +2233,7 @@ const removeLi = async (protyle: IProtyle, blockElement: Element, range: Range, 
     }
 
     if (foldElement) {
-        const foldOperations = setFold(protyle, foldElement, true, false, false, true);
+        const foldOperations = setFold(protyle, foldElement, true, false, true);
         doOperations.push(...foldOperations.doOperations);
         undoOperations.push(...foldOperations.undoOperations);
         if (foldElement.parentElement.getAttribute("data-subtype") === "o") {

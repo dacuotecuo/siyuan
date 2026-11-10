@@ -1,53 +1,45 @@
 export type AgentApprovalDecision = "risk" | "allow" | "confirm";
 export type AgentActionApprovalDecision = "" | AgentApprovalDecision;
+export type CapabilityDecision = "allow" | "deny";
 
-export interface IAgentApprovalPolicy {
-    default: "risk" | "allow";
-    overrides: Record<string, {
-        default: AgentActionApprovalDecision;
-        actions: Record<string, AgentApprovalDecision>;
-    }>;
+export interface IAgentApprovalOverride {
+    default: string;
+    actions: Record<string, string>;
 }
 
-export const resolveCapabilityApproval = (policy: IAgentApprovalPolicy, id: string, action = ""): AgentApprovalDecision => {
+export interface IAgentApprovalPolicy {
+    default: string;
+    overrides: Record<string, IAgentApprovalOverride>;
+}
+
+// 补丁只携带本次改动的键，其余覆盖项由设置补丁的合并保留。
+export interface IAgentApprovalOverridePatch {
+    default?: string;
+    actions?: Record<string, string>;
+}
+
+export const resolveCapabilityApproval = (policy: IAgentApprovalPolicy, id: string, action = ""): string => {
     const override = policy.overrides[id];
     return override?.actions[action] || override?.default || policy.default;
 };
 
 export const getCapabilityActionApproval = (policy: IAgentApprovalPolicy, id: string, action: string):
-    AgentActionApprovalDecision => policy.overrides[id]?.actions[action] || "";
+    string => policy.overrides[id]?.actions[action] || "";
 
-export const updateCapabilityApproval = (policy: IAgentApprovalPolicy, id: string,
-                                         decision: AgentApprovalDecision): IAgentApprovalPolicy => {
-    const overrides = {...policy.overrides};
-    const current = overrides[id];
-    const actions = {...current?.actions};
-    if (decision === policy.default) {
-        if (Object.keys(actions).length === 0) {
-            delete overrides[id];
-        } else {
-            overrides[id] = {default: "", actions};
-        }
-    } else {
-        overrides[id] = {default: decision, actions};
-    }
-    return {...policy, overrides};
+// 能力开关只提交本次改动的条目；恢复默认时写入空决策，由内核规范化清除。
+export const capabilityOverridesPatch = (policyDefault: string, ids: string[], decision: CapabilityDecision):
+    Record<string, string> => {
+    const overrides: Record<string, string> = {};
+    ids.forEach((id) => {
+        overrides[id] = decision === policyDefault ? "" : decision;
+    });
+    return overrides;
 };
 
-export const updateCapabilityActionApproval = (policy: IAgentApprovalPolicy, id: string, action: string,
-                                               decision: AgentActionApprovalDecision): IAgentApprovalPolicy => {
-    const overrides = {...policy.overrides};
-    const current = overrides[id];
-    const actions = {...current?.actions};
-    if (decision === "") {
-        delete actions[action];
-    } else {
-        actions[action] = decision;
-    }
-    if (!current?.default && Object.keys(actions).length === 0) {
-        delete overrides[id];
-    } else {
-        overrides[id] = {default: current?.default || "", actions};
-    }
-    return {...policy, overrides};
-};
+// 能力审批方式只提交该能力的默认决策，已有的操作决策由合并保留。
+export const approvalOverridePatch = (policyDefault: string, decision: AgentApprovalDecision):
+    IAgentApprovalOverridePatch => ({default: decision === policyDefault ? "" : decision});
+
+// 单个操作的审批方式只提交该操作，空决策表示跟随能力设置。
+export const actionApprovalPatch = (action: string, decision: AgentActionApprovalDecision):
+    IAgentApprovalOverridePatch => ({actions: {[action]: decision}});

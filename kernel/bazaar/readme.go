@@ -1,18 +1,6 @@
-// SiYuan - From thought to insight, with agents
+// SiYuan - https://github.com/siyuan-note/siyuan
 // Copyright (c) 2020-present, b3log.org
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU Affero General Public License for more details.
-//
-// You should have received a copy of the GNU Affero General Public License
-// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+// SPDX-License-Identifier: AGPL-3.0-or-later
 
 package bazaar
 
@@ -186,6 +174,7 @@ func renderPackageREADME(linkBase string, mdData []byte) (ret string) {
 func renderPackageREADMEWithImageResolver(linkBase string, mdData []byte, resolveImage func(string) string) (ret string) {
 	mdData = bytes.Clone(bytes.TrimPrefix(mdData, []byte("\xef\xbb\xbf"))) // 移除文件开头的 BOM 并隔离解析缓冲区
 	luteEngine := lute.New()
+	luteEngine.SetCallout(true)
 	luteEngine.SetSanitize(true)
 	luteEngine.SetSoftBreak2HardBreak(false)
 	luteEngine.SetCodeSyntaxHighlight(false)

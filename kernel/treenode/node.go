@@ -1,18 +1,6 @@
-// SiYuan - From thought to insight, with agents
+// SiYuan - https://github.com/siyuan-note/siyuan
 // Copyright (c) 2020-present, b3log.org
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU Affero General Public License for more details.
-//
-// You should have received a copy of the GNU Affero General Public License
-// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+// SPDX-License-Identifier: AGPL-3.0-or-later
 
 package treenode
 
@@ -240,7 +228,7 @@ func FirstLeafBlock(node *ast.Node) (ret *ast.Node) {
 
 func CountBlockNodes(node *ast.Node) (ret int) {
 	ast.Walk(node, func(n *ast.Node, entering bool) ast.WalkStatus {
-		if !entering || !n.IsBlock() || ast.NodeList == n.Type || ast.NodeBlockquote == n.Type || ast.NodeSuperBlock == n.Type || ast.NodeCallout == n.Type {
+		if !entering || !n.IsBlock() || ast.NodeList == n.Type || ast.NodeMindmap == n.Type || ast.NodeBlockquote == n.Type || ast.NodeSuperBlock == n.Type || ast.NodeCallout == n.Type {
 			return ast.WalkContinue
 		}
 
@@ -411,6 +399,8 @@ var typeAbbrMap = map[string]string{
 	"NodeCallout":          "callout",
 	"NodeTabs":             "tabs",
 	"NodeTabItem":          "tab",
+	"NodeMindmap":          "mindmap",
+	"NodeMindmapItem":      "mindmap_item",
 	// 行级元素
 	"NodeText":     "text",
 	"NodeImage":    "img",
@@ -437,7 +427,7 @@ func FromAbbrType(abbrType string) string {
 
 func SubTypeAbbr(n *ast.Node) string {
 	switch n.Type {
-	case ast.NodeList, ast.NodeListItem:
+	case ast.NodeList, ast.NodeListItem, ast.NodeMindmap, ast.NodeMindmapItem:
 		if 0 == n.ListData.Typ {
 			return "u"
 		}

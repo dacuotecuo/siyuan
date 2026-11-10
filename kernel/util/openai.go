@@ -1,18 +1,6 @@
-// SiYuan - From thought to insight, with agents
+// SiYuan - https://github.com/siyuan-note/siyuan
 // Copyright (c) 2020-present, b3log.org
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU Affero General Public License for more details.
-//
-// You should have received a copy of the GNU Affero General Public License
-// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+// SPDX-License-Identifier: AGPL-3.0-or-later
 
 package util
 
@@ -81,7 +69,7 @@ type OpenAIImageAdapter struct {
 	timeout time.Duration
 }
 
-func ChatGPT(msg string, contextMsgs []string, c *openai.Client, apiBaseURL, protocol, model string, maxTokens int,
+func ChatGPT(msg string, contextMsgs []string, c *AIClient, apiBaseURL, protocol, model string, maxTokens int,
 	temperature float64, timeout int) (ret string, stop bool, err error) {
 	var reqMsgs []openai.ChatCompletionMessage
 
@@ -144,10 +132,10 @@ func ChatGPT(msg string, contextMsgs []string, c *openai.Client, apiBaseURL, pro
 	return
 }
 
-func NewOpenAIClient(apiKey, apiBaseURL string) *openai.Client {
+func NewOpenAIClient(apiKey, apiBaseURL string, headers ...map[string]string) *openai.Client {
 	config := openai.DefaultConfig(apiKey)
 	config.BaseURL = apiBaseURL
-	config.HTTPClient = httpclient.NewUserAgentClient(nil)
+	config.HTTPClient = newAIProviderHTTPClient(apiBaseURL, headers...)
 	return openai.NewClientWithConfig(config)
 }
 
@@ -216,48 +204,67 @@ func (t *extraBodyTransport) Do(req *http.Request) (*http.Response, error) {
 	return t.base.Do(req)
 }
 
-// NewOpenAIClientWithModel 创建 OpenAI client，并按模型与端点启用兼容适配。
-// 绝大多数模型走 NewOpenAIClient 路径；命中清单的模型会注入额外参数，官方 Gemini 端点会保留工具调用签名。
-func NewOpenAIClientWithModel(apiKey, apiBaseURL, model string) *openai.Client {
+// NewAIClientWithModel 创建生成客户端，并按模型与端点启用协议适配。
+// 模型请求统一启用思考字段适配，命中清单的模型会注入额外参数，官方 Gemini 端点会保留工具调用签名。
+func NewAIClientWithModel(apiKey, apiBaseURL, model string, headers ...map[string]string) *AIClient {
 	extra := ExtraBodyForModel(model)
 	geminiThoughtSignatures := isGoogleGeminiOpenAICompatibleEndpoint(apiBaseURL, model)
-	if len(extra) == 0 && !geminiThoughtSignatures {
-		return NewOpenAIClient(apiKey, apiBaseURL)
-	}
 	config := openai.DefaultConfig(apiKey)
 	config.BaseURL = apiBaseURL
-	var transport openai.HTTPDoer = httpclient.NewUserAgentClient(nil)
+	var transport openai.HTTPDoer = newAIProviderHTTPClient(apiBaseURL, headers...)
 	if len(extra) > 0 {
 		transport = &extraBodyTransport{base: transport, extraBody: extra}
 	}
 	if geminiThoughtSignatures {
 		transport = WrapGeminiThoughtSignatureTransport(transport)
 	}
+	transport = &aiErrorResponseTransport{base: transport}
+	transport = &reasoningResponseTransport{base: transport}
 	config.HTTPClient = transport
-	return openai.NewClientWithConfig(config)
+	return &AIClient{Client: openai.NewClientWithConfig(config), baseURL: apiBaseURL,
+		anthropicHTTP: newAnthropicHTTPClient(apiKey, apiBaseURL, headers...),
+		geminiHTTP:    newGeminiInteractionsHTTPClient(apiKey, apiBaseURL, headers...)}
 }
 
-// TestModel 测试模型可用性。优先调用 ListModels（GET /v1/models）拉取可用模型清单，
-// 列表不包含指定模型或该端点不可用时，按 Provider 协议回退到极简文本生成请求。
+// TestModel 测试模型可用性。先按协议拉取可用模型清单，
+// 再按 Provider 协议发送极简文本生成请求，确认所选协议实际可用。
 // 返回值：available 为可用模型清单（仅 ListModels 成功时填充），matched 表示 model 是否可用，
 // err 为请求错误（鉴权失败、网络异常、模型不存在等，原样返回便于调用方展示原因）。
-func TestModel(apiKey, apiBaseURL, protocol, model string, timeout int) (available []string, matched bool, err error) {
+func TestModel(apiKey, apiBaseURL, protocol, model string, timeout int, headers ...map[string]string) (available []string, matched bool, err error) {
 	if 1 > timeout {
 		timeout = 30
 	}
-	client := NewOpenAIClient(apiKey, apiBaseURL)
+	client := NewAIClientWithModel(apiKey, apiBaseURL, model, headers...)
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeout)*time.Second)
 	defer cancel()
 	ctx = ContextWithOpenAIResponsesBaseURL(ctx, apiBaseURL)
 
 	// 优先校验模型是否在可用清单中
-	list, listErr := client.ListModels(ctx)
+	var availableIDs []string
+	var listErr error
+	if IsAnthropicMessagesProtocol(protocol) || IsGeminiInteractionsProtocol(protocol) {
+		var models []AvailableModel
+		if IsGeminiInteractionsProtocol(protocol) {
+			models, listErr = listGeminiInteractionModels(ctx, client)
+		} else {
+			models, listErr = listAnthropicModels(ctx, client)
+		}
+		for _, m := range models {
+			availableIDs = append(availableIDs, m.ID)
+		}
+	} else {
+		list, err := client.ListModels(ctx)
+		listErr = err
+		for _, m := range list.Models {
+			availableIDs = append(availableIDs, m.ID)
+		}
+	}
 	if nil == listErr {
 		model = strings.TrimSpace(model)
 		target := strings.ToLower(model)
-		for _, m := range list.Models {
-			available = append(available, m.ID)
-			if strings.ToLower(m.ID) == target {
+		for _, id := range availableIDs {
+			available = append(available, id)
+			if strings.ToLower(id) == target {
 				matched = true
 			}
 		}
@@ -277,6 +284,15 @@ func TestModel(apiKey, apiBaseURL, protocol, model string, timeout int) (availab
 		Temperature:         1,
 	}
 	if IsOpenAIResponsesProtocol(protocol) {
+		// Responses 的输出预算至少为 16，包含可能使用的推理 token。
+		request.MaxCompletionTokens = 16
+	}
+	if IsGeminiInteractionsProtocol(protocol) {
+		// Gemini 的思考也消耗输出预算，为极简连通性测试保留有限预算。
+		request.MaxCompletionTokens = 256
+		request.ReasoningEffort = "low"
+	}
+	if IsOpenAIResponsesProtocol(protocol) || IsAnthropicMessagesProtocol(protocol) || IsGeminiInteractionsProtocol(protocol) {
 		request.Stream = true
 		var stream *OpenAICompletionStream
 		stream, err = CreateOpenAICompletionStream(ctx, client, protocol, request, nil)
@@ -295,6 +311,10 @@ func TestModel(apiKey, apiBaseURL, protocol, model string, timeout int) (availab
 		}
 	} else {
 		_, err = CreateOpenAICompletion(ctx, client, protocol, request, nil)
+	}
+	if IsGeminiInteractionsProtocol(protocol) && errors.Is(err, errGeminiInteractionIncomplete) {
+		// 受限预算可能被思考耗尽，已校验的终止响应仍能证明协议连通；正常生成继续将不完整响应视为错误。
+		err = nil
 	}
 	if nil != err {
 		matched = false
@@ -365,7 +385,7 @@ func ListAvailableModels(apiKey, apiBaseURL string, timeout int) (models []strin
 
 // ListAvailableModelsWithContext 拉取 Provider 的模型清单及可选上下文窗口。
 // 通用 OpenAI 兼容接口不保证返回上下文长度，缺失或非法时保留模型并将 ContextLength 置为 0。
-func ListAvailableModelsWithContext(apiKey, apiBaseURL string, timeout int) (models []AvailableModel, err error) {
+func ListAvailableModelsWithContext(apiKey, apiBaseURL string, timeout int, headers ...map[string]string) (models []AvailableModel, err error) {
 	if 1 > timeout {
 		timeout = 30
 	}
@@ -380,7 +400,7 @@ func ListAvailableModelsWithContext(apiKey, apiBaseURL string, timeout int) (mod
 	if apiKey != "" {
 		req.Header.Set("Authorization", "Bearer "+apiKey)
 	}
-	resp, err := httpclient.NewUserAgentClient(nil).Do(req)
+	resp, err := newAIProviderHTTPClient(apiBaseURL, headers...).Do(req)
 	if err != nil {
 		logging.LogErrorf("list models [%s] failed: %s", apiBaseURL, err)
 		return
@@ -433,26 +453,6 @@ func firstValidModelContextLength(values ...json.RawMessage) int {
 	return 0
 }
 
-func IsNetworkError(err error) bool {
-	msg := strings.ToLower(err.Error())
-	return strings.Contains(msg, "actively refused") ||
-		strings.Contains(msg, "connection refused") ||
-		strings.Contains(msg, "no such host") ||
-		strings.Contains(msg, "connection failed") ||
-		strings.Contains(msg, "hostname resolution") ||
-		strings.Contains(msg, "no address associated with hostname") ||
-		strings.Contains(msg, "request canceled while waiting for connection") ||
-		strings.Contains(msg, "exceeded while awaiting") ||
-		strings.Contains(msg, "context deadline exceeded") ||
-		strings.Contains(msg, "timeout") ||
-		strings.Contains(msg, "connection") ||
-		strings.Contains(msg, "refused") ||
-		strings.Contains(msg, "socket") ||
-		strings.Contains(msg, "eof") ||
-		strings.Contains(msg, "closed") ||
-		strings.Contains(msg, "network")
-}
-
 // embeddingHTTPClient 单例 HTTP 客户端，复用连接池并限制每主机最大连接数，
 // 避免 embedding 索引器在 API 不可用时新建大量连接形成连接风暴。
 // 单次请求超时由调用方用 context.WithTimeout 控制，client 本身不设全局 Timeout。
@@ -482,6 +482,9 @@ func BatchGetEmbeddings(texts []string, apiKey, baseURL, model string, dimension
 	if 1 > len(texts) {
 		return
 	}
+	if timeout < 1 {
+		timeout = 30
+	}
 
 	config := openai.DefaultConfig(apiKey)
 	config.BaseURL = baseURL
@@ -491,11 +494,23 @@ func BatchGetEmbeddings(texts []string, apiKey, baseURL, model string, dimension
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeout)*time.Second)
 	defer cancel()
 
-	resp, err := client.CreateEmbeddings(ctx, openai.EmbeddingRequestStrings{
+	request := openai.EmbeddingRequestStrings{
 		Input:      texts,
 		Model:      openai.EmbeddingModel(model),
 		Dimensions: dimensions, // 0 时因 omitempty 不发送，等同于用模型默认维度
-	})
+	}
+	resp, err := client.CreateEmbeddings(ctx, request)
+	if ctx.Err() == nil && retryableEmbeddingError(err) {
+		// 嵌入计算遇到瞬时连接中断时最多补试一次，等待及补试共享原请求的超时预算。
+		timer := time.NewTimer(200 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			err = ctx.Err()
+		case <-timer.C:
+			resp, err = client.CreateEmbeddings(ctx, request)
+		}
+	}
 	if err != nil {
 		logging.LogErrorf("create embeddings failed: %s", err)
 		return
@@ -505,6 +520,17 @@ func BatchGetEmbeddings(texts []string, apiKey, baseURL, model string, dimension
 		ret = append(ret, data.Embedding)
 	}
 	return
+}
+
+// retryableEmbeddingError 仅重试传输层连接中断，不重试接口状态错误、响应解析错误或超时。
+func retryableEmbeddingError(err error) bool {
+	var requestErr *url.Error
+	if !errors.As(err, &requestErr) || requestErr.Timeout() {
+		return false
+	}
+	return errors.Is(requestErr.Err, io.EOF) || errors.Is(requestErr.Err, io.ErrUnexpectedEOF) ||
+		errors.Is(requestErr.Err, syscall.ECONNRESET) || errors.Is(requestErr.Err, syscall.EPIPE) ||
+		requestErr.Err.Error() == "http: server closed idle connection"
 }
 
 // rerankDocTextMaxRunes 限制单篇文档送入重排服务的最大 Unicode 字符数，兼顾常见模型的输入上限。
@@ -835,12 +861,19 @@ func ValidateGeneratedImage(data []byte) (mimeType, extension string, err error)
 	return mimeType, extension, nil
 }
 
-func NewOpenAIImageAdapter(apiKey, apiBaseURL, model string, timeout int) *OpenAIImageAdapter {
+func NewOpenAIImageAdapter(apiKey, apiBaseURL, model string, timeout int, headers ...map[string]string) *OpenAIImageAdapter {
 	if timeout < 1 {
 		timeout = 30
 	}
+	client := NewAIClientWithModel(apiKey, apiBaseURL, model, headers...).Client
+	if isMiniMaxImageEndpoint(apiBaseURL) {
+		config := openai.DefaultConfig(apiKey)
+		config.BaseURL = apiBaseURL
+		config.HTTPClient = &miniMaxImageTransport{base: newAIProviderHTTPClient(apiBaseURL, headers...)}
+		client = openai.NewClientWithConfig(config)
+	}
 	return &OpenAIImageAdapter{
-		client:  NewOpenAIClientWithModel(apiKey, apiBaseURL, model),
+		client:  client,
 		model:   model,
 		timeout: time.Duration(timeout) * time.Second,
 	}

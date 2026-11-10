@@ -1,18 +1,6 @@
-// SiYuan - From thought to insight, with agents
+// SiYuan - https://github.com/siyuan-note/siyuan
 // Copyright (c) 2020-present, b3log.org
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU Affero General Public License for more details.
-//
-// You should have received a copy of the GNU Affero General Public License
-// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+// SPDX-License-Identifier: AGPL-3.0-or-later
 
 //go:build !darwin
 
@@ -29,40 +17,50 @@ import (
 
 func TestWatchThemesCurrentThemeOnly(t *testing.T) {
 	originalConf, originalThemesPath := Conf, util.ThemesPath
+	originalAppearancePath, originalMode := util.AppearancePath, util.Mode
+	CloseWatchThemes()
 	t.Cleanup(func() {
 		CloseWatchThemes()
 		Conf = originalConf
 		util.ThemesPath = originalThemesPath
+		util.AppearancePath, util.Mode = originalAppearancePath, originalMode
 	})
 
 	themesDir := t.TempDir()
+	util.ThemesPath = themesDir
+	util.AppearancePath, util.Mode = t.TempDir(), "prod"
 	for _, name := range []string{"daylight", "midnight", "unused"} {
-		if err := os.Mkdir(filepath.Join(themesDir, name), 0755); err != nil {
+		if err := os.MkdirAll(util.AppearancePackagePath("themes", name), 0755); err != nil {
 			t.Fatal(err)
 		}
 	}
 	Conf = NewAppConf()
-	Conf.Appearance = conf.NewAppearance()
-	util.ThemesPath = themesDir
+	Conf.Appearance.Store(conf.NewAppearance())
 
 	WatchThemes()
-	assertThemesWatchList(t, themesDir, filepath.Join(themesDir, "daylight"))
+	assertThemesWatchList(t, themesDir, util.AppearancePackagePath("themes", "daylight"))
 
 	Conf.m.Lock()
-	Conf.Appearance.Mode = 1
+	Conf.Appearance.Load().Mode = 1
 	Conf.m.Unlock()
 	WatchThemes()
-	assertThemesWatchList(t, themesDir, filepath.Join(themesDir, "midnight"))
+	assertThemesWatchList(t, themesDir, util.AppearancePackagePath("themes", "midnight"))
 
 	Conf.m.Lock()
-	Conf.Appearance.Mode = -1
+	Conf.Appearance.Load().ThemeDark = "unused"
+	Conf.m.Unlock()
+	WatchThemes()
+	assertThemesWatchList(t, themesDir, filepath.Join(themesDir, "unused"))
+
+	Conf.m.Lock()
+	Conf.Appearance.Load().Mode = -1
 	Conf.m.Unlock()
 	WatchThemes()
 	assertThemesWatchList(t, themesDir)
 
 	Conf.m.Lock()
-	Conf.Appearance.Mode = 0
-	Conf.Appearance.ThemeLight = ".."
+	Conf.Appearance.Load().Mode = 0
+	Conf.Appearance.Load().ThemeLight = ".."
 	Conf.m.Unlock()
 	WatchThemes()
 	assertThemesWatchList(t, themesDir)

@@ -1,12 +1,14 @@
 import {setEditMode} from "../util/setEditMode";
 import {isTabGutterBridge} from "../gutter/tabs";
+import {isContainerGutterBridge} from "../gutter/container";
+import {cancelGutterHover, renderGutterOnHover} from "../gutter/hover";
 import {scrollEvent} from "../scroll/event";
 import {isMobile} from "../../util/functions";
 import {Constants} from "../../constants";
 import {getContenteditableElement, getEmbedGutterOperationContext, getLastBlock} from "../wysiwyg/getBlock";
 import {genEmptyElement, genHeadingElement} from "../../block/util";
 import {transaction} from "../wysiwyg/transaction";
-import {focusByRange} from "../util/selection";
+import {focusByRange} from "../util/selectionOffsets";
 /// #if !MOBILE
 import {moveResize} from "../../dialog/moveResize";
 /// #endif
@@ -19,7 +21,7 @@ import {
 } from "../util/hasClosest";
 import {hideElements} from "./hideElements";
 import {AVAttributePanel} from "../render/av/attributePanel";
-import {getEditorHorizontalPadding} from "./padding";
+import {BACKLINK_EDITOR_PADDING, getEditorHorizontalPadding} from "./padding";
 import {callMobileAppShowKeyboard} from "../../mobile/util/mobileAppUtil";
 import {sanitizeKernelHTML} from "../../util/hostCapabilities";
 
@@ -33,7 +35,11 @@ const focusMobileAppEditor = (element: HTMLElement) => {
 export const initUI = (protyle: IProtyle) => {
     protyle.contentElement = document.createElement("div");
     protyle.contentElement.className = "protyle-content";
-    if (!isMobile() && !protyle.lite && CSS.supports("container-type", "inline-size") &&
+    if (window.siyuan.config.editor.fullWidth) {
+        protyle.contentElement.dataset.fullwidth = "true";
+        protyle.preview.element.dataset.fullwidth = "true";
+    }
+    if (!isMobile() && CSS.supports("container-type", "inline-size") &&
         CSS.supports("width", "1cqi") && !protyle.options.action.includes(Constants.CB_GET_HISTORY) &&
         !protyle.options.backlinkData) {
         protyle.contentElement.dataset.paddingMode = "responsive";
@@ -155,6 +161,12 @@ export const initUI = (protyle: IProtyle) => {
             }
         }
         const lastElement = protyle.wysiwyg.element.lastElementChild;
+        const backlinkElement = protyle.wysiwyg.element.nextElementSibling;
+        if (backlinkElement?.classList.contains("sy__backlink--bottom") &&
+            backlinkElement.getClientRects().length > 0 &&
+            event.clientY >= backlinkElement.getBoundingClientRect().top) {
+            return;
+        }
         const lastRect = lastElement.getBoundingClientRect();
         const range = document.createRange();
         if (event.y > lastRect.bottom) {
@@ -202,6 +214,7 @@ export const initUI = (protyle: IProtyle) => {
         }
     });
     let overAttr = false;
+    protyle.element.addEventListener("mouseleave", () => cancelGutterHover(protyle.gutter?.element));
     protyle.element.addEventListener(isMobile() ? "pointerover" : "mouseover", (event: PointerEvent & {
         target: HTMLElement
     }) => {
@@ -212,6 +225,7 @@ export const initUI = (protyle: IProtyle) => {
         if (isMobile() && event.pointerType !== "mouse") {
             return;
         }
+        cancelGutterHover(protyle.gutter?.element);
         if (hasClosestByClassName(event.target, "protyle-db-attr")) {
             return;
         }
@@ -239,7 +253,8 @@ export const initUI = (protyle: IProtyle) => {
         }
         const tabsHeader = hasClosestByClassName(event.target, "tabs-header");
         const nodeElement = tabsHeader ? hasClosestBlock(tabsHeader.parentElement) : hasClosestBlock(event.target);
-        if (!tabsHeader && nodeElement && nodeElement.getAttribute("data-type") === "NodeTabItem") {
+        if (!tabsHeader && nodeElement && nodeElement.getAttribute("data-type") === "NodeTabItem" &&
+            nodeElement.parentElement.classList.contains("tabs")) {
             hideElements(["gutter"], protyle);
             return;
         }
@@ -248,17 +263,21 @@ export const initUI = (protyle: IProtyle) => {
                 hideElements(["gutter"], protyle);
                 return;
             }
+            if (isContainerGutterBridge(protyle.gutter.element, nodeElement, event.target,
+                event.clientX, event.clientY, button => protyle.gutter.getNodeElement(protyle, button))) {
+                return;
+            }
             if (nodeElement && (nodeElement.classList.contains("list") || nodeElement.classList.contains("li"))) {
                 // 光标在列表下部应显示右侧的元素，而不是列表本身。放在 windowEvent 中的 mousemove 下处理
                 return;
             }
             const embedElement = isInEmbedBlock(nodeElement);
             if (embedElement) {
-                protyle.gutter.render(protyle,
+                renderGutterOnHover(protyle,
                     getEmbedGutterOperationContext(nodeElement) ? nodeElement : embedElement, event.target);
                 return;
             }
-            protyle.gutter.render(protyle, nodeElement, event.target);
+            renderGutterOnHover(protyle, nodeElement, event.target);
             return;
         }
 
@@ -337,7 +356,7 @@ export const addLoading = (protyle: IProtyle, msg?: string) => {
     setTimeout(() => {
         if (protyle.element.getAttribute("data-loading") !== "finished") {
             protyle.element.insertAdjacentHTML("beforeend", `<div style="background-color: var(--b3-theme-background);flex-direction: column;" class="fn__loading wysiwygLoading">
-    <img width="48px" src="/stage/loading-pure.svg">
+    <span class="b3-loading b3-loading--large" aria-hidden="true"></span>
     <div style="color: var(--b3-theme-on-surface);margin-top: 8px;">${sanitizeKernelHTML(msg || "")}</div>
 </div>`);
         }
@@ -363,6 +382,10 @@ export const setPadding = (protyle: IProtyle) => {
     const responsivePadding = protyle.contentElement.dataset.paddingMode === "responsive";
     let paddingLeft = protyle.options.backlinkData ? 24 : padding.left;
     let paddingRight = protyle.options.backlinkData ? 16 : padding.right;
+    if (protyle.element.classList.contains("protyle--page-scroll")) {
+        paddingRight = Math.max(paddingRight, parseFloat(getComputedStyle(protyle.element)
+            .getPropertyValue("--b3-protyle-page-scroll-gutter")) || 0);
+    }
     const backlinkBottomElement = protyle.contentElement.querySelector(".sy__backlink--bottom") as HTMLElement;
     const backlinkBottomVisible = backlinkBottomElement &&
         !backlinkBottomElement.classList.contains("fn__none") &&
@@ -378,7 +401,7 @@ export const setPadding = (protyle: IProtyle) => {
         paddingLeft = parseFloat(wysiwygStyle.paddingLeft);
         paddingRight = parseFloat(wysiwygStyle.paddingRight);
     } else if (protyle.options.backlinkData) {
-        protyle.wysiwyg.element.style.padding = `4px ${paddingRight}px 4px ${paddingLeft}px`;
+        protyle.wysiwyg.element.style.padding = BACKLINK_EDITOR_PADDING;
     } else {
         const paddingBottom = backlinkBottomVisible && protyle.options.typewriterMode ? backlinkBottomGap : padding.bottom;
         protyle.wysiwyg.element.style.padding = `${padding.top}px ${paddingRight}px ${paddingBottom}px ${paddingLeft}px`;

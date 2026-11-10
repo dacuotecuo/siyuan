@@ -8,6 +8,12 @@ interface IToolbarEntry {
     separator?: boolean;
 }
 
+export interface IToolbarCatalogEntry {
+    key: string;
+    label: string;
+    separator: boolean;
+}
+
 type TConfigurableToolbarItem = IMenuItem & {
     [toolbarEntryMetadata]?: {
         id: string;
@@ -18,6 +24,10 @@ type TConfigurableToolbarItem = IMenuItem & {
 export const TOOLBAR_ENTRY_ROOT_PATH = "editor.toolbar";
 
 export const DESKTOP_TOOLBAR_ENTRIES: IToolbarEntry[] = [{
+    key: "block-type",
+    name: "block-type",
+    lang: "turnInto",
+}, {
     key: "block-ref",
     name: "block-ref",
     lang: "ref",
@@ -33,6 +43,14 @@ export const DESKTOP_TOOLBAR_ENTRIES: IToolbarEntry[] = [{
     key: "separator_1",
     name: "|",
     separator: true,
+}, {
+    key: "font-family",
+    name: "font-family",
+    lang: "fontFamily",
+}, {
+    key: "font-size",
+    name: "font-size",
+    lang: "fontSize",
 }, {
     key: "text",
     name: "text",
@@ -104,6 +122,9 @@ const desktopToolbarEntryKeys = new Map(DESKTOP_TOOLBAR_ENTRIES
     .filter((item) => !item.separator)
     .map((item) => [item.name, item.key]));
 
+export const MOBILE_TOOLBAR_NAMES = DESKTOP_TOOLBAR_ENTRIES
+    .filter(item => !item.separator && item.name !== "format-painter").map(item => item.name);
+
 export const isBuiltinToolbarItemName = (name: string) => name === "|" || desktopToolbarEntryKeys.has(name);
 
 const setToolbarEntryMetadata = (item: IMenuItem, id: string, label?: string) => {
@@ -117,25 +138,7 @@ const toolbarSeparator = (entryId: string): IMenuItem => {
 };
 
 export const getDefaultToolbar = (mobile: boolean): Array<string | IMenuItem> => {
-    if (mobile) {
-        return [
-            "block-ref",
-            "a",
-            "ai",
-            "|",
-            "text",
-            "strong",
-            "em",
-            "u",
-            "clear",
-            "|",
-            "code",
-            "tag",
-            "inline-math",
-            "inline-memo",
-        ];
-    }
-    return DESKTOP_TOOLBAR_ENTRIES.map((item) => {
+    return DESKTOP_TOOLBAR_ENTRIES.filter(item => !mobile || item.name !== "format-painter").map((item) => {
         if (item.separator) {
             return toolbarSeparator(item.key);
         }

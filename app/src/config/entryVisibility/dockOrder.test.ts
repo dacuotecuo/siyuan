@@ -9,6 +9,7 @@ import {
     DOCK_ORDER_SCOPES,
     getCurrentDockEntryOrderSnapshot,
     getDockEntryOrderSnapshot,
+    getDefaultDockEntryOrderSnapshot,
     getDockOrderContainer,
     isDockOrderScope,
     mergeCurrentDockEntryOrders,
@@ -53,6 +54,23 @@ class FakeDockItem {
     }
 }
 
+test("entry settings can read dock defaults without a desktop layout", () => {
+    const descriptor = Object.getOwnPropertyDescriptor(globalThis, "window");
+    Object.defineProperty(globalThis, "window", {configurable: true, value: {siyuan: {}}});
+    try {
+        assert.equal(getDockOrderContainer(DOCK_ORDER_SCOPE_BY_POSITION.LeftTop), undefined);
+        const snapshot = getCurrentDockEntryOrderSnapshot();
+        assert.equal(DOCK_ORDER_SCOPES.every(scope => snapshot[scope].length === 0), true);
+        assert.doesNotThrow(() => getDockEntryOrderSnapshot());
+    } finally {
+        if (descriptor) {
+            Object.defineProperty(globalThis, "window", descriptor);
+        } else {
+            Reflect.deleteProperty(globalThis, "window");
+        }
+    }
+});
+
 class FakeDockContainer {
     public children: FakeDockItem[] = [];
 
@@ -90,6 +108,23 @@ const layoutWith = (containers: FakeDockContainer[]): IDockOrderLayout => ({
 });
 
 const emptySnapshot = () => createDockEntryOrderSnapshot({});
+
+test("dock default order follows the catalog while retaining placement and unknown plugin slots", () => {
+    const snapshot = emptySnapshot();
+    snapshot[DOCK_ORDER_SCOPE_BY_POSITION.RightBottom] = ["outline", "plugin:disabled:dock", "file"];
+    const defaults = getDefaultDockEntryOrderSnapshot(snapshot);
+    assert.deepEqual(defaults[DOCK_ORDER_SCOPE_BY_POSITION.RightBottom], ["file", "plugin:disabled:dock", "outline"]);
+    assert.deepEqual(defaults[DOCK_ORDER_SCOPE_BY_POSITION.LeftTop], []);
+    assert.deepEqual(snapshot[DOCK_ORDER_SCOPE_BY_POSITION.RightBottom], ["outline", "plugin:disabled:dock", "file"]);
+    const orders = {
+        [DOCK_ORDER_SCOPE_BY_POSITION.RightBottom]: ["outline", "file"],
+        [DOCK_ORDER_SCOPE_BY_POSITION.LeftBottom]: ["bookmark"],
+    };
+    delete orders[DOCK_ORDER_SCOPE_BY_POSITION.RightBottom];
+    const merged = mergeDockEntryOrderSnapshot(defaults, orders);
+    assert.deepEqual(merged[DOCK_ORDER_SCOPE_BY_POSITION.RightBottom], defaults[DOCK_ORDER_SCOPE_BY_POSITION.RightBottom]);
+    assert.deepEqual(merged[DOCK_ORDER_SCOPE_BY_POSITION.LeftBottom], ["bookmark"]);
+});
 
 test("dock order scopes map to all six runtime containers", () => {
     const containers = Array.from({length: 6}, () => new FakeDockContainer());

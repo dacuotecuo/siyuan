@@ -1,24 +1,14 @@
-// SiYuan - From thought to insight, with agents
+// SiYuan - https://github.com/siyuan-note/siyuan
 // Copyright (c) 2020-present, b3log.org
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU Affero General Public License for more details.
-//
-// You should have received a copy of the GNU Affero General Public License
-// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+// SPDX-License-Identifier: AGPL-3.0-or-later
 
 package av
 
 import (
 	"encoding/json"
 	"math"
+	"os"
+	"reflect"
 	"testing"
 )
 
@@ -27,12 +17,16 @@ func TestUpgradeSpec6CardConfiguration(t *testing.T) {
 		Spec: 5,
 		Views: []*View{{
 			Gallery: &LayoutGallery{
-				CardSize:        CardSizeSmall,
-				CardAspectRatio: CardAspectRatio3_4,
+				CardSettings: CardSettings{
+					CardSize:        CardSizeSmall,
+					CardAspectRatio: CardAspectRatio3_4,
+				},
 			},
 			Kanban: &LayoutKanban{
-				CardSize:        CardSizeLarge,
-				CardAspectRatio: CardAspectRatio2_3,
+				CardSettings: CardSettings{
+					CardSize:        CardSizeLarge,
+					CardAspectRatio: CardAspectRatio2_3,
+				},
 			},
 		}},
 	}
@@ -83,6 +77,61 @@ func TestUpgradeSpec8(t *testing.T) {
 	UpgradeSpec(attrView)
 	if PlainTextSpec != attrView.Spec {
 		t.Fatalf("expected spec %d, got %d", PlainTextSpec, attrView.Spec)
+	}
+}
+
+func TestUpgradeSpec10PreservesLegacyLayouts(t *testing.T) {
+	data, err := os.ReadFile("testdata/spec9-layouts.json")
+	if nil != err {
+		t.Fatal(err)
+	}
+	attrView, err := ParseAttributeViewData("20260921000000-layouts", data)
+	if nil != err || 9 != attrView.Spec {
+		t.Fatalf("legacy layout read failed: %v", err)
+	}
+	before, _ := json.Marshal(attrView)
+	UpgradeSpec(attrView)
+	if 10 != attrView.Spec || nil != CheckSpec(attrView) {
+		t.Fatalf("layouts require spec 10: %d", attrView.Spec)
+	}
+	upgraded, _ := json.Marshal(attrView)
+	readBack, err := ParseAttributeViewData(attrView.ID, upgraded)
+	if nil != err || !reflect.DeepEqual(attrView, readBack) {
+		t.Fatalf("upgraded layout read failed: %v", err)
+	}
+	attrView.Spec = 9
+	after, _ := json.Marshal(attrView)
+	if string(before) != string(after) {
+		t.Fatal("upgrade changed layout or item data")
+	}
+
+	for _, layout := range attrView.Views[1:] {
+		for _, grouped := range []bool{false, true} {
+			view := &View{LayoutType: LayoutTypeTable, List: layout.List, Calendar: layout.Calendar}
+			if grouped {
+				view = &View{LayoutType: LayoutTypeTable, Groups: []*View{view}}
+			}
+			candidate := &AttributeView{Spec: PlainTextSpec, Views: []*View{nil, view}}
+			UpgradeSpec(candidate)
+			if 10 != candidate.Spec {
+				t.Fatal("inactive or grouped layout was not protected")
+			}
+			candidate.Views = nil
+			UpgradeSpec(candidate)
+			if 10 != candidate.Spec {
+				t.Fatal("removing layouts downgraded the database")
+			}
+		}
+	}
+	for _, spec := range []int{PlainTextSpec, RichTextSpec, CurrentSpec + 1} {
+		candidate := &AttributeView{Spec: spec, Views: attrView.Views[:1]}
+		UpgradeSpec(candidate)
+		if spec != candidate.Spec {
+			t.Fatalf("unrelated database spec changed from %d to %d", spec, candidate.Spec)
+		}
+		if spec > CurrentSpec && CheckSpec(candidate) != ErrSpecTooNew {
+			t.Fatal("unknown format was accepted")
+		}
 	}
 }
 

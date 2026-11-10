@@ -2,14 +2,16 @@
 import {ipcRenderer} from "electron";
 import * as path from "path";
 /// #endif
-import {fetchPost} from "../util/fetch";
+import {fetchPost, fetchSyncPost} from "../util/fetch";
+import {ContractFormData} from "../util/contractFormData";
+import {genUUID} from "../util/genID";
 import {getAssetExtension, getAssetName, useShell} from "../util/pathName";
 import {openFileById} from "../editor/util";
 import {Constants} from "../constants";
 import {openNewWindowById} from "../window/openNewWindow";
 import {MenuItem} from "./Menu";
 import type {App} from "../index";
-import {isInAndroid, saveExportFile, updateHotkeyTip} from "../protyle/util/compatibility";
+import {isInAndroid, isPhablet, saveExportFile, updateHotkeyTip} from "../protyle/util/compatibility";
 import {checkFold} from "../util/noRelyPCFunction";
 import {showMessage} from "../dialog/message";
 import type {Editor} from "../editor";
@@ -24,7 +26,7 @@ export const exportAsset = (src: string) => {
     return {
         id: "export",
         label: window.siyuan.languages.export,
-        icon: "iconUpload",
+        icon: "iconDownload",
         async click() {
             /// #if BROWSER
             saveExportFile(getDownloadURL(src));
@@ -86,7 +88,7 @@ export const openEditorTab = (app: App, ids: string[], notebookId?: string, path
                     app,
                     id: ids[0],
                     position: "right",
-                    action: [Constants.CB_GET_FOCUS, Constants.CB_GET_SCROLL]
+                    action: isPhablet() ? [Constants.CB_GET_SCROLL] : [Constants.CB_GET_FOCUS, Constants.CB_GET_SCROLL]
                 });
             } else {
                 ids.forEach((id) => {
@@ -113,7 +115,7 @@ export const openEditorTab = (app: App, ids: string[], notebookId?: string, path
                     app,
                     id: ids[0],
                     position: "bottom",
-                    action: [Constants.CB_GET_FOCUS, Constants.CB_GET_SCROLL]
+                    action: isPhablet() ? [Constants.CB_GET_SCROLL] : [Constants.CB_GET_FOCUS, Constants.CB_GET_SCROLL]
                 });
             } else {
                 ids.forEach((id) => {
@@ -140,7 +142,7 @@ export const openEditorTab = (app: App, ids: string[], notebookId?: string, path
                     openFileById({
                         app,
                         id: ids[0],
-                        action: [Constants.CB_GET_FOCUS, Constants.CB_GET_SCROLL],
+                        action: isPhablet() ? [Constants.CB_GET_SCROLL] : [Constants.CB_GET_FOCUS, Constants.CB_GET_SCROLL],
                         removeCurrentTab: false
                     });
                 } else {
@@ -197,6 +199,9 @@ export const openEditorTab = (app: App, ids: string[], notebookId?: string, path
                 } else {
                     ids.forEach((id) => {
                         fetchPost("/api/block/getBlockInfo", {id}, (response) => {
+                            if (response.code !== 0 || response.data.publishAccessRequired) {
+                                return;
+                            }
                             useShell("showItemInFolder", path.join(window.siyuan.config.system.dataDir, response.data.box, response.data.path));
                         });
                     });
@@ -218,6 +223,23 @@ export const openEditorTab = (app: App, ids: string[], notebookId?: string, path
 };
 
 export const writePNGBlob = async (blob: Blob): Promise<boolean> => {
+    if (isInAndroid()) {
+        try {
+            // 通过已有临时导出通道向原生剪贴板传递 PNG，支持 WebView 渲染的矢量图片。
+            const response = await fetchSyncPost("/api/export/exportAsFile", new ContractFormData({
+                file: new File([blob], `clipboard-${genUUID()}.png`, {type: "image/png"}),
+                type: "image/png",
+            }));
+            if (response.code !== 0 || !response.data?.file) {
+                throw new Error("could not prepare clipboard image");
+            }
+            window.JSAndroid.writeImageClipboard(response.data.file);
+            return true;
+        } catch (e) {
+            showMessage(window.siyuan.languages.imageCopyFailed, 6000, "error");
+            return false;
+        }
+    }
     try {
         if (!navigator.clipboard?.write || typeof ClipboardItem === "undefined") {
             throw new Error("image clipboard is unavailable");
@@ -236,22 +258,22 @@ export const writePNGBlob = async (blob: Blob): Promise<boolean> => {
 };
 
 export const copyPNGByLink = (link: string) => {
-    if (isInAndroid()) {
-        window.JSAndroid.writeImageClipboard(link);
-        return;
-    }
     const showCopyError = () => showMessage(window.siyuan.languages.imageCopyFailed, 6000, "error");
     const copyBlob = async (blob: Blob) => {
         if (await writePNGBlob(blob)) {
             showMessage(window.siyuan.languages.copied);
         }
     };
-    const imageToPNGClipboard = (image: HTMLImageElement) => {
+    const imageToPNGClipboard = (image: HTMLImageElement, vector = false) => {
         try {
             const canvas = document.createElement("canvas");
-            canvas.width = image.naturalWidth;
-            canvas.height = image.naturalHeight;
-            canvas.getContext("2d").drawImage(image, 0, 0);
+            // 矢量图片以至少两倍分辨率采样，限制额外放大的画布尺寸和像素总量。
+            const scale = vector ? Math.max(1, Math.min(Math.max(2, window.devicePixelRatio || 1),
+                16384 / image.naturalWidth, 16384 / image.naturalHeight,
+                Math.sqrt(16777216 / (image.naturalWidth * image.naturalHeight)))) : 1;
+            canvas.width = Math.round(image.naturalWidth * scale);
+            canvas.height = Math.round(image.naturalHeight * scale);
+            canvas.getContext("2d").drawImage(image, 0, 0, canvas.width, canvas.height);
             canvas.toBlob((blob) => {
                 if (blob) {
                     copyBlob(blob);
@@ -274,7 +296,7 @@ export const copyPNGByLink = (link: string) => {
         const objectURL = URL.createObjectURL(blob);
         const tempElement = document.createElement("img");
         tempElement.onload = () => {
-            imageToPNGClipboard(tempElement);
+            imageToPNGClipboard(tempElement, blob.type.split(";")[0].trim().toLowerCase() === "image/svg+xml");
             URL.revokeObjectURL(objectURL);
         };
         tempElement.onerror = () => {

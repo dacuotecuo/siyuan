@@ -1,12 +1,23 @@
 import {Constants} from "./constants";
+import {refreshSettingConfig} from "./config/setting/sync";
+import {closeNotebookHistoryDialogs} from "./history/notebookDialogs";
+import {clearDocumentCreationPlans} from "./util/configuredDocument";
+import {closeNotebookLivePhotos} from "./protyle/preview/livePhoto";
+import {systemConfig} from "./config/systemConfig";
+import {openStandaloneDatabaseItemByURI} from "./protyle/render/av/openStandaloneDatabaseItem";
+/// #if BROWSER
+import "./util/iosWindowControls";
+import {registerDesktopBackNavigation} from "./boot/globalEvent/nativeBack";
+/// #endif
 import {Menus} from "./menus";
 import {Model} from "./layout/Model";
-import {onGetConfig} from "./boot/onGetConfig";
+import {loadDesktopHostConnection, onGetConfig} from "./boot/onGetConfig";
+import {exitAfterSettingsReset} from "./config/setting/reset";
 import {initBlockPopover} from "./block/popover";
 import {applyCloudUserState, onSetaccount} from "./config/tabs/accountUi";
 import {addScript, addScriptSync} from "./protyle/util/addScript";
 import {genUUID} from "./util/genID";
-import {fetchGet, fetchPost} from "./util/fetch";
+import {fetchPost} from "./util/fetch";
 import {
     addBaseURL,
     getDocDisplayName,
@@ -23,13 +34,14 @@ import {
     downloadProgress,
     processSync,
     progressBackgroundTask,
-    progressLoading,
     progressStatus,
     processBacklinkIndexCommit,
     setDefRefCount,
     setRefDynamicText,
     transactionError
 } from "./dialog/processSystem";
+import {progressLoading} from "./dialog/progress";
+import {syncCheckoutProgress} from "./sync/checkoutProgress";
 import {initMessage, showMessage} from "./dialog/message";
 import {getAllModels, getAllTabs} from "./layout/getAll";
 import {getLocalStorage, isChromeBrowser, isInMobileApp, isIOSDevice} from "./protyle/util/compatibility";
@@ -46,10 +58,10 @@ import {emitToPlugins} from "./plugin/EventBusCore";
 /// #if !BROWSER
 import {ipcRenderer} from "electron";
 /// #endif
-import {getDockByType} from "./layout/tabUtil";
+import {getDockByType, setTabPosition} from "./layout/tabUtil";
 import {Files} from "./layout/dock/Files";
 import {Tag} from "./layout/dock/Tag";
-import {appearanceConfigApi} from "./config/tabs/appearanceRuntime";
+import {appearanceConfigApi, refreshAppearance} from "./config/tabs/appearanceRuntime";
 import {renderSnippet} from "./config/util/snippets";
 import {refreshThemeStyle, reloadInlineStyles, setBodyHighlight} from "./util/assets";
 import {reloadSync} from "./util/reloadSync";
@@ -58,6 +70,9 @@ import {ensureUILayout} from "./util/ensureUILayout";
 import {applyEntryVisibility} from "./config/entryVisibility/runtime";
 import {removeBlockPanelEditors} from "./block/panelRemoval";
 import {initializeEnglishCommandTranslations} from "./command/english";
+import {loadLanguages} from "./boot/loadLanguages";
+import {installPluginStorageFetchAppId} from "./util/fetchAppId";
+import {initWindowWithLoading} from "./boot/loading";
 
 export class App {
     public plugins: import("./plugin").Plugin[] = [];
@@ -76,6 +91,11 @@ export class App {
         mainWs.connect({
             id: genUUID(),
             type: "main",
+            callback: () => {
+                if (window.siyuan.isReady) {
+                    void refreshSettingConfig().catch(error => console.error("Could not refresh settings", error));
+                }
+            },
             msgCallback: (data) => {
                 emitToPlugins("ws-main", data);
                 if (data) {
@@ -85,6 +105,12 @@ export class App {
                             break;
                         case "setAppearance":
                             appearanceConfigApi.apply(data.data);
+                            break;
+                        case "settingChanged":
+                            void refreshSettingConfig(data.data.namespace, data.data.revision);
+                            break;
+                        case "refreshAppearance":
+                            void refreshAppearance(data.data);
                             break;
                         case "reloadInlineStyles":
                             void reloadInlineStyles();
@@ -101,6 +127,9 @@ export class App {
                             break;
                         case "databaseIndexCommit":
                             processBacklinkIndexCommit(data.data);
+                            if (getDockByType("tag")?.data.tag instanceof Tag) {
+                                (getDockByType("tag").data.tag as Tag).update();
+                            }
                             break;
                         case "reloadTag":
                             if (getDockByType("tag")?.data.tag instanceof Tag) {
@@ -148,6 +177,9 @@ export class App {
                                 });
                             }
                             break;
+                        case "syncProgress":
+                            syncCheckoutProgress(data);
+                            break;
                         case "progress":
                             progressLoading(data);
                             break;
@@ -184,6 +216,9 @@ export class App {
                             break;
                         case "closeBox":
                         case "removeBox":
+                            closeNotebookHistoryDialogs(data.data.box);
+                            clearDocumentCreationPlans(data.data.box);
+                            closeNotebookLivePhotos(data.data.box);
                             removeBlockPanelEditors({notebookId: data.data.box});
                             getAllTabs().forEach((tab) => {
                                 if (tab.headElement) {
@@ -303,27 +338,31 @@ export class App {
         fetchPost("/api/system/getConf", {}, async (response) => {
             await addScriptSync(`${Constants.PROTYLE_CDN}/js/lute/lute.min.js?v=${Constants.SIYUAN_VERSION}`, "protyleLuteScript");
             addScript(`${Constants.PROTYLE_CDN}/js/protyle-html.js?v=${Constants.SIYUAN_VERSION}`, "protyleWcHtmlScript");
-            window.siyuan.config = response.data.conf;
+            window.siyuan.config = systemConfig(response.data.conf, () => structuredClone(Constants.SIYUAN_EMPTY_LAYOUT));
+            await loadDesktopHostConnection();
             ensureUILayout();
             window.siyuan.isPublish = response.data.isPublish;
             setBodyHighlight();
             await notebookPromise;
             await loadPlugins(this);
             getLocalStorage(() => {
-                fetchGet(`/appearance/langs/${window.siyuan.config.appearance.lang}.json?v=${Constants.SIYUAN_VERSION}`, (lauguages: IObject) => {
-                    window.siyuan.languages = lauguages;
+                void loadLanguages(window.siyuan.config.appearance.lang, Constants.SIYUAN_VERSION, (languages: IObject) => {
+                    window.siyuan.languages = languages;
                     void initializeEnglishCommandTranslations(
                         window.siyuan.config.appearance.lang,
-                        lauguages as Record<string, string>,
+                        languages as Record<string, string>,
                         Constants.SIYUAN_VERSION,
                     );
                     window.siyuan.menus = new Menus(this);
-                    bootSync();
-                    fetchPost("/api/setting/getCloudUser", {}, async userResponse => {
-                        window.siyuan.user = userResponse.data;
+                    fetchPost("/api/setting/getCloudUser", {cached: true}, async userResponse => {
+                        window.siyuan.user = userResponse.data && "userId" in userResponse.data ? userResponse.data : null;
                         await ensureOnboarding();
                         await setNoteBook();
-                        await onGetConfig(response.data.start, this);
+                        await initWindowWithLoading(() => onGetConfig(response.data.start, this), setTabPosition);
+                        /// #if !BROWSER
+                        // 加载遮罩移除后再显示主窗口，避免原生窗口按钮出现在启动界面上。
+                        ipcRenderer.send(Constants.SIYUAN_READY_TO_SHOW);
+                        /// #endif
                         onSetaccount();
                         setTitle("", true);
                         initMessage();
@@ -336,6 +375,9 @@ export class App {
                         /// #endif
                         window.siyuan.isReady = true;
                         mainWs.flushMainMessages();
+                        bootSync();
+                        exitAfterSettingsReset();
+                        fetchPost("/api/setting/getCloudUser", {});
                     });
                 });
             });
@@ -344,11 +386,15 @@ export class App {
     }
 }
 
+installPluginStorageFetchAppId(window, Constants.SIYUAN_APPID, document.baseURI, location.origin);
 const siyuanApp = new App();
 
 window.openFileByURL = (openURL) => {
     const blockInfo = parseSiYuanUriInfo(openURL);
     if (blockInfo != null) {
+        if (openStandaloneDatabaseItemByURI(siyuanApp, blockInfo)) {
+            return true;
+        }
         if (blockInfo.avItemID) {
             queueAVLocateRequest(blockInfo.id, {
                 itemID: blockInfo.avItemID,
@@ -375,8 +421,12 @@ window.openFileByURL = (openURL) => {
 };
 
 /// #if BROWSER
+registerDesktopBackNavigation(siyuanApp);
 window.showKeyboardToolbar = () => {
     // 防止 Pad 端报错
+};
+window.hideKeyboardToolbar = () => {
+    // 桌面界面没有手机键盘工具栏，兼容原生容器的键盘隐藏回调。
 };
 window.processIOSPurchaseResponse = processIOSPurchaseResponse;
 // 移动端容器（Android/鸿蒙）启用桌面模式时，原生壳默认禁用 WebView 自身键盘行为、等待 JS 调用
@@ -388,6 +438,4 @@ if (window.JSAndroid?.setWebViewFocusable) {
 } else if (window.JSHarmony?.setWebViewFocusable) {
     window.JSHarmony.setWebViewFocusable(true);
 }
-/// #else
-ipcRenderer.send(Constants.SIYUAN_READY_TO_SHOW);
 /// #endif

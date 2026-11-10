@@ -1,24 +1,24 @@
+import {isSameOriginAPIRequest, SIYUAN_APP_ID_HEADER} from "../../util/fetchAppId";
 import {insertHTML} from "../util/insertHTML";
 import {hideMessage, showMessage} from "../../dialog/message";
 import {Constants} from "../../constants";
 import {destroy} from "../util/destroy";
 import {escapeHtml} from "../../util/escape";
+import {attachLivePhotoVideo, getLivePhotoUploadPairs, ILivePhotoPair} from "./livePhotoPairs";
 import {fetchSyncPost} from "../../util/fetch";
 import {getEditorRange, getUndoFocusContext, restoreFocusContext} from "../util/selection";
 import {pathPosix} from "../../util/pathName";
 import {genAssetHTML} from "../../asset/renderAssets";
-import {hasClosestBlock, hasClosestByClassName} from "../util/hasClosest";
+import {hasClosestBlock} from "../util/hasClosest";
 import {getContenteditableElement} from "../wysiwyg/getBlock";
-import {getTypeByCellElement, updateCellsValue} from "../render/av/cell";
 import {scrollCenter} from "../../util/highlightById";
 import {confirmDialog} from "../../dialog/confirmDialog";
 import {filesize} from "filesize";
-import {transaction} from "../wysiwyg/transaction";
-import * as dayjs from "dayjs";
-import {getAVSelectedCells} from "../render/av/selectionState";
-import {getAVSelectedTableCells} from "../render/av/virtualScroll";
-import {createUploadInsertPosition, isUploadInsertPositionAvailable} from "./insertPosition";
-import type {IUploadInsertPosition} from "./insertPosition";
+import {
+    captureUploadDocument, createUploadInsertPosition, getAvailableUploadInsertRange,
+    getUploadDocumentElement, isUploadDocumentAvailable
+} from "./insertPosition";
+import type {IUploadDocument, IUploadInsertPosition} from "./insertPosition";
 import {
     type IAssetUploadEventContext,
     type IAssetUploadTask,
@@ -34,6 +34,7 @@ interface FileWithPath extends File {
 }
 
 export interface IUploadInsertOptions {
+    document?: IUploadDocument;
     htmlAsIframe?: boolean;
     insertPosition?: IUploadInsertPosition;
     source?: TAssetUploadSource;
@@ -45,6 +46,8 @@ export interface IUploadInsertOptions {
     allowedInputKinds?: Array<IAssetUploadInput["kind"]>;
     /** 本机 HTML 粘贴需要沿用内核的敏感路径校验。 */
     fromHTMLPaste?: boolean;
+    /** 原始文件对象随插件链排序，关联只依据实际上传索引及成功返回的路径。 */
+    livePhotoPairs?: ILivePhotoPair[];
 }
 
 export class Upload {
@@ -122,7 +125,7 @@ const validateFile = (protyle: IProtyle, files: File[]) => {
     return {files: uploadFileList, rejected, msgId};
 };
 
-const genUploadedLabel = async (responseText: string, protyle: IProtyle, options?: IUploadInsertOptions) => {
+const genUploadedLabel = async (responseText: string, protyle: IProtyle, options?: IUploadInsertOptions, input?: IAssetUploadInput) => {
     const response = JSON.parse(responseText);
     let errorTip = "";
 
@@ -143,14 +146,29 @@ const genUploadedLabel = async (responseText: string, protyle: IProtyle, options
     if (errorTip) {
         showMessage(errorTip);
     }
+    if ((options?.target || "editor") !== "editor") {
+        return;
+    }
     let insertBlock = true;
     const range = getUploadInsertRange(protyle, options?.insertPosition);
+    if (!range) {
+        showMessage(window.siyuan.languages.uploadInsertTargetUnavailable);
+        return;
+    }
     if (range.toString() === "" && range.startContainer.nodeType === 3 && protyle.toolbar.getCurrentType(range).length > 0) {
         // 防止链接插入其他元素中 https://ld246.com/article/1676003478664
         range.setEndAfter(range.startContainer.parentElement);
         range.collapse(false);
     }
-    const successes = getAssetUploadSuccesses(response.data);
+    let successes = getAssetUploadSuccesses(response.data, input);
+    const livePhotos = options?.livePhotoPairs && input?.kind === "files" ?
+        getLivePhotoUploadPairs(options.livePhotoPairs, input.files, successes) : undefined;
+    if (livePhotos) {
+        successes = successes.filter(item => !livePhotos.hidden.has(item.index));
+        if (livePhotos.incomplete) {
+            showMessage(window.siyuan.languages.livePhotoPairUnavailable);
+        }
+    }
     // https://github.com/siyuan-note/siyuan/issues/7624
     const nodeElement = hasClosestBlock(range.startContainer);
     if (nodeElement) {
@@ -167,20 +185,18 @@ const genUploadedLabel = async (responseText: string, protyle: IProtyle, options
     let successFileText = "";
     // 插入多个资源文件时按文件名自然升序排列 Use natural ascending order when inserting multiple assets https://github.com/siyuan-note/siyuan/issues/14643
     successes.sort((a, b) => a.name.localeCompare(b.name, undefined, {numeric: true}) || a.index - b.index);
-    const avAssets: IAVCellAssetValue[] = [];
     let hasImage = false;
     successes.forEach((success, index) => {
         const type = pathPosix().extname(success.name).toLowerCase();
         const filename = protyle.options.upload.filename(success.name);
         const name = filename.substring(0, filename.length - type.length);
         hasImage = Constants.SIYUAN_ASSETS_IMAGE.includes(type);
-        avAssets.push({
-            type: Constants.SIYUAN_ASSETS_IMAGE.includes(type) ? "image" : "file",
-            content: success.path,
-            name: name
-        });
-        successFileText += genAssetHTML(type, success.path, name, filename,
+        let label = genAssetHTML(type, success.path, name, filename,
             getHostCapabilities().localFileSystem && options?.htmlAsIframe);
+        if (hasImage && livePhotos?.videos.has(success.index)) {
+            label = attachLivePhotoVideo(label, livePhotos.videos.get(success.index));
+        }
+        successFileText += label;
         if (!Constants.SIYUAN_ASSETS_AUDIO.includes(type) && !Constants.SIYUAN_ASSETS_VIDEO.includes(type) &&
             successes.length - 1 !== index) {
             if (nodeElement && nodeElement.classList.contains("table")) {
@@ -193,105 +209,6 @@ const genUploadedLabel = async (responseText: string, protyle: IProtyle, options
         }
     });
 
-    if (document.querySelector(".av__panel")) {
-        const cellElements: HTMLElement[] = [document.querySelector('.custom-attr__avvalue[data-type="mAsset"][data-active="true"]')];
-        if (!cellElements[0]) {
-            cellElements.splice(0, 1);
-            protyle.wysiwyg.element.querySelectorAll(".av__cell--active").forEach((item: HTMLElement) => {
-                if (getTypeByCellElement(item) === "mAsset") {
-                    cellElements.push(item);
-                }
-            });
-            if (cellElements.length === 0) {
-                document.querySelector(".av__panel .b3-menu__items")?.getAttribute("data-ids")?.split(",").forEach((id: string) => {
-                    const item = protyle.wysiwyg.element.querySelector(`.av__gallery-fields [data-dtype="mAsset"][data-id="${id}"]`) as HTMLElement;
-                    if (item) {
-                        cellElements.push(item);
-                    }
-                });
-            }
-        }
-        if (cellElements.length > 0) {
-            const blockElement = hasClosestBlock(cellElements[0]);
-            if (blockElement) {
-                await updateCellsValue(protyle, blockElement, avAssets, cellElements);
-                document.querySelector(".av__panel")?.remove();
-                return;
-            }
-        } else {
-            return;
-        }
-    } else if (nodeElement && nodeElement.classList.contains("av")) {
-        const selectedCells = getAVSelectedCells(nodeElement);
-        const stableCellCandidates = (selectedCells.length > 0 ? selectedCells :
-            getAVSelectedTableCells(nodeElement)).filter(item => item.column.type === "mAsset");
-        const cellElements: HTMLElement[] = [];
-        nodeElement.querySelectorAll(".av__row--select:not(.av__row--header)").forEach(item => {
-            item.querySelectorAll(".av__cell").forEach((cellItem: HTMLElement) => {
-                if (getTypeByCellElement(cellItem) === "mAsset") {
-                    cellElements.push(cellItem);
-                }
-            });
-        });
-        if (cellElements.length === 0) {
-            nodeElement.querySelectorAll(".av__cell--active").forEach((item: HTMLElement) => {
-                if (getTypeByCellElement(item) === "mAsset") {
-                    cellElements.push(item);
-                }
-            });
-        }
-        const stableCells = stableCellCandidates.length > cellElements.length ? stableCellCandidates : [];
-        if (stableCells.length === 1 || cellElements.length === 1) {
-            await updateCellsValue(protyle, nodeElement, avAssets, cellElements, undefined, undefined,
-                false, false, false, stableCells);
-        } else if (stableCells.length > 1 || cellElements.length > 1) {
-            const doOperations: IOperation[] = [];
-            const undoOperations: IOperation[] = [];
-            let currentRowElement;
-            const colId = cellElements[0]?.getAttribute("data-col-id");
-            for (let i = 0; i < avAssets.length; i++) {
-                const selectedCell = stableCells[i];
-                if (stableCells.length > 0 && !selectedCell) {
-                    break;
-                }
-                let cellElement = cellElements[i];
-                if (!cellElement && stableCells.length === 0) {
-                    if (!currentRowElement) {
-                        currentRowElement = hasClosestByClassName(cellElements[i - 1], "av__row") as HTMLElement;
-                    }
-                    if (currentRowElement) {
-                        currentRowElement = currentRowElement.nextElementSibling;
-                        if (currentRowElement && currentRowElement.classList.contains("av__row")) {
-                            cellElement = currentRowElement.querySelector(`.av__cell[data-col-id="${colId}"]`);
-                        }
-                    }
-                }
-                if (!cellElement && !selectedCell) {
-                    break;
-                }
-                const operations = await updateCellsValue(protyle, nodeElement,
-                    [avAssets[i]], cellElement ? [cellElement] : undefined, undefined, undefined,
-                    true, false, false, selectedCell ? [selectedCell] : undefined);
-                doOperations.push(...operations.doOperations);
-                undoOperations.push(...operations.undoOperations);
-            }
-            if (doOperations.length > 0) {
-                const id = nodeElement.dataset.nodeId;
-                doOperations.push({
-                    action: "doUpdateUpdated",
-                    id,
-                    data: dayjs().format("YYYYMMDDHHmmss"),
-                });
-                undoOperations.push({
-                    action: "doUpdateUpdated",
-                    id,
-                    data: nodeElement.getAttribute("updated"),
-                });
-                transaction(protyle, doOperations, undoOperations);
-            }
-        }
-        return;
-    }
     // 避免插入代码块中，其次因为都要独立成块 https://github.com/siyuan-note/siyuan/issues/7607
     if (options?.insertPosition) {
         protyle.toolbar.range = range;
@@ -306,21 +223,20 @@ const genUploadedLabel = async (responseText: string, protyle: IProtyle, options
 };
 
 export const getUploadInsertRange = (protyle: IProtyle, position?: IUploadInsertPosition) => {
-    if (isUploadInsertPositionAvailable(protyle.wysiwyg.element, position)) {
-        return position.range.cloneRange();
-    }
-    if (position?.context && restoreFocusContext(protyle, position.context)) {
-        return getEditorRange(protyle.wysiwyg.element).cloneRange();
-    }
-    return getEditorRange(protyle.wysiwyg.element);
+    return getAvailableUploadInsertRange(protyle.wysiwyg.element, position, context => {
+        if (restoreFocusContext(protyle, context)) {
+            return getEditorRange(protyle.wysiwyg.element).cloneRange();
+        }
+    });
 };
 
 interface IAssetUploadCallbacks {
+    isTargetAvailable(): boolean;
     success(responseText: string, response: IWebSocketData | undefined,
             input: IAssetUploadInput,
             result: Omit<IAssetUploadResult, "requestId" | "input">): void | PromiseLike<void>;
     formatResponse?: (responseText: string, input: IAssetUploadInput) => string;
-    complete?: (succeeded: boolean) => void;
+    complete?: (succeeded: boolean, result?: Omit<IAssetUploadResult, "requestId" | "input">) => void;
     reset?: () => void;
 }
 
@@ -336,7 +252,7 @@ const getAssetUploadContext = (options?: IUploadInsertOptions): IAssetUploadEven
 };
 
 const captureUploadInsertPosition = (protyle: IProtyle, options?: IUploadInsertOptions): IUploadInsertOptions => {
-    const result = {...options};
+    const result = {...options, document: options?.document || captureUploadDocument(protyle)};
     if ((result.target || "editor") !== "editor" || result.insertPosition) {
         return result;
     }
@@ -360,9 +276,10 @@ const getErrorMessage = (error: unknown) => {
     return typeof error === "string" ? error : "";
 };
 
-const finishCallbacks = (callbacks: IAssetUploadCallbacks, succeeded: boolean) => {
+const finishCallbacks = (callbacks: IAssetUploadCallbacks, succeeded: boolean,
+                         result?: Omit<IAssetUploadResult, "requestId" | "input">) => {
     try {
-        callbacks.complete?.(succeeded);
+        callbacks.complete?.(succeeded, result);
     } catch (error) {
         console.error(error);
     }
@@ -378,7 +295,7 @@ const finishUpload = (task: IAssetUploadTask | undefined, callbacks: IAssetUploa
     if (task && !task.complete(result)) {
         return;
     }
-    finishCallbacks(callbacks, result.status === "success");
+    finishCallbacks(callbacks, result.status === "success", result);
 };
 
 const finishSuccessfulUpload = (task: IAssetUploadTask | undefined, callbacks: IAssetUploadCallbacks,
@@ -389,6 +306,11 @@ const finishSuccessfulUpload = (task: IAssetUploadTask | undefined, callbacks: I
         return;
     }
     try {
+        // 完成通知可能触发插件切换文档，消费结果前再次核验原目标。
+        if (!callbacks.isTargetAvailable()) {
+            showMessage(window.siyuan.languages.uploadInsertTargetUnavailable);
+            return;
+        }
         const callbackResult = callbacks.success(responseText, response, input, result);
         if (callbackResult && typeof callbackResult.then === "function") {
             void Promise.resolve(callbackResult).catch(error => {
@@ -408,7 +330,7 @@ const finishSuccessfulUpload = (task: IAssetUploadTask | undefined, callbacks: I
             console.error(messageError);
         }
     } finally {
-        finishCallbacks(callbacks, result.status === "success");
+        finishCallbacks(callbacks, result.status === "success", result);
     }
 };
 
@@ -432,7 +354,7 @@ const uploadPreparedLocalFiles = (input: Extract<IAssetUploadInput, { kind: "loc
         void (async () => {
             let msgId: string | undefined;
             try {
-                if (!document.body.contains(protyle.element)) {
+                if (!callbacks.isTargetAvailable()) {
                     finishUpload(task, callbacks, {status: "canceled"});
                     return;
                 }
@@ -440,11 +362,11 @@ const uploadPreparedLocalFiles = (input: Extract<IAssetUploadInput, { kind: "loc
                 const response = await fetchSyncPost("/api/asset/insertLocalAssets", {
                     assetPaths,
                     isUpload,
-                    id: protyle.block.rootID,
+                    id: options.document.rootID,
                     fromHTMLPaste: options?.fromHTMLPaste,
                 });
                 hideMessage(msgId);
-                const detached = !document.body.contains(protyle.element);
+                const detached = !document.body.contains(getUploadDocumentElement(protyle, options.document));
                 if (detached) {
                     destroy(protyle);
                 }
@@ -491,7 +413,7 @@ const uploadPreparedLocalFiles = (input: Extract<IAssetUploadInput, { kind: "loc
 };
 
 const uploadPreparedFiles = (input: Extract<IAssetUploadInput, { kind: "files" }>, protyle: IProtyle,
-                             callbacks: IAssetUploadCallbacks, task: IAssetUploadTask) => {
+                             callbacks: IAssetUploadCallbacks, task: IAssetUploadTask, options: IUploadInsertOptions) => {
     const fileList = input.files;
     if (protyle.options.upload.handler) {
         const finishHandler = (result: string | null) => {
@@ -562,15 +484,23 @@ const uploadPreparedFiles = (input: Extract<IAssetUploadInput, { kind: "files" }
             msg += window.siyuan.languages.uploadFileTooLarge.replace("${x}", escapeHtml(validateResult.files[i].name)).replace("${y}", filesize(validateResult.files[i].size, {standard: "iec"})) + "<br>";
         }
     }
-    if (protyle.lite) {
+    if (protyle.lite && !options.document.rootID) {
         formData.append("assetsDirPath", "/assets/");
     } else {
-        formData.append("id", protyle.block?.rootID);
+        formData.append("id", options.document.rootID);
     }
     confirmDialog(msg ? window.siyuan.languages.upload : "", msg, () => {
         try {
+            if (!callbacks.isTargetAvailable()) {
+                hideMessage(validateResult.msgId);
+                finishUpload(task, callbacks, {status: "canceled"});
+                return;
+            }
             const xhr = new XMLHttpRequest();
             xhr.open("POST", protyle.options.upload.url);
+            if (isSameOriginAPIRequest(protyle.options.upload.url, document.baseURI, location.origin)) {
+                xhr.setRequestHeader(SIYUAN_APP_ID_HEADER, Constants.SIYUAN_APPID);
+            }
             if (protyle.options.upload.token) {
                 xhr.setRequestHeader("X-Upload-Token", protyle.options.upload.token);
             }
@@ -586,7 +516,7 @@ const uploadPreparedFiles = (input: Extract<IAssetUploadInput, { kind: "files" }
                 try {
                     protyle.upload.isUploading = false;
                     hideMessage(validateResult.msgId);
-                    const detached = !document.body.contains(protyle.element);
+                    const detached = !document.body.contains(getUploadDocumentElement(protyle, options.document));
                     if (detached) {
                         // 网络较慢时，页签已经关闭
                         destroy(protyle);
@@ -675,12 +605,19 @@ const startPreparedAssetUpload = (prepared: Awaited<ReturnType<typeof prepareAss
             finishUpload(prepared.task, callbacks, {status: "canceled"});
             return;
         }
-        if (!document.body.contains(protyle.element)) {
+        if (!callbacks.isTargetAvailable()) {
             finishUpload(prepared.task, callbacks, {status: "canceled"});
             return;
         }
         if (prepared.task.input.kind === "files") {
-            uploadPreparedFiles(prepared.task.input, protyle, callbacks, prepared.task);
+            const files = prepared.task.input.files;
+            if (options.livePhotoPairs?.some(pair =>
+                !files.includes(pair.photo) || !files.includes(pair.video))) {
+                finishUpload(prepared.task, callbacks, {status: "failed", error: window.siyuan.languages.livePhotoPairUnavailable});
+                showMessage(window.siyuan.languages.livePhotoPairUnavailable);
+                return;
+            }
+            uploadPreparedFiles(prepared.task.input, protyle, callbacks, prepared.task, options);
         } else {
             uploadPreparedLocalFiles(prepared.task.input, protyle, true, callbacks, prepared.task, options);
         }
@@ -695,6 +632,10 @@ const startPreparedAssetUpload = (prepared: Awaited<ReturnType<typeof prepareAss
 const startAssetUpload = (input: IAssetUploadInput, protyle: IProtyle, options: IUploadInsertOptions,
                           callbacks: IAssetUploadCallbacks) => {
     try {
+        if (!callbacks.isTargetAvailable()) {
+            finishCallbacks(callbacks, false);
+            return;
+        }
         const prepared = prepareAssetUpload({
             plugins: [...(protyle.app?.plugins || [])],
             protyle,
@@ -767,18 +708,19 @@ export const uploadStandaloneAssetFiles = async (files: File[], options: {
 export const uploadLocalFiles = (files: ILocalFiles[], protyle: IProtyle, isUpload: boolean,
                                  options?: IUploadInsertOptions, successCB?: (response: IWebSocketData,
                                      result: Omit<IAssetUploadResult, "requestId" | "input">) => void,
-                                 completeCB?: (succeeded: boolean) => void) => {
+                                 completeCB?: IAssetUploadCallbacks["complete"]) => {
     if (isProtyleUploadDisabled(protyle)) {
         completeCB?.(false);
         return;
     }
     const uploadOptions = captureUploadInsertPosition(protyle, options);
     const callbacks: IAssetUploadCallbacks = {
+        isTargetAvailable: () => isUploadDocumentAvailable(protyle, uploadOptions.document),
         success(responseText, response, _input, result) {
             if (successCB) {
                 return successCB(response, result);
             } else {
-                return genUploadedLabel(responseText, protyle, uploadOptions);
+                return genUploadedLabel(responseText, protyle, uploadOptions, _input);
             }
         },
         complete: completeCB,
@@ -795,6 +737,7 @@ export const uploadLocalFiles = (files: ILocalFiles[], protyle: IProtyle, isUplo
     const assetFiles = input.files.filter(item => !linkedFiles.includes(item));
     if (linkedFiles.length > 0) {
         uploadPreparedLocalFiles({kind: "local-files", files: linkedFiles}, protyle, false, {
+            isTargetAvailable: callbacks.isTargetAvailable,
             success: callbacks.success,
             complete: assetFiles.length === 0 ? callbacks.complete : undefined,
             reset: assetFiles.length === 0 ? callbacks.reset : undefined,
@@ -862,13 +805,14 @@ export const uploadFiles = (protyle: IProtyle, files: FileList | DataTransferIte
     }
 
     const callbacks: IAssetUploadCallbacks = {
+        isTargetAvailable: () => isUploadDocumentAvailable(protyle, uploadOptions.document),
         success(responseText, response, input, result) {
             if (protyle.options.upload.success) {
                 return protyle.options.upload.success(protyle.wysiwyg.element, responseText);
             } else if (successCB) {
                 return successCB(responseText, result);
             } else {
-                return genUploadedLabel(responseText, protyle, uploadOptions);
+                return genUploadedLabel(responseText, protyle, uploadOptions, input);
             }
         },
         formatResponse: !protyle.options.upload.success && !successCB && protyle.options.upload.format ?

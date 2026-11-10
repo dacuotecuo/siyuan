@@ -2,16 +2,23 @@ import {escapeHtml} from "../../../util/escape";
 import {isMobile} from "../../../util/functions";
 import {callMobileAppShowKeyboard} from "../../../mobile/util/mobileAppUtil";
 import {hintRef, hintSlash} from "../../hint/extend";
+import {registerBuiltinSlashHint} from "../../hint/builtinSlash";
 import {mountProtyleLiteFragment} from "../../lite/fragmentEditor";
 import {getDefaultToolbar} from "../../toolbar/defaults";
 import {highlightRender} from "../highlightRender";
 import {mathRender} from "../mathRender";
 import {positionAVRichTextEditor} from "./richTextEditorPosition";
+import {getAVData} from "./virtualScroll";
+import {resolveAVSelectedCell} from "./selectionState";
+import {beginAVEditorSession} from "./editorSession";
+import {updateOutlineCurrentBlock} from "../../util/outlineBlock";
+import {focusBlock} from "../../util/selection";
 import {
     configureAVRichTextLute,
     createAVRichTextValue,
     getAVRichTextLute,
     getAVRichTextBlockDOM,
+    getAVRichTextUnsupportedPasteBlocks,
     getAVTextSource,
     sanitizeAVRichTextBlockDOM,
     serializeAVRichTextBlockDOM,
@@ -73,10 +80,10 @@ const hintAVRef = (key: string, protyle: IProtyle, source: THintSource) => {
     return hintRef(key, protyle, source);
 };
 
-const hintAVSlash = (key: string, protyle: IProtyle, source: THintSource) => {
+const hintAVSlash = registerBuiltinSlashHint((key: string, protyle: IProtyle, source: THintSource) => {
     prepareHint(protyle);
     return hintSlash(key, protyle, source).filter((item) => item.id && SAFE_SLASH_IDS.has(item.id));
-};
+});
 
 const setPanelPosition = (panelElement: HTMLElement, anchorElement: HTMLElement) => {
     if (isMobile()) {
@@ -97,15 +104,18 @@ export const openAVRichTextEditor = (options: AVRichTextEditorOptions) => {
     const mobile = isMobile();
     const maskElement = document.createElement("div");
     maskElement.className = "av__mask av__richtext-mask";
+    maskElement.dataset.avBlockId = options.nodeElement.dataset.nodeId;
     maskElement.style.zIndex = (++window.siyuan.zIndex).toString();
     maskElement.innerHTML = `<div class="av__richtext-editor" role="dialog">
-    <div class="av__richtext-host"></div>
     ${mobile ? `<div class="av__richtext-actions">
-        <button type="button" class="b3-button b3-button--cancel" data-type="cancel">${escapeHtml(window.siyuan.languages.cancel)}</button>
-        <button type="button" class="b3-button b3-button--text" data-type="save">${escapeHtml(window.siyuan.languages.save)}</button>
+        <button type="button" class="b3-button b3-button--text" data-type="confirm">${escapeHtml(window.siyuan.languages.confirm)}</button>
     </div>` : ""}
+    <div class="av__richtext-host"></div>
 </div>`;
     document.body.appendChild(maskElement);
+    // 独立记录详情使用未挂载的编辑器上下文，浮层生命周期跟随实际可见的详情面板。
+    const ownerElement = options.nodeElement.closest<HTMLElement>(".protyle-db-row") || options.protyle.element;
+    const endEditorSession = beginAVEditorSession(ownerElement);
     const panelElement = maskElement.firstElementChild as HTMLElement;
     const hostElement = panelElement.querySelector<HTMLElement>(".av__richtext-host");
     hostElement.dataset.protyleLiteRender = "safe";
@@ -136,6 +146,7 @@ export const openAVRichTextEditor = (options: AVRichTextEditorOptions) => {
             pluginExtensions: false,
             customBlockRender: false,
             sanitizeBlockDOM: sanitizeAVRichTextBlockDOM,
+            getUnsupportedPasteBlocks: getAVRichTextUnsupportedPasteBlocks,
             restoreLuteMarkdownSyntax: configureAVRichTextLute,
         },
         afterSetContent: (protyle, element) => {
@@ -144,25 +155,56 @@ export const openAVRichTextEditor = (options: AVRichTextEditorOptions) => {
             protyle.undo.clear();
         },
     });
+    // 临时块不在块树中，块引搜索和新建文档使用所属文档及真实载体块的上下文。
+    fragment.protyle.block.rootID = options.protyle.block.rootID;
+    fragment.protyle.block.parentID = options.nodeElement.dataset.nodeId;
+    fragment.protyle.path = options.protyle.path;
     setPanelPosition(panelElement, options.anchorElement);
     const initialMarkdown = serializeAVRichTextBlockDOM(fragment.getBlockHTML()).markdown;
 
     let finished = false;
     let cancelled = false;
-    const isOwnerConnected = () => options.protyle.element.isConnected && options.nodeElement.isConnected &&
-        options.anchorElement.isConnected;
-    const resize = () => setPanelPosition(panelElement, options.anchorElement);
+    const isOwnerConnected = () => {
+        if (!ownerElement.isConnected || !options.nodeElement.isConnected) {
+            return false;
+        }
+        if (options.anchorElement.isConnected) {
+            return true;
+        }
+        // 行重渲染后按稳定标识确认编辑目标，避免其他单元格的事务丢弃尚未保存的输入。
+        const data = getAVData(options.nodeElement);
+        return data && options.stableCells.length > 0 && options.stableCells.every(cell =>
+            resolveAVSelectedCell(data, cell)?.column.type === "text");
+    };
+    const resize = () => {
+        if (!options.anchorElement.isConnected) {
+            const cell = options.stableCells[0];
+            if (cell) {
+                const group = cell.groupID ? `.av__body[data-group-id="${cell.groupID}"] ` : "";
+                const anchor = options.nodeElement.querySelector<HTMLElement>(
+                    `${group}.av__row[data-id="${cell.rowID}"] [data-col-id="${cell.colID}"]`);
+                if (anchor) {
+                    options.anchorElement = anchor;
+                }
+            }
+        }
+        if (options.anchorElement.isConnected) {
+            setPanelPosition(panelElement, options.anchorElement);
+        }
+    };
     window.addEventListener("resize", resize);
     const panelResizeObserver = typeof ResizeObserver === "undefined" ? undefined : new ResizeObserver(resize);
     panelResizeObserver?.observe(panelElement);
     const ownerObserver = new MutationObserver(() => {
         if (!isOwnerConnected()) {
             void finish(false);
+        } else if (!options.anchorElement.isConnected) {
+            resize();
         }
     });
     ownerObserver.observe(document.body, {childList: true, subtree: true});
 
-    const finish = async (save: boolean) => {
+    const finish = async (save: boolean, restoreFocus = false) => {
         if (!save) {
             cancelled = true;
         }
@@ -191,7 +233,12 @@ export const openAVRichTextEditor = (options: AVRichTextEditorOptions) => {
             if (activeEditor?.finish === finish) {
                 activeEditor = undefined;
             }
+            endEditorSession();
             options.onDestroy?.();
+            if (restoreFocus && !mobile && !cancelled && !activeEditor && isOwnerConnected() &&
+                options.protyle.wysiwyg.element.contains(options.nodeElement)) {
+                focusBlock(options.nodeElement);
+            }
         }
     };
 
@@ -201,17 +248,18 @@ export const openAVRichTextEditor = (options: AVRichTextEditorOptions) => {
             void finish(true);
         }
     });
-    panelElement.querySelector('[data-type="cancel"]')?.addEventListener("click", () => void finish(false));
-    panelElement.querySelector('[data-type="save"]')?.addEventListener("click", () => void finish(true));
+    panelElement.querySelector('[data-type="confirm"]')?.addEventListener("click", () => void finish(true));
     panelElement.addEventListener("keydown", (event: KeyboardEvent) => {
         if (event.key === "Escape" && fragment.hintElement.classList.contains("fn__none") &&
             fragment.protyle.toolbar.element.classList.contains("fn__none") &&
             fragment.protyle.toolbar.subElement.classList.contains("fn__none")) {
             event.preventDefault();
             event.stopPropagation();
-            void finish(true);
+            void finish(true, true);
         }
     }, true);
     fragment.focus(true);
+    // 浮层编辑器自行接管焦点，编辑区收不到块级点击，需在此按所属数据库块同步大纲高亮
+    updateOutlineCurrentBlock(options.protyle, options.nodeElement);
     callMobileAppShowKeyboard();
 };

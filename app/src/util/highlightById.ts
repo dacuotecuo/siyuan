@@ -1,7 +1,11 @@
 import {revealTabsForTarget} from "../protyle/render/tabsRender";
+import {resolveVisibleListMindmapBlock} from "../protyle/render/listMindmap/render";
 import {hasClosestBlock, isInEmbedBlock} from "../protyle/util/hasClosest";
-import {focusByRange, getEditorRange} from "../protyle/util/selection";
+import {getEditorRange} from "../protyle/util/selection";
+import {focusByRange} from "../protyle/util/selectionOffsets";
 import {getStartScrollTop} from "./highlightPosition";
+import {isMobile} from "./functions";
+import {isUndoViewportPreserved} from "../protyle/undo/viewport";
 
 export const bgFade = (element: Element) => {
     element.classList.add("protyle-wysiwyg--hl");
@@ -31,6 +35,16 @@ export const highlightById = (protyle: IProtyle, id: string, position: ScrollLog
         }
     });
     if (nodeElement) {
+        const visible = resolveVisibleListMindmapBlock(nodeElement);
+        if (visible === null) {
+            return undefined;
+        }
+        if (visible) {
+            visible.reveal();
+            scrollCenter(protyle, visible.scrollElement, position);
+            bgFade(visible.carrier);
+            return visible.carrier;
+        }
         scrollCenter(protyle, nodeElement, position);
         bgFade(nodeElement);
         return nodeElement;// 仅配合前进后退使用
@@ -47,6 +61,38 @@ export const scrollCenter = (
     position: ScrollLogicalPosition = "nearest",
     behavior: ScrollBehavior = "auto"
 ) => {
+    if (isUndoViewportPreserved(protyle.wysiwyg.element)) {
+        return;
+    }
+    if (nodeElement instanceof HTMLElement) {
+        const visible = resolveVisibleListMindmapBlock(nodeElement);
+        if (visible === null) {
+            return;
+        }
+        if (visible) {
+            visible.reveal();
+            nodeElement = visible.scrollElement;
+        }
+    }
+    const cellEditor = protyle.wysiwyg.element.closest(".table__cell-editor");
+    const cellScroll = cellEditor?.parentElement.closest<HTMLElement>(".protyle-content");
+    if (cellScroll && position === "nearest") {
+        // 单元格片段没有独立视口，只在光标离开所属文档的可视区域时滚动。
+        const selection = getSelection();
+        const range = selection.rangeCount ? selection.getRangeAt(0) : undefined;
+        const target = nodeElement || (range && hasClosestBlock(range.startContainer));
+        const caretRect = !nodeElement && range?.getBoundingClientRect();
+        const rect = caretRect && caretRect.height > 0 ? caretRect : target && target.getBoundingClientRect();
+        if (rect) {
+            const viewport = cellScroll.getBoundingClientRect();
+            const offset = rect.top < viewport.top ? rect.top - viewport.top :
+                rect.bottom > viewport.bottom - 16 ? rect.bottom - viewport.bottom + 16 : 0;
+            if (offset) {
+                cellScroll.scroll({top: cellScroll.scrollTop + offset, behavior});
+            }
+        }
+        return;
+    }
     if (nodeElement) {
         revealTabsForTarget(nodeElement);
     }
@@ -59,7 +105,9 @@ export const scrollCenter = (
                 const hljsElement = blockElement.querySelector(".hljs");
                 const scrollLeft = hljsElement.scrollLeft;
                 const brElement = document.createElement("br");
-                range.insertNode(brElement);
+                // 滚动占位使用克隆 Range，避免扩展当前光标或改变文字选区。
+                const scrollRange = range.cloneRange();
+                scrollRange.insertNode(brElement);
                 brElement.scrollIntoView({block: position, behavior});
                 brElement.remove();
                 hljsElement.scrollLeft = scrollLeft;
@@ -86,11 +134,14 @@ export const scrollCenter = (
             range.insertNode(br2Element);
             const editorElement = protyle.contentElement;
             const cursorTop = br2Element.getBoundingClientRect().top - editorElement.getBoundingClientRect().top;
+            // 移动端额外预留一行，避免输入文字贴近键盘工具栏。
+            const extraLineHeight = isMobile() ? parseFloat(getComputedStyle(br2Element).lineHeight) ||
+                window.siyuan.config.editor.fontSize * 1.625 : 0;
             let scrollTop = 0;
             if (cursorTop < 0) {
                 scrollTop = editorElement.scrollTop + cursorTop;
             } else if (cursorTop > editorElement.clientHeight - 74) {   // 74 = 移动端底部 + 段落块高度
-                scrollTop = editorElement.scrollTop + (cursorTop + 74 - editorElement.clientHeight);
+                scrollTop = editorElement.scrollTop + (cursorTop + 74 + extraLineHeight - editorElement.clientHeight);
             }
             if (scrollTop !== 0) {
                 editorElement.scroll({top: scrollTop, behavior});

@@ -1,16 +1,6 @@
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU Affero General Public License for more details.
-//
-// You should have received a copy of the GNU Affero General Public License
-// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+// SiYuan - https://github.com/siyuan-note/siyuan
+// Copyright (c) 2020-present, b3log.org
+// SPDX-License-Identifier: AGPL-3.0-or-later
 
 package sql
 
@@ -29,11 +19,12 @@ func RenderAttributeViewTable(attrView *av.AttributeView, view *av.View, query s
 func renderAttributeViewTable(attrView *av.AttributeView, view *av.View, query string, depth *int,
 	cachedAttrViews map[string]*av.AttributeView, ignoreRows, deferTemplateValues bool,
 	renderContext *AttributeViewRenderContext) (ret *av.Table) {
-	if !ignoreRows && !deferTemplateValues {
+	if !ignoreRows && !deferTemplateValues && view.LayoutType != av.LayoutTypeCalendar {
 		viewable := attrView.RenderedViewables[view.ID]
 		if nil != viewable {
-			ret = viewable.(*av.Table)
-			return
+			if ret = av.TableFromViewable(viewable); nil != ret {
+				return
+			}
 		}
 	}
 
@@ -44,7 +35,7 @@ func renderAttributeViewTable(attrView *av.AttributeView, view *av.View, query s
 	}
 
 	// 组装列
-	for _, col := range view.Table.Columns {
+	for _, col := range view.GetTableLayout().Columns {
 		key, getErr := attrView.GetKey(col.ID)
 		if nil != getErr {
 			// 找不到字段则在视图中删除（元数据查询场景不写盘）
@@ -61,7 +52,7 @@ func renderAttributeViewTable(attrView *av.AttributeView, view *av.View, query s
 				Type:           key.Type,
 				Icon:           key.Icon,
 				Wrap:           col.Wrap,
-				Hidden:         col.Hidden,
+				Hidden:         col.Hidden && !((av.LayoutTypeList == view.LayoutType || av.LayoutTypeCalendar == view.LayoutType) && av.KeyTypeBlock == key.Type),
 				Desc:           key.Desc,
 				Calc:           col.Calc,
 				Options:        key.Options,

@@ -1,7 +1,9 @@
+import {getKeymapBindings, IShortcutKeymap, setKeymapBindings} from "./keymapBindings";
+
 const MODIFIER_KEYS = "⌃⌥⇧⌘";
 const NON_CHARACTER_KEYS = new Set(["←", "↑", "→", "↓", "⇥", "⌫", "⌦", "↩"]);
-const RESERVED_KEYMAPS = new Set(["⌘A", "⌘X", "⌘C", "⌘V", "⌘-", "⌘=", "⌘0", "⇧⌘V", "⌘/", "⇧↑", "⇧↓", "⇧→", "⇧←", "⇧⇥",
-    "⌃D", "⇧⌘→", "⇧⌘←", "⌘Home", "⌘End", "⇧↩", "↩", "PageUp", "PageDown", "⌫", "⌦", "Escape"]);
+const RESERVED_KEYMAPS = new Set(["⌘A", "⌘X", "⌘C", "⌘V", "⌘-", "⌘=", "⌘0", "⇧⌘V", "⇧↑", "⇧↓", "⇧→", "⇧←", "⇧⇥",
+    "⌃D", "⇧⌘→", "⇧⌘←", "⇧↩", "↩", "PageUp", "PageDown", "⌫", "⌦", "Escape"]);
 
 export const isReservedKeymap = (hotkey: string, keyPath: string[]) =>
     RESERVED_KEYMAPS.has(hotkey) && !(hotkey === "↩" && keyPath[0] === "general" && keyPath[1] === "agentSend");
@@ -45,6 +47,18 @@ export const clearDisallowedKeymapItems = (
 ) => {
     let changed = false;
     Object.values(keymap || {}).forEach((item) => {
+        if (!item) {
+            return;
+        }
+        const multi = item as IShortcutKeymap;
+        if (multi.bindings?.version === 1) {
+            const keys = getKeymapBindings(multi);
+            const allowed = keys.filter(key => !isDisallowedTextInputHotkey(key));
+            if (allowed.length !== keys.length || multi.custom !== (allowed[0] || "")) {
+                setKeymapBindings(multi, allowed);
+                changed = true;
+            }
+        }
         if (typeof item.custom === "string") {
             const custom = clearDisallowedTextInputHotkey(item.custom);
             if (custom !== item.custom) {

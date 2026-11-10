@@ -48,6 +48,7 @@ export type AgentHistoryReference = { id: string; title: string };
 
 export type AgentHistoryUserEntry = {
     content: string;
+    timestamp?: number;
     blockHTML?: string;
     references?: AgentHistoryReference[];
 };
@@ -60,6 +61,7 @@ export type AgentHistoryEditData = {
 
 export const applyAgentUserEdit = (entry: AgentHistoryUserEntry, data: AgentHistoryEditData) => {
     entry.content = data.text;
+    entry.timestamp = Date.now();
     entry.blockHTML = data.blockHTML;
     entry.references = data.references.length > 0 ? data.references.slice() : undefined;
 };
@@ -89,6 +91,21 @@ export const isAgentAssistantContentFinalInTurn = (
         }
     }
     return true;
+};
+
+export const getAgentTurnContent = (entries: AgentHistoryEntry[], userEntryID: string): string => {
+    const userIndex = entries.findIndex(entry => entry.type === "user" && entry.id === userEntryID);
+    if (userIndex < 0) {
+        return "";
+    }
+    const contents: string[] = [];
+    for (let i = userIndex + 1; i < entries.length && entries[i].type !== "user"; i++) {
+        const entry = entries[i];
+        if (entry.type === "assistant" && entry.content?.trim()) {
+            contents.push(entry.content);
+        }
+    }
+    return contents.join("\n\n");
 };
 
 export const hasAgentExecutedToolsAfter = (entries: AgentHistoryEntry[], entryIndex: number): boolean => {

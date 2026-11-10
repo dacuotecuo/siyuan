@@ -1,3 +1,7 @@
+// SiYuan - https://github.com/siyuan-note/siyuan
+// Copyright (c) 2020-present, b3log.org
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 package model
 
 import (
@@ -32,6 +36,10 @@ type attributeViewRowOrderChange struct {
 	Expected      *attributeViewRowOrder `json:"expected"`
 	ValidateGroup *string                `json:"validateGroup,omitempty"`
 }
+
+// AttributeViewRowOrder 和 AttributeViewRowOrderChange 用于传输层逐字段转换行排序预览。
+type AttributeViewRowOrder = attributeViewRowOrder
+type AttributeViewRowOrderChange = attributeViewRowOrderChange
 
 type AttributeViewRowSortPreview struct {
 	Conflict       bool         `json:"conflict"`

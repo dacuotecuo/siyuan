@@ -1,10 +1,6 @@
-// SiYuan - From thought to insight, with agents
+// SiYuan - https://github.com/siyuan-note/siyuan
 // Copyright (c) 2020-present, b3log.org
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
+// SPDX-License-Identifier: AGPL-3.0-or-later
 
 package agent
 
@@ -63,9 +59,55 @@ func TestResponsesContextPreservesEncryptedReasoningAndToolOutput(t *testing.T) 
 		t.Fatalf("Responses output was duplicated as a reconstructed message: %s", payload)
 	}
 
-	restored := entriesToAgentMessages(agentMessagesToEntries(messages))
-	if len(restored) != 1 || len(restored[0].ResponseOutput) != 2 || restored[0].ResponseOutputTokens != 42 {
-		t.Fatalf("Responses output was lost during entry persistence: %#v", restored)
+}
+
+func TestResponsesContextProjectsMessageWithIncompatibleID(t *testing.T) {
+	const incompatibleID = "773d328c-6ddd-432e-a9d9-15395fbf67b2"
+	message := AgentMessage{
+		Role:    "assistant",
+		Content: "fallback",
+		ResponseOutput: []json.RawMessage{
+			json.RawMessage(`{"id":"rs_1","type":"reasoning","encrypted_content":"secret"}`),
+			json.RawMessage(`{"id":"` + incompatibleID + `","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"answer"}]}`),
+			json.RawMessage(`{"id":"msg_2","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"valid"}]}`),
+		},
+	}
+	input := checkpointMessagesToOpenAIResponseInput([]AgentMessage{message}, "English", nil, nil, false)
+	if len(input) != 3 {
+		t.Fatalf("unexpected Responses input count: %d", len(input))
+	}
+	projected, ok := input[1].(openai.ResponseInputMessage)
+	if !ok || projected.Role != openai.ChatMessageRoleAssistant || projected.Content != "answer" {
+		t.Fatalf("incompatible output message was not projected: %#v", input[1])
+	}
+	data, err := json.Marshal(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), incompatibleID) || !strings.Contains(string(data), `"encrypted_content":"secret"`) ||
+		!strings.Contains(string(data), `"id":"msg_2"`) {
+		t.Fatalf("Responses context lost native output or retained an incompatible ID: %s", data)
+	}
+	if !strings.Contains(string(message.ResponseOutput[1]), incompatibleID) {
+		t.Fatal("stored Responses output was modified")
+	}
+}
+
+func TestResponsesCompactionProjectsMessageWithIncompatibleID(t *testing.T) {
+	compaction := &runtimeCompaction{
+		Protocol: "openai-responses",
+		Summary:  "fallback",
+		ResponseOutput: []json.RawMessage{
+			json.RawMessage(`{"id":"773d328c-6ddd-432e-a9d9-15395fbf67b2","type":"message","role":"assistant","content":[{"type":"output_text","text":"summary"}]}`),
+		},
+	}
+	input := checkpointMessagesToOpenAIResponseInput(nil, "English", nil, compaction, false)
+	if len(input) != 1 {
+		t.Fatalf("unexpected Responses compaction input count: %d", len(input))
+	}
+	projected, ok := input[0].(openai.ResponseInputMessage)
+	if !ok || projected.Content != "summary" {
+		t.Fatalf("incompatible compaction message was not projected: %#v", input[0])
 	}
 }
 
@@ -73,10 +115,10 @@ func TestAgentChatResponsesToolContextSurvivesCommit(t *testing.T) {
 	useTestDataDir(t)
 	originalConf := kernelModel.Conf
 	kernelModel.Conf = kernelModel.NewAppConf()
-	kernelModel.Conf.AI = kernelConf.NewAI()
-	kernelModel.Conf.AI.MCP = nil
-	kernelModel.Conf.AI.Agent.MaxToolCallRounds = 2
-	kernelModel.Conf.Variables = kernelConf.NewVariables()
+	kernelModel.Conf.AI.Store(kernelConf.NewAI())
+	kernelModel.Conf.AI.Load().MCP = nil
+	kernelModel.Conf.AI.Load().Agent.MaxToolCallRounds = 2
+	kernelModel.Conf.Variables.Store(kernelConf.NewVariables())
 	t.Cleanup(func() { kernelModel.Conf = originalConf })
 
 	const (
@@ -112,7 +154,7 @@ func TestAgentChatResponsesToolContextSurvivesCommit(t *testing.T) {
 		"updatedAt": int64(1),
 		"entries":   []any{map[string]any{"id": "user-1", "type": "user", "content": "use the tool"}},
 	}
-	if revision, err := SaveSession(marshalSession(t, session)); err != nil || revision != 1 {
+	if revision, _, err := SaveSessionState(marshalSession(t, session)); err != nil || revision != 1 {
 		t.Fatalf("save initial session failed: revision=%d, err=%v", revision, err)
 	}
 
@@ -263,7 +305,7 @@ func TestAgentChatResponsesToolContextSurvivesCommit(t *testing.T) {
 		"id": "user-2", "type": "user", "content": "continue",
 	})
 	canonical["expectedRevision"] = int64(2)
-	if revision, err = SaveSession(marshalSession(t, canonical)); err != nil || revision != 3 {
+	if revision, _, err = SaveSessionState(marshalSession(t, canonical)); err != nil || revision != 3 {
 		t.Fatalf("save Responses follow-up failed: revision=%d, err=%v", revision, err)
 	}
 
@@ -314,10 +356,10 @@ func TestAgentChatRestoresCompleteAssistantContextAfterCommit(t *testing.T) {
 	useTestDataDir(t)
 	originalConf := kernelModel.Conf
 	kernelModel.Conf = kernelModel.NewAppConf()
-	kernelModel.Conf.AI = kernelConf.NewAI()
-	kernelModel.Conf.AI.MCP = nil
-	kernelModel.Conf.AI.Agent.MaxToolCallRounds = 2
-	kernelModel.Conf.Variables = kernelConf.NewVariables()
+	kernelModel.Conf.AI.Store(kernelConf.NewAI())
+	kernelModel.Conf.AI.Load().MCP = nil
+	kernelModel.Conf.AI.Load().Agent.MaxToolCallRounds = 2
+	kernelModel.Conf.Variables.Store(kernelConf.NewVariables())
 	t.Cleanup(func() { kernelModel.Conf = originalConf })
 
 	const (
@@ -359,7 +401,7 @@ func TestAgentChatRestoresCompleteAssistantContextAfterCommit(t *testing.T) {
 		"updatedAt": int64(1),
 		"entries":   []any{map[string]any{"id": "user-1", "type": "user", "content": "use the tool"}},
 	}
-	if revision, err := SaveSession(marshalSession(t, session)); err != nil || revision != 1 {
+	if revision, _, err := SaveSessionState(marshalSession(t, session)); err != nil || revision != 1 {
 		t.Fatalf("save initial session failed: revision=%d, err=%v", revision, err)
 	}
 
@@ -447,7 +489,7 @@ func TestAgentChatRestoresCompleteAssistantContextAfterCommit(t *testing.T) {
 		"id": "user-2", "type": "user", "content": "continue",
 	})
 	canonical["expectedRevision"] = int64(2)
-	revision, err = SaveSession(marshalSession(t, canonical))
+	revision, _, err = SaveSessionState(marshalSession(t, canonical))
 	if err != nil || revision != 3 {
 		t.Fatalf("save follow-up user message failed: revision=%d, err=%v", revision, err)
 	}
@@ -476,11 +518,11 @@ func TestAgentChatRestoresCompleteAssistantContextAfterCommit(t *testing.T) {
 	}
 }
 
-func newTestGeminiOpenAIClient(serverURL string) *openai.Client {
+func newTestGeminiOpenAIClient(serverURL string) *util.AIClient {
 	config := openai.DefaultConfig("test-key")
 	config.BaseURL = serverURL + "/v1"
 	config.HTTPClient = util.WrapGeminiThoughtSignatureTransport(http.DefaultClient)
-	return openai.NewClientWithConfig(config)
+	return &util.AIClient{Client: openai.NewClientWithConfig(config)}
 }
 
 func assertGeminiThoughtSignatureInRequest(t *testing.T, body []byte, callID, want string) {

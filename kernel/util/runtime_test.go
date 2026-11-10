@@ -1,25 +1,56 @@
-// SiYuan - From thought to insight, with agents
+// SiYuan - https://github.com/siyuan-note/siyuan
 // Copyright (c) 2020-present, b3log.org
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU Affero General Public License for more details.
-//
-// You should have received a copy of the GNU Affero General Public License
-// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+// SPDX-License-Identifier: AGPL-3.0-or-later
 
 package util
 
 import (
 	"os"
+	"sync"
 	"testing"
+	"testing/synctest"
+	"time"
+
+	"github.com/olahol/melody"
 )
+
+func TestUILoadedWaitsForMainSession(t *testing.T) {
+	previous := IsUILoaded.Swap(false)
+	t.Cleanup(func() { IsUILoaded.Store(previous) })
+	synctest.Test(t, func(t *testing.T) {
+		defer IsUILoaded.Store(true)
+		go HookUILoaded()
+		done := make(chan struct{})
+		go func() {
+			WaitForUILoaded()
+			close(done)
+		}()
+		synctest.Wait()
+		select {
+		case <-done:
+			t.Fatal("UI wait completed without a main session")
+		default:
+		}
+
+		const appID = "test-ui-loaded"
+		appSessions := &sync.Map{}
+		session := &melody.Session{}
+		session.Set("type", "main")
+		appSessions.Store("main", session)
+		sessions.Store(appID, appSessions)
+		defer sessions.Delete(appID)
+		time.Sleep(400 * time.Millisecond)
+		synctest.Wait()
+		select {
+		case <-done:
+		default:
+			t.Fatal("UI wait did not complete after the main session connected")
+		}
+		if !IsUILoaded.Load() {
+			t.Fatal("main session did not mark the UI as loaded")
+		}
+	})
+}
 
 func TestSetNetworkProxy(t *testing.T) {
 	for _, name := range networkProxyEnvironmentNames {

@@ -1,18 +1,6 @@
-// SiYuan - From thought to insight, with agents
+// SiYuan - https://github.com/siyuan-note/siyuan
 // Copyright (c) 2020-present, b3log.org
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU Affero General Public License for more details.
-//
-// You should have received a copy of the GNU Affero General Public License
-// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+// SPDX-License-Identifier: AGPL-3.0-or-later
 
 package mobile
 
@@ -29,7 +17,6 @@ import (
 
 	"github.com/88250/gulu"
 	"github.com/88250/lute/ast"
-	"github.com/siyuan-note/filelock"
 	"github.com/siyuan-note/httpclient"
 	"github.com/siyuan-note/logging"
 	"github.com/siyuan-note/siyuan/kernel/cache"
@@ -271,6 +258,21 @@ func StartKernelFast(container, appDir, workspaceBaseDir, localIPs string) {
 	go server.Serve(true, model.Conf.CookieKey)
 }
 
+func finishMobileStartup(container string, bootSync, finishLocalBoot, waitForUI func()) {
+	if util.ContainerIOS != container {
+		bootSync()
+		finishLocalBoot()
+		return
+	}
+
+	finishLocalBoot()
+	go func() {
+		// 等待前端连接后再同步，确保同步状态能送达已打开的本地界面。
+		waitForUI()
+		bootSync()
+	}()
+}
+
 func StartKernel(container, appDir, workspaceBaseDir, timezoneID, localIPs, lang, osVer string) {
 	model.InitJwtKey()
 	SetTimezone(container, appDir, timezoneID)
@@ -286,23 +288,24 @@ func StartKernel(container, appDir, workspaceBaseDir, timezoneID, localIPs, lang
 		sql.InitDatabase(false)
 		sql.InitHistoryDatabase(false)
 		sql.InitAssetContentDatabase(false)
-		sql.SetCaseSensitive(model.Conf.Search.CaseSensitive)
-		sql.SetIndexAssetPath(model.Conf.Search.IndexAssetPath)
+		// 数据库打开后重新应用搜索配置，使 PRAGMA case_sensitive_like 对新连接生效
+		model.ApplySearchRuntime()
 
-		model.BootSyncData()
-		model.CleanupEmptyPluginStorageDirs()
-		model.InitBoxes()
-		model.LoadFlashcards()
-		util.LoadAssetsTexts()
+		finishMobileStartup(util.Container, model.BootSyncData, func() {
+			model.CleanupEmptyPluginStorageDirs()
+			model.InitBoxes()
+			model.LoadFlashcards()
+			util.LoadAssetsTexts()
 
-		util.SetBooted()
-		util.PushClearAllMsg()
+			util.SetBooted()
+			util.PushClearAllMsg()
 
-		job.StartCron()
-		go model.AutoGenerateFileHistory()
-		go cache.LoadAssets()
-		go plugin.InitManager()
-		go model.StartEmbeddingIndexer()
+			job.StartCron()
+			go model.AutoGenerateFileHistory()
+			go cache.LoadAssets()
+			go plugin.InitManager()
+			go model.StartEmbeddingIndexer()
+		}, util.WaitForUILoaded)
 	}()
 }
 
@@ -316,10 +319,6 @@ func ShowMsg(msg string, timeout int) {
 
 func IsHttpServing() bool {
 	return util.HttpServing
-}
-
-func SetHttpServerPort(port int) {
-	filelock.AndroidServerPort = port
 }
 
 func GetCurrentWorkspacePath() string {

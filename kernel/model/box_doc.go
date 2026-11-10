@@ -1,18 +1,6 @@
-// SiYuan - From thought to insight, with agents
+// SiYuan - https://github.com/siyuan-note/siyuan
 // Copyright (c) 2020-present, b3log.org
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU Affero General Public License for more details.
-//
-// You should have received a copy of the GNU Affero General Public License
-// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+// SPDX-License-Identifier: AGPL-3.0-or-later
 
 package model
 
@@ -92,7 +80,9 @@ func writeBoxDocID(boxID string) error {
 }
 
 func IsBoxDocEnabled() bool {
-	return nil != Conf && nil != Conf.FileTree && nil != Conf.FileTree.BoxDocEnabled && *Conf.FileTree.BoxDocEnabled
+	confFileTreeSnapshot := Conf.LoadFileTree()
+
+	return nil != Conf && nil != confFileTreeSnapshot && confFileTreeSnapshot.BoxDocEnabled
 }
 
 func hiddenBoxDocRootIDs() (ret []string) {
@@ -247,7 +237,7 @@ func reconcileBoxDoc(box *Box, boxDocID string) error {
 	if "" == title {
 		title = Conf.Language(16)
 	}
-	titleChanged := tree.Root.IALAttr("title") != title
+	titleChanged := treenode.ReadDocumentTitle(tree.Root).Text != title
 	changed := titleChanged || tree.HPath != "/"+title || tree.Root.IALAttr(DocHiddenAttr) != "true" ||
 		tree.Root.IALAttr("icon") != boxConf.Icon
 	if !changed {
@@ -274,43 +264,24 @@ func reconcileBoxDoc(box *Box, boxDocID string) error {
 
 // BoxDocSubFileCount 返回笔记本顶层文档的可见下级文档数。
 func BoxDocSubFileCount(boxID string) int {
-	return boxDocSubFileCount(boxID, nil)
+	return boxDocSubFileCount(boxID, "/", nil)
 }
 
 // BoxDocSubFileCountForPublish 返回发布访问控制下笔记本顶层文档的可见下级文档数。
 func BoxDocSubFileCountForPublish(boxID string, publishAccess PublishAccess) int {
-	publishInvisible := GetInvisiblePublishAccess(publishAccess)
-	publishDisable := GetDisablePublishAccess(publishAccess)
-	return boxDocSubFileCount(boxID, func(p string) bool {
-		return CheckPathAccessableByPublishIgnore(boxID, p, publishInvisible) &&
-			CheckPathAccessableByPublishIgnore(boxID, p, publishDisable)
-	})
+	return boxDocSubFileCount(boxID, "/", PublishVisibleDocPathFilter(boxID, publishAccess))
 }
 
-func boxDocSubFileCount(boxID string, include func(string) bool) int {
-	entries, err := os.ReadDir(filepath.Join(util.DataDir, boxID))
-	if err != nil {
-		return 0
-	}
-	ret := 0
-	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".sy") {
-			continue
-		}
-		id := strings.TrimSuffix(entry.Name(), ".sy")
-		if id == boxID || !ast.IsNodeIDPattern(id) {
-			continue
-		}
-		p := "/" + entry.Name()
-		if nil != include && !include(p) {
-			continue
-		}
-		ial := filesys.DocIAL(filepath.Join(util.DataDir, boxID, entry.Name()))
-		if "true" == ial[DocHiddenAttr] {
-			continue
-		}
-		ret++
-	}
+// BoxDocSubFileCountForPublishAt 返回发布访问控制下指定文档的可见直接子文档数，docPath 为该文档的 .sy 路径。
+func BoxDocSubFileCountForPublishAt(boxID, docPath string, publishAccess PublishAccess) int {
+	return boxDocSubFileCount(boxID, strings.TrimSuffix(docPath, ".sy"), PublishVisibleDocPathFilter(boxID, publishAccess))
+}
+
+func boxDocSubFileCount(boxID, parentPath string, include func(docPath string) bool) int {
+	ret, _ := visibleDocCount(boxID, parentPath, func(p string) map[string]string {
+		ial, _ := filesys.DocIAL(filepath.Join(util.DataDir, boxID, p))
+		return ial
+	}, include)
 	return ret
 }
 
@@ -330,8 +301,8 @@ func normalizeBoxDocPath(boxID, p string) string {
 		return p
 	}
 	prefix := "/" + box.ID + "/"
-	if strings.HasPrefix(p, prefix) {
-		return "/" + strings.TrimPrefix(p, prefix)
+	if after, ok := strings.CutPrefix(p, prefix); ok {
+		return "/" + after
 	}
 	return p
 }

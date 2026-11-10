@@ -1,18 +1,6 @@
-// SiYuan - From thought to insight, with agents
+// SiYuan - https://github.com/siyuan-note/siyuan
 // Copyright (c) 2020-present, b3log.org
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU Affero General Public License for more details.
-//
-// You should have received a copy of the GNU Affero General Public License
-// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+// SPDX-License-Identifier: AGPL-3.0-or-later
 
 package model
 
@@ -86,7 +74,7 @@ type RiffCard struct {
 
 func (block *Block) IsContainerBlock() bool {
 	switch block.Type {
-	case "NodeDocument", "NodeBlockquote", "NodeList", "NodeListItem", "NodeSuperBlock", "NodeCallout":
+	case "NodeDocument", "NodeBlockquote", "NodeList", "NodeListItem", "NodeSuperBlock", "NodeCallout", "NodeTabs", "NodeTabItem", "NodeMindmap", "NodeMindmapItem":
 		return true
 	}
 	return false
@@ -97,19 +85,20 @@ func (block *Block) IsDoc() bool {
 }
 
 type Path struct {
-	ID       string   `json:"id"`                 // 块 ID
-	Box      string   `json:"box"`                // 块 Box
-	Name     string   `json:"name"`               // 当前路径
-	Number   string   `json:"number,omitempty"`   // 标题编号
-	HPath    string   `json:"hPath"`              // 人类可读路径
-	Type     string   `json:"type"`               // "path"
-	NodeType string   `json:"nodeType"`           // 节点类型
-	SubType  string   `json:"subType"`            // 节点子类型
-	Blocks   []*Block `json:"blocks,omitempty"`   // 子块节点
-	Children []*Path  `json:"children,omitempty"` // 子路径节点
-	Depth    int      `json:"depth"`              // 层级深度
-	Count    int      `json:"count"`              // 子块计数
-	Folded   bool     `json:"folded"`             // 是否折叠
+	ID         string   `json:"id"`                   // 块 ID
+	Box        string   `json:"box"`                  // 块 Box
+	Name       string   `json:"name"`                 // 当前路径
+	NameIsHTML bool     `json:"nameIsHTML,omitempty"` // Name 是否为渲染后的 HTML，前端据此决定是否转义
+	Number     string   `json:"number,omitempty"`     // 标题编号
+	HPath      string   `json:"hPath"`                // 人类可读路径
+	Type       string   `json:"type"`                 // "path"
+	NodeType   string   `json:"nodeType"`             // 节点类型
+	SubType    string   `json:"subType"`              // 节点子类型
+	Blocks     []*Block `json:"blocks,omitempty"`     // 子块节点
+	Children   []*Path  `json:"children,omitempty"`   // 子路径节点
+	Depth      int      `json:"depth"`                // 层级深度
+	Count      int      `json:"count"`                // 子块计数
+	Folded     bool     `json:"folded"`               // 是否折叠
 
 	Updated string `json:"updated"` // 更新时间
 	Created string `json:"created"` // 创建时间
@@ -131,18 +120,12 @@ func newBlockRefCheckGroup() *blockRefCheckGroup {
 	}
 }
 
-// CheckBlockRef 检查将被删除的块是否被引用或绑定到仍存在的数据库。
-func CheckBlockRef(ids []string) bool {
-	ret, _ := CheckBlockRefInBox(ids, nil, ids, "")
-	return ret
-}
-
 // CheckBlockRefInBox 检查受影响块的引用，并检查实际删除块的数据库绑定。
 func CheckBlockRefInBox(ids, exactIDs, deletedIDs []string, boxID string) (ret bool, err error) {
 	sql.FlushQueue()
-	ids = filterNonEmptyBlockRefCheckIDs(ids)
-	exactIDs = filterNonEmptyBlockRefCheckIDs(exactIDs)
-	deletedIDs = filterNonEmptyBlockRefCheckIDs(deletedIDs)
+	ids = sql.FilterNonEmptyRefCheckIDs(ids)
+	exactIDs = sql.FilterNonEmptyRefCheckIDs(exactIDs)
+	deletedIDs = sql.FilterNonEmptyRefCheckIDs(deletedIDs)
 	if 1 > len(ids) {
 		return
 	}
@@ -247,22 +230,6 @@ func expandBlockRefCheckDescendants(group *blockRefCheckGroup, selected, deleted
 			group.deletedBlockIDs[bt.ID] = struct{}{}
 		}
 	}
-}
-
-func filterNonEmptyBlockRefCheckIDs(ids []string) (ret []string) {
-	seen := map[string]struct{}{}
-	for _, id := range ids {
-		id = strings.TrimSpace(id)
-		if "" == id {
-			continue
-		}
-		if _, exists := seen[id]; exists {
-			continue
-		}
-		seen[id] = struct{}{}
-		ret = append(ret, id)
-	}
-	return
 }
 
 // CheckDocsRef 检查文档删除时会递归移除的全部文档。
@@ -386,35 +353,52 @@ func hasSurvivingAttributeViewBlock(group *blockRefCheckGroup, boundAVIDs, avBlo
 }
 
 type BlockTreeInfo struct {
-	ID           string `json:"id"`
-	Type         string `json:"type"`
-	ParentID     string `json:"parentID"`
-	ParentType   string `json:"parentType"`
-	PreviousID   string `json:"previousID"`
-	PreviousType string `json:"previousType"`
-	NextID       string `json:"nextID"`
-	NextType     string `json:"nextType"`
-}
-
-func GetBlockTreeInfos(ids []string) (ret map[string]*BlockTreeInfo) {
-	return GetBlockTreeInfosInBox(ids, "")
+	HeadingChildren *bool  `json:"headingChildren,omitempty"`
+	ID              string `json:"id"`
+	Type            string `json:"type"`
+	ParentID        string `json:"parentID"`
+	ParentType      string `json:"parentType"`
+	PreviousID      string `json:"previousID"`
+	PreviousType    string `json:"previousType"`
+	NextID          string `json:"nextID"`
+	NextType        string `json:"nextType"`
 }
 
 // GetBlockTreeInfosInBox 获取指定笔记本内的块树信息。空 box 仅查询普通全局库。
 func GetBlockTreeInfosInBox(ids []string, boxID string) (ret map[string]*BlockTreeInfo) {
 	ret = map[string]*BlockTreeInfo{}
+	// 同一批查询中的文档只加载和遍历一次，避免多个折叠标题重复读取整棵树。
+	nodesByRoot := map[string]map[string]*ast.Node{}
 	for _, id := range ids {
-		tree := loadTreeForBlockDOM(id, boxID)
-		if nil == tree {
-			continue
+		var nodes map[string]*ast.Node
+		if bt := treenode.GetBlockTreeInBox(id, boxID); nil != bt {
+			nodes = nodesByRoot[bt.RootID]
 		}
-		node := treenode.GetNodeInTree(tree, id)
+		if nil == nodes {
+			tree := loadTreeForBlockDOM(id, boxID)
+			if nil == tree {
+				continue
+			}
+			nodes = map[string]*ast.Node{}
+			ast.Walk(tree.Root, func(node *ast.Node, entering bool) ast.WalkStatus {
+				if entering && "" != node.ID {
+					nodes[node.ID] = node
+				}
+				return ast.WalkContinue
+			})
+			nodesByRoot[tree.Root.ID] = nodes
+		}
+		node := nodes[id]
 		if nil == node {
 			ret[id] = &BlockTreeInfo{ID: id}
 			continue
 		}
 
 		bti := &BlockTreeInfo{ID: id, Type: node.Type.String()}
+		if ast.NodeHeading == node.Type {
+			hasChildren := treenode.HasHeadingChildren(node)
+			bti.HeadingChildren = &hasChildren
+		}
 		ret[id] = bti
 		parent := treenode.ParentBlock(node)
 		if nil != parent {
@@ -433,10 +417,6 @@ func GetBlockTreeInfosInBox(ids []string, boxID string) (ret map[string]*BlockTr
 		}
 	}
 	return
-}
-
-func GetBlockSiblingID(id string) (parent, previous, next string) {
-	return GetBlockSiblingIDInBox(id, "")
 }
 
 // GetBlockSiblingIDInBox 获取指定笔记本内块的相邻关系。空 box 不回退搜索加密笔记本。
@@ -548,10 +528,6 @@ func getPreNext(parent *ast.Node) (previous, next string) {
 		return
 	}
 	return
-}
-
-func GetBlockRelevantIDs(id string) (parentID, previousID, nextID string, err error) {
-	return GetBlockRelevantIDsInBox(id, "")
 }
 
 // GetBlockRelevantIDsInBox 获取指定笔记本内块的父级及相邻块 ID。空 box 不回退搜索加密笔记本。
@@ -716,7 +692,7 @@ func TransferBlockRef(fromID, toID string, refIDs []string) (err error) {
 	return
 }
 
-func SwapBlockRef(refID, defID string, includeChildren bool) (err error) {
+func SwapBlockRef(refID, defID string, includeChildren, originalToEmbed bool) (err error) {
 	refTree, err := LoadTreeByBlockID(refID)
 	if err != nil {
 		return
@@ -724,9 +700,6 @@ func SwapBlockRef(refID, defID string, includeChildren bool) (err error) {
 	refNode := treenode.GetNodeInTree(refTree, refID)
 	if nil == refNode {
 		return
-	}
-	if ast.NodeListItem == refNode.Parent.Type {
-		refNode = refNode.Parent
 	}
 	defTree, err := LoadTreeByBlockID(defID)
 	if err != nil {
@@ -741,6 +714,30 @@ func SwapBlockRef(refID, defID string, includeChildren bool) (err error) {
 	}
 	if nil == defNode {
 		return
+	}
+	if err = validateBlockSwap(refNode, defNode, includeChildren); err != nil {
+		return
+	}
+	swapBlockRefNodes(refNode, defNode, defID, includeChildren, originalToEmbed)
+
+	if err = indexWriteTreeUpsertQueue(refTree); err != nil {
+		return
+	}
+	if !sameTree {
+		if err = indexWriteTreeUpsertQueue(defTree); err != nil {
+			return
+		}
+	}
+	FlushTxQueue()
+	util.ReloadUI()
+	return
+}
+
+func swapBlockRefNodes(refNode, defNode *ast.Node, defID string, includeChildren, originalToEmbed bool) {
+	originalRefNode := refNode
+	isHeading := ast.NodeHeading == defNode.Type
+	if ast.NodeListItem == refNode.Parent.Type {
+		refNode = refNode.Parent
 	}
 	var defNodeChildren []*ast.Node
 	if ast.NodeListItem == defNode.Parent.Type {
@@ -818,18 +815,19 @@ func SwapBlockRef(refID, defID string, includeChildren bool) (err error) {
 		}
 	}
 	refPivot.Unlink()
-
-	if err = indexWriteTreeUpsertQueue(refTree); err != nil {
-		return
-	}
-	if !sameTree {
-		if err = indexWriteTreeUpsertQueue(defTree); err != nil {
-			return
+	if originalToEmbed {
+		embed := &ast.Node{ID: originalRefNode.ID, Type: ast.NodeBlockQueryEmbed, KramdownIAL: originalRefNode.KramdownIAL}
+		if isHeading {
+			headingMode := "1"
+			if includeChildren {
+				headingMode = "0"
+			}
+			embed.SetIALAttr(embedHeadingModeAttr, headingMode)
 		}
+		embed.AppendChild(&ast.Node{Type: ast.NodeBlockQueryEmbedScript, Tokens: []byte("select * from blocks where id='" + defID + "'")})
+		originalRefNode.InsertBefore(embed)
+		originalRefNode.Unlink()
 	}
-	FlushTxQueue()
-	util.ReloadUI()
-	return
 }
 
 func GetHeadingDeleteTransaction(id string) (transaction *Transaction, err error) {
@@ -1024,10 +1022,6 @@ func prepareHeadingChildrenDOMNodes(heading *ast.Node, children []*ast.Node, rem
 	return
 }
 
-func GetHeadingLevelTransaction(id string, level int) (transaction *Transaction, err error) {
-	return GetHeadingLevelBatchTransaction([]string{id}, level)
-}
-
 func GetHeadingLevelBatchTransaction(ids []string, level int) (transaction *Transaction, err error) {
 	if len(ids) == 0 || level < 1 || 6 < level {
 		return
@@ -1172,10 +1166,6 @@ func GetBlockDOMInBox(id, boxID string) (ret string) {
 	return
 }
 
-func GetBlockDOMs(ids []string) (ret map[string]string) {
-	return GetBlockDOMsInBox(ids, "")
-}
-
 // GetBlockDOMsInBox 渲染指定笔记本内的块 DOM。禁止在 boxID 未指定时遍历加密笔记本。
 func GetBlockDOMsInBox(ids []string, boxID string) (ret map[string]string) {
 	ret = map[string]string{}
@@ -1210,15 +1200,6 @@ func GetBlockDOMsInBox(ids []string, boxID string) (ret map[string]string) {
 	return
 }
 
-func GetBlockDOMWithEmbed(id string) (ret string) {
-	return GetBlockDOMWithEmbedInBox(id, "")
-}
-
-// GetBlockDOMWithEmbedInBox 渲染指定笔记本内包含嵌入块的 DOM。
-func GetBlockDOMWithEmbedInBox(id, boxID string) (ret string) {
-	return GetBlockDOMWithEmbedInBoxWithAccessChecker(id, boxID, nil)
-}
-
 // EmbedBlockAccessChecker 判断嵌入查询结果块是否允许返回。
 type EmbedBlockAccessChecker func(blockID string) bool
 
@@ -1231,15 +1212,6 @@ func GetBlockDOMWithEmbedInBoxWithAccessChecker(id, boxID string, accessChecker 
 	doms := GetBlockDOMsWithEmbedInBoxWithAccessChecker([]string{id}, boxID, accessChecker)
 	ret = doms[id]
 	return
-}
-
-func GetBlockDOMsWithEmbed(ids []string) (ret map[string]string) {
-	return GetBlockDOMsWithEmbedInBox(ids, "")
-}
-
-// GetBlockDOMsWithEmbedInBox 渲染指定笔记本内包含嵌入块的 DOM。boxID 为空时仅查询普通全局库。
-func GetBlockDOMsWithEmbedInBox(ids []string, boxID string) (ret map[string]string) {
-	return GetBlockDOMsWithEmbedInBoxWithAccessChecker(ids, boxID, nil)
 }
 
 // GetBlockDOMsWithEmbedInBoxWithAccessChecker 按访问权限渲染指定笔记本内包含嵌入块的 DOM。
@@ -1283,10 +1255,6 @@ func GetBlockDOMsWithEmbedInBoxWithAccessChecker(ids []string, boxID string, acc
 	return
 }
 
-func resolveEmbedContent(n *ast.Node, luteEngine *lute.Lute) {
-	resolveEmbedContentInBox(n, luteEngine, "", nil)
-}
-
 // loadTreeForBlockDOM 按指定 box 加载树，空 box 不回退搜索已打开的加密笔记本。
 func loadTreeForBlockDOM(id, boxID string) *parse.Tree {
 	bt := treenode.GetBlockTreeInBox(id, boxID)
@@ -1323,7 +1291,7 @@ func resolveEmbedContentInBox(n *ast.Node, luteEngine *lute.Lute, boxID string, 
 		stmt = strings.ReplaceAll(stmt, editor.IALValEscNewLine, "\n")
 
 		// 执行查询获取嵌入的块
-		sqlBlocks := sql.SelectBlocksRawStmtInBox(stmt, 1, Conf.Search.Limit, boxID)
+		sqlBlocks := sql.SelectBlocksRawStmtInBox(stmt, 1, Conf.Search.Load().Limit, boxID)
 		sqlBlocks = filterEmbedBlocksByAccess(sqlBlocks, accessChecker)
 
 		// 收集所有嵌入块的内容 HTML
@@ -1390,16 +1358,16 @@ func filterEmbedBlocksByAccess(blocks []*sql.Block, accessChecker EmbedBlockAcce
 	return
 }
 
+var (
+	embedHTMLPattern    = regexp.MustCompile(`<div[^>]*data-type="NodeBlockQueryEmbed"[^>]*embed-content="[^"]*"[^>]*>`)
+	embedContentPattern = regexp.MustCompile(`embed-content="([^"]*)"`)
+)
+
 func processEmbedHTML(htmlStr string) string {
 	// 使用正则表达式查找所有带有 embed-content 属性的嵌入块
-	embedPattern := `<div[^>]*data-type="NodeBlockQueryEmbed"[^>]*embed-content="[^"]*"[^>]*>`
-	re := regexp.MustCompile(embedPattern)
-
-	return re.ReplaceAllStringFunc(htmlStr, func(match string) string {
+	return embedHTMLPattern.ReplaceAllStringFunc(htmlStr, func(match string) string {
 		// 提取 embed-content 属性值
-		contentPattern := `embed-content="([^"]*)"`
-		contentRe := regexp.MustCompile(contentPattern)
-		contentMatches := contentRe.FindStringSubmatch(match)
+		contentMatches := embedContentPattern.FindStringSubmatch(match)
 
 		if len(contentMatches) > 1 {
 			embedContent := contentMatches[1]
@@ -1407,7 +1375,7 @@ func processEmbedHTML(htmlStr string) string {
 			embedContent = html.UnescapeString(embedContent)
 
 			// 移除 embed-content 属性，避免在最终 HTML 中显示
-			cleanMatch := contentRe.ReplaceAllString(match, "")
+			cleanMatch := embedContentPattern.ReplaceAllString(match, "")
 
 			// 将内容插入到嵌入块内部
 			return cleanMatch + embedContent + "</div>"
@@ -1534,7 +1502,7 @@ func compareBlockKramdownIALAttrNames(a, b string) int {
 }
 
 func isSystemManagedBlockKramdownIALAttr(name string) bool {
-	return "custom-avs" == name || "custom-heading-mode" == name || "custom-reminder-wechat" == name ||
+	return av.NodeAttrNameAvs == name || embedHeadingModeAttr == name || embedHeadingLevelAttr == name || reminderWechatAttr == name ||
 		strings.HasPrefix(name, "custom-riff-") || strings.HasPrefix(name, "custom-sy-")
 }
 
@@ -1657,10 +1625,6 @@ func childBlockFromNode(node *ast.Node, tree *parse.Tree) *ChildBlock {
 		Content:  block.Content,
 		Markdown: block.Markdown,
 	}
-}
-
-func GetTailChildBlocks(id string, n int) (ret []*ChildBlock) {
-	return GetTailChildBlocksInBox(id, n, "")
 }
 
 // GetTailChildBlocksInBox 返回指定笔记本边界内末尾的子块。

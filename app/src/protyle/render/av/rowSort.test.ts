@@ -1,12 +1,9 @@
 import * as assert from "node:assert/strict";
-import {readFileSync} from "node:fs";
 import {test} from "node:test";
-import {runInNewContext} from "node:vm";
-import {ModuleKind, ScriptTarget, transpileModule} from "typescript";
+import {ScriptTarget} from "typescript";
+import {compileModule, evaluateModule} from "../../../testSupport/loadModule";
 
-const compiled = transpileModule(readFileSync("src/protyle/render/av/rowSort.ts", "utf8"), {
-    compilerOptions: {module: ModuleKind.CommonJS, target: ScriptTarget.ES2021},
-}).outputText;
+const compiled = compileModule("src/protyle/render/av/rowSort.ts", ScriptTarget.ES2021);
 
 const fixture = () => {
     let commit: () => void;
@@ -22,9 +19,7 @@ const fixture = () => {
         querySelector: () => ({classList: {contains: () => block.sorted}}),
     };
     const protyle = {disabled: false};
-    const exports: any = {};
-    runInNewContext(compiled, {
-        exports,
+    const exports = evaluateModule<any>(compiled, {
         window: {siyuan: {languages: {removeSorts: "Remove sort rules", avDragRemoveSorts: "Confirm"}}},
         require: () => ({
             waitForPendingTransactions: () => pending,
@@ -34,8 +29,8 @@ const fixture = () => {
             confirmDialog: (_title: string, _text: string, confirm: () => void) => confirmations.push(confirm),
         }),
     });
-    const legacyDo = [{id: "legacy-do"}];
-    const legacyUndo = [{id: "legacy-undo"}];
+    const legacyDo = [{id: "first"}, {id: "second"}];
+    const legacyUndo = [{id: "first"}, {id: "second"}];
     const sort = (selected = ["b@group", "a@group"]) => exports.sortAVRows(
         protyle, block, selected, "group", "", "c", legacyDo, legacyUndo);
     return {block, protyle, requests, transactions, confirmations, legacyDo, legacyUndo, sort, commit: () => commit()};
@@ -87,7 +82,7 @@ test("late previews and confirmations cannot affect a newer drag or a different 
     assert.equal(f.transactions.length, 0);
 });
 
-test("unsorted and cross-group dragging retain their existing transactions", async () => {
+test("unsorted and cross-group dragging undo items in reverse order within the original view", async () => {
     for (const crossGroup of [false, true]) {
         const f = fixture();
         f.block.sorted = crossGroup;
@@ -95,6 +90,10 @@ test("unsorted and cross-group dragging retain their existing transactions", asy
         assert.equal(f.requests.length, 0);
         assert.equal(f.transactions.length, 1);
         assert.equal(f.transactions[0][1], f.legacyDo);
-        assert.equal(f.transactions[0][2], f.legacyUndo);
+        assert.equal(f.transactions[0][2].map((operation: any) => operation.id).join(","), "second,first");
+        assert.equal(f.legacyUndo.map(operation => operation.id).join(","), "first,second");
+        for (const operation of [...f.transactions[0][1], ...f.transactions[0][2]]) {
+            assert.equal(operation.viewID, "view");
+        }
     }
 });

@@ -1,25 +1,12 @@
-// SiYuan - From thought to insight, with agents
+// SiYuan - https://github.com/siyuan-note/siyuan
 // Copyright (c) 2020-present, b3log.org
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU Affero General Public License for more details.
-//
-// You should have received a copy of the GNU Affero General Public License
-// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+// SPDX-License-Identifier: AGPL-3.0-or-later
 
 package model
 
 import (
 	"bytes"
 	"fmt"
-	"path"
 	"sort"
 	"strings"
 
@@ -29,6 +16,7 @@ import (
 	"github.com/88250/lute/parse"
 	"github.com/emirpasic/gods/sets/hashset"
 	"github.com/siyuan-note/logging"
+	"github.com/siyuan-note/siyuan/kernel/av"
 	"github.com/siyuan-note/siyuan/kernel/filesys"
 	"github.com/siyuan-note/siyuan/kernel/search"
 	"github.com/siyuan-note/siyuan/kernel/sql"
@@ -139,6 +127,8 @@ func refreshCrossTreeMoveRefs(refreshes []crossTreeMoveRefRefresh) {
 }
 
 type Backlink struct {
+	Type                 string                         `json:"type,omitempty"`
+	ReferenceBlockID     string                         `json:"referenceBlockID,omitempty"`
 	AttributeViewTargets []*BacklinkAttributeViewTarget `json:"attributeViewTargets,omitempty"`
 	ID                   string                         `json:"id"`
 	DOM                  string                         `json:"dom"`
@@ -155,9 +145,16 @@ const (
 )
 
 type BacklinkSourceFilter struct {
-	DailyNote           string   `json:"dailyNote"`
-	ExcludedNotebookIDs []string `json:"excludedNotebookIDs"`
-	ExcludeSelf         bool     `json:"excludeSelf"`
+	DailyNote           string                  `json:"dailyNote"`
+	ExcludedNotebookIDs []string                `json:"excludedNotebookIDs"`
+	ExcludeSelf         bool                    `json:"excludeSelf"`
+	ExcludedRefDefIDs   []string                `json:"excludedRefDefIDs"`
+	Database            *BacklinkDatabaseFilter `json:"database,omitempty"`
+}
+
+type BacklinkDatabaseFilter struct {
+	AvID    string           `json:"avID"`
+	Filters []*av.ViewFilter `json:"filters"`
 }
 
 func NormalizeBacklinkSourceFilter(filter *BacklinkSourceFilter) *BacklinkSourceFilter {
@@ -179,17 +176,30 @@ func NormalizeBacklinkSourceFilter(filter *BacklinkSourceFilter) *BacklinkSource
 		excludedNotebookIDs = append(excludedNotebookIDs, notebookID)
 	}
 	sort.Strings(excludedNotebookIDs)
-	if BacklinkDailyNoteAll == dailyNote && 0 == len(excludedNotebookIDs) && !filter.ExcludeSelf {
+	excludedRefDefIDs := normalizeBacklinkRefDefIDs(filter.ExcludedRefDefIDs)
+	if BacklinkDailyNoteAll == dailyNote && 0 == len(excludedNotebookIDs) && !filter.ExcludeSelf && 0 == len(excludedRefDefIDs) && nil == filter.Database {
 		return nil
 	}
 	return &BacklinkSourceFilter{
 		DailyNote:           dailyNote,
 		ExcludedNotebookIDs: excludedNotebookIDs,
 		ExcludeSelf:         filter.ExcludeSelf,
+		ExcludedRefDefIDs:   excludedRefDefIDs,
+		Database:            filter.Database,
 	}
 }
 
-func GetBackmentionDoc(defID, refTreeID, keyword string, containChildren, highlight bool) (ret []*Backlink, keywords []string) {
+// BackmentionNotifier 向本次提及查询的发起端发送提示；显式传入 nil 时不发送。
+type BackmentionNotifier func(msg string, timeout int) string
+
+func backmentionNotifier(notifiers []BackmentionNotifier) BackmentionNotifier {
+	if len(notifiers) == 0 {
+		return util.PushMsg
+	}
+	return notifiers[0]
+}
+
+func GetBackmentionDoc(defID, refTreeID, keyword string, containChildren, highlight bool, notifiers ...BackmentionNotifier) (ret []*Backlink, keywords []string) {
 	keyword = strings.TrimSpace(keyword)
 	if "" != keyword {
 		keywords = strings.Split(keyword, " ")
@@ -206,7 +216,7 @@ func GetBackmentionDoc(defID, refTreeID, keyword string, containChildren, highli
 	refs = removeDuplicatedRefs(refs)
 
 	linkRefs, _, excludeBacklinkIDs, originalRefBlockIDs := buildLinkRefs(rootID, refs, keywords)
-	tmpMentions, mentionKeywords := buildTreeBackmention(sqlBlock, linkRefs, keyword, excludeBacklinkIDs, beforeLen)
+	tmpMentions, mentionKeywords := buildTreeBackmention(sqlBlock, linkRefs, keyword, excludeBacklinkIDs, beforeLen, notifiers...)
 	luteEngine := util.NewLute()
 	var mentions []*Block
 	for _, mention := range tmpMentions {
@@ -249,7 +259,11 @@ func GetBackmentionDoc(defID, refTreeID, keyword string, containChildren, highli
 	return
 }
 
-func GetBacklinkDoc(defID, refTreeID, keyword string, containChildren, highlight bool) (ret []*Backlink, keywords []string) {
+func GetBacklinkDoc(defID, refTreeID, keyword string, containChildren, highlight bool, filters ...*BacklinkSourceFilter) (ret []*Backlink, keywords []string) {
+	return GetBacklinkDocWithSort(defID, refTreeID, keyword, containChildren, highlight, 0, filters...)
+}
+
+func GetBacklinkDocWithSort(defID, refTreeID, keyword string, containChildren, highlight bool, blockSort int, filters ...*BacklinkSourceFilter) (ret []*Backlink, keywords []string) {
 	keyword = strings.TrimSpace(keyword)
 	if "" != keyword {
 		keywords = strings.Split(keyword, " ")
@@ -293,13 +307,18 @@ func GetBacklinkDoc(defID, refTreeID, keyword string, containChildren, highlight
 	}
 	refs = removeDuplicatedRefs(refs)
 
-	linkRefs, _, _, originalRefBlockIDs := buildLinkRefsInBox(rootID, refs, keywords, encBoxIDUsed)
+	linkRefs, _, _, originalRefBlockIDs := buildLinkRefsInBox(rootID, refs, keywords, encBoxIDUsed, filters...)
+	if len(filters) > 0 {
+		linkRefs = filterBacklinkSourcesInBox(linkRefs, rootID, encBoxIDUsed, filters[0])
+	}
 	refTree, err := LoadTreeByBlockID(refTreeID)
 	if err != nil {
 		logging.LogWarnf("load ref tree [%s] failed: %s", refTreeID, err)
 		return
 	}
 
+	linkRefs = expandBacklinkDocumentEntries(linkRefs, tmpRefs, rootID, keywords, encBoxIDUsed, originalRefBlockIDs, blockSort, filters...)
+	anchorKeys := backlinkAnchorSortKeys(linkRefs, refTree, tmpRefs, originalRefBlockIDs, blockSort)
 	avTargets := backlinkAttributeViewTargets(refTree, tmpRefs)
 	luteEngine := util.NewLute()
 	for _, linkRef := range linkRefs {
@@ -310,11 +329,16 @@ func GetBacklinkDoc(defID, refTreeID, keyword string, containChildren, highlight
 	}
 
 	sortBacklinks(ret, refTree)
+	sortBacklinksByAnchor(ret, anchorKeys, blockSort)
 	filterBlockPaths(ret)
 	return
 }
 
-func GetBacklinkDocInBox(defID, refTreeID, keyword string, containChildren, highlight bool, boxID string) (ret []*Backlink, keywords []string) {
+func GetBacklinkDocInBox(defID, refTreeID, keyword string, containChildren, highlight bool, boxID string, filters ...*BacklinkSourceFilter) (ret []*Backlink, keywords []string) {
+	return GetBacklinkDocInBoxWithSort(defID, refTreeID, keyword, containChildren, highlight, boxID, 0, filters...)
+}
+
+func GetBacklinkDocInBoxWithSort(defID, refTreeID, keyword string, containChildren, highlight bool, boxID string, blockSort int, filters ...*BacklinkSourceFilter) (ret []*Backlink, keywords []string) {
 	keyword = strings.TrimSpace(keyword)
 	if "" != keyword {
 		keywords = strings.Split(keyword, " ")
@@ -340,13 +364,18 @@ func GetBacklinkDocInBox(defID, refTreeID, keyword string, containChildren, high
 	}
 	refs = removeDuplicatedRefs(refs)
 
-	linkRefs, _, _, originalRefBlockIDs := buildLinkRefsInBox(rootID, refs, keywords, boxID)
+	linkRefs, _, _, originalRefBlockIDs := buildLinkRefsInBox(rootID, refs, keywords, boxID, filters...)
+	if len(filters) > 0 {
+		linkRefs = filterBacklinkSourcesInBox(linkRefs, rootID, boxID, filters[0])
+	}
 	refTree, err := loadTreeByBlockIDInBox(refTreeID, boxID)
 	if err != nil {
 		logging.LogWarnf("load ref tree [%s] failed: %s", refTreeID, err)
 		return
 	}
 
+	linkRefs = expandBacklinkDocumentEntries(linkRefs, tmpRefs, rootID, keywords, boxID, originalRefBlockIDs, blockSort, filters...)
+	anchorKeys := backlinkAnchorSortKeys(linkRefs, refTree, tmpRefs, originalRefBlockIDs, blockSort)
 	avTargets := backlinkAttributeViewTargets(refTree, tmpRefs)
 	luteEngine := util.NewLute()
 	for _, linkRef := range linkRefs {
@@ -357,11 +386,12 @@ func GetBacklinkDocInBox(defID, refTreeID, keyword string, containChildren, high
 	}
 
 	sortBacklinks(ret, refTree)
+	sortBacklinksByAnchor(ret, anchorKeys, blockSort)
 	filterBlockPaths(ret)
 	return
 }
 
-func GetBackmentionDocInBox(defID, refTreeID, keyword string, containChildren, highlight bool, boxID string) (ret []*Backlink, keywords []string) {
+func GetBackmentionDocInBox(defID, refTreeID, keyword string, containChildren, highlight bool, boxID string, notifiers ...BackmentionNotifier) (ret []*Backlink, keywords []string) {
 	keyword = strings.TrimSpace(keyword)
 	if "" != keyword {
 		keywords = strings.Split(keyword, " ")
@@ -378,7 +408,7 @@ func GetBackmentionDocInBox(defID, refTreeID, keyword string, containChildren, h
 	refs = removeDuplicatedRefs(refs)
 
 	linkRefs, _, excludeBacklinkIDs, originalRefBlockIDs := buildLinkRefsInBox(rootID, refs, keywords, boxID)
-	tmpMentions, mentionKeywords := buildTreeBackmentionInBox(sqlBlock, linkRefs, keyword, excludeBacklinkIDs, beforeLen, boxID)
+	tmpMentions, mentionKeywords := buildTreeBackmentionInBox(sqlBlock, linkRefs, keyword, excludeBacklinkIDs, beforeLen, boxID, notifiers...)
 	luteEngine := util.NewLute()
 	var mentions []*Block
 	for _, mention := range tmpMentions {
@@ -412,7 +442,7 @@ func GetBackmentionDocInBox(defID, refTreeID, keyword string, containChildren, h
 		if nil != backlink {
 			ret = append(ret, backlink)
 		}
-		if nil != tree && nil == refTree {
+		if nil == refTree {
 			refTree = tree
 		}
 	}
@@ -431,7 +461,6 @@ func filterBlockPaths(blockLinks []*Backlink) {
 			b.BlockPaths = []*BlockPath{}
 		}
 	}
-	return
 }
 
 func sortBacklinks(backlinks []*Backlink, tree *parse.Tree) {
@@ -461,6 +490,7 @@ func buildBacklink(refID string, refTree *parse.Tree, originalRefBlockIDs map[st
 	}
 
 	renderNodes, expand := getBacklinkRenderNodes(node, originalRefBlockIDs)
+	referenceBlockID := getBacklinkReferenceBlockID(node, renderNodes, originalRefBlockIDs[node.ID])
 	var blockPaths []*BlockPath
 	if (nil != node.Parent && ast.NodeDocument != node.Parent.Type) || (ast.NodeHeading != node.Type && 0 < treenode.HeadingLevel(node)) {
 		blockPaths = buildBlockBreadcrumb(node, nil, false)
@@ -496,7 +526,8 @@ func buildBacklink(refID string, refTree *parse.Tree, originalRefBlockIDs map[st
 	fillBlockRefCount(renderNodes, refTree.Box)
 
 	dom := renderVisibleBlockDOMByNodes(renderNodes, luteEngine)
-	ret = &Backlink{ID: refID, DOM: dom, BlockPaths: blockPaths, Expand: expand, node: node}
+	ret = &Backlink{ID: refID, DOM: dom, BlockPaths: blockPaths, Expand: expand, ReferenceBlockID: referenceBlockID, node: node}
+	ret.Type = node.Type.String()
 	if 0 < len(avTargets) {
 		appendBacklinkAttributeViewTargets(ret, renderNodes, avTargets)
 	}
@@ -575,6 +606,11 @@ func GetBacklink2InBox(id, keyword, mentionKeyword string, sortMode, mentionSort
 }
 
 func GetBacklink2InBoxWithFilter(id, keyword, mentionKeyword string, sortMode, mentionSortMode int, containChildren bool, boxID string, sourceFilter *BacklinkSourceFilter) (boxIDOut string, backlinks, backmentions []*Path, linkRefsCount, mentionsCount int) {
+	return GetBacklink2InBoxWithOptions(id, keyword, mentionKeyword, sortMode, mentionSortMode, containChildren, boxID, sourceFilter, true, true)
+}
+
+// GetBacklink2InBoxWithOptions 按需查询反链文档分组与提及列表。
+func GetBacklink2InBoxWithOptions(id, keyword, mentionKeyword string, sortMode, mentionSortMode int, containChildren bool, boxID string, sourceFilter *BacklinkSourceFilter, includeMentions, includeBacklinks bool, notifiers ...BackmentionNotifier) (boxIDOut string, backlinks, backmentions []*Path, linkRefsCount, mentionsCount int) {
 	keyword = strings.TrimSpace(keyword)
 	var keywords []string
 	if "" != keyword {
@@ -589,19 +625,26 @@ func GetBacklink2InBoxWithFilter(id, keyword, mentionKeyword string, sortMode, m
 	}
 	rootID := sqlBlock.RootID
 	boxIDOut = sqlBlock.Box
+	if !includeMentions && !includeBacklinks {
+		return
+	}
 
 	refs := sql.QueryRefsByDefIDInBox(id, containChildren, boxID)
 	refs = removeDuplicatedRefs(refs)
 
 	linkRefs, linkRefsCount, excludeBacklinkIDs, _ := buildLinkRefsInBox(rootID, refs, keywords, boxID)
-	filteredLinkRefs := filterBacklinkSourcesInBox(linkRefs, rootID, boxID, sourceFilter)
-	if nil != NormalizeBacklinkSourceFilter(sourceFilter) {
-		linkRefsCount = len(filteredLinkRefs)
-	}
-	tmpBacklinks := toFlatTree(filteredLinkRefs, 0, "backlink", nil)
-	for _, l := range tmpBacklinks {
-		l.Blocks = nil
-		backlinks = append(backlinks, l)
+	if includeBacklinks {
+		backlinkRefs := linkRefs
+		if sourceFilter != nil && sourceFilter.Database != nil {
+			backlinkRefs, _, _, _ = buildLinkRefsInBox(rootID, refs, keywords, boxID, sourceFilter)
+		}
+		filteredLinkRefs := filterBacklinkSourcesInBox(backlinkRefs, rootID, boxID, sourceFilter)
+		if nil != NormalizeBacklinkSourceFilter(sourceFilter) {
+			linkRefsCount = len(filteredLinkRefs)
+		}
+		backlinks = backlinkListPaths(filteredLinkRefs, boxID)
+	} else {
+		linkRefsCount = 0
 	}
 
 	sort.Slice(backlinks, func(i, j int) bool {
@@ -626,11 +669,9 @@ func GetBacklink2InBoxWithFilter(id, keyword, mentionKeyword string, sortMode, m
 		return backlinks[i].ID > backlinks[j].ID
 	})
 
-	mentionRefs, _ := buildTreeBackmentionInBox(sqlBlock, linkRefs, mentionKeyword, excludeBacklinkIDs, 12, boxID)
-	tmpBackmentions := toFlatTree(mentionRefs, 0, "backlink", nil)
-	for _, l := range tmpBackmentions {
-		l.Blocks = nil
-		backmentions = append(backmentions, l)
+	if includeMentions {
+		mentionRefs, _ := buildTreeBackmentionInBox(sqlBlock, linkRefs, mentionKeyword, excludeBacklinkIDs, 12, boxID, notifiers...)
+		backmentions = backlinkListPaths(mentionRefs, boxID)
 	}
 
 	sort.Slice(backmentions, func(i, j int) bool {
@@ -680,123 +721,31 @@ func GetBacklink2InBoxWithFilter(id, keyword, mentionKeyword string, sortMode, m
 	return
 }
 
-func GetBacklink(id, keyword, mentionKeyword string, beforeLen int, containChildren bool) (boxID string, linkPaths, mentionPaths []*Path, linkRefsCount, mentionsCount int) {
-	return GetBacklinkInBox(id, keyword, mentionKeyword, beforeLen, containChildren, "")
-}
-
-// GetBacklinkInBox 与 GetBacklink 一致，但按 boxID 路由到加密 db 或全局 db。
-func GetBacklinkInBox(id, keyword, mentionKeyword string, beforeLen int, containChildren bool, boxID string) (boxIDOut string, linkPaths, mentionPaths []*Path, linkRefsCount, mentionsCount int) {
-	linkPaths = []*Path{}
-	mentionPaths = []*Path{}
-
-	sqlBlock := sql.GetBlockInBox(id, boxID)
-	if nil == sqlBlock {
-		return
+// 反链和提及列表只需要文档元数据及命中数量，按笔记本读取索引，避免为每组加载和渲染整篇文档。
+func backlinkListPaths(blocks []*Block, boxID string) (ret []*Path) {
+	ret = []*Path{}
+	counts := map[string]int{}
+	var rootIDs []string
+	for _, block := range blocks {
+		if counts[block.RootID] == 0 {
+			rootIDs = append(rootIDs, block.RootID)
+		}
+		counts[block.RootID]++
 	}
-	rootID := sqlBlock.RootID
-	boxIDOut = sqlBlock.Box
-
-	var links []*Block
-	refs := sql.QueryRefsByDefIDInBox(id, containChildren, boxID)
-	refs = removeDuplicatedRefs(refs)
-
-	// 为了减少查询，组装好 IDs 后一次查出
-	defSQLBlockIDs, refSQLBlockIDs := map[string]bool{}, map[string]bool{}
-	var queryBlockIDs []string
-	for _, ref := range refs {
-		defSQLBlockIDs[ref.DefBlockID] = true
-		refSQLBlockIDs[ref.BlockID] = true
-		queryBlockIDs = append(queryBlockIDs, ref.DefBlockID)
-		queryBlockIDs = append(queryBlockIDs, ref.BlockID)
-	}
-	querySQLBlocks := sql.GetBlocksInBox(queryBlockIDs, boxID)
-	defSQLBlocksCache := map[string]*sql.Block{}
-	for _, defSQLBlock := range querySQLBlocks {
-		if nil != defSQLBlock && defSQLBlockIDs[defSQLBlock.ID] {
-			defSQLBlocksCache[defSQLBlock.ID] = defSQLBlock
-		}
-	}
-	refSQLBlocksCache := map[string]*sql.Block{}
-	for _, refSQLBlock := range querySQLBlocks {
-		if nil != refSQLBlock && refSQLBlockIDs[refSQLBlock.ID] {
-			refSQLBlocksCache[refSQLBlock.ID] = refSQLBlock
-		}
-	}
-
-	excludeBacklinkIDs := hashset.New()
-	for _, ref := range refs {
-		defSQLBlock := defSQLBlocksCache[(ref.DefBlockID)]
-		if nil == defSQLBlock {
-			continue
-		}
-
-		refSQLBlock := refSQLBlocksCache[ref.BlockID]
-		if nil == refSQLBlock {
-			continue
-		}
-		refBlock := fromSQLBlock(refSQLBlock, "", beforeLen)
-		if rootID == refBlock.RootID { // 排除当前文档内引用提及
-			excludeBacklinkIDs.Add(refBlock.RootID, refBlock.ID)
-		}
-		defBlock := fromSQLBlock(defSQLBlock, "", beforeLen)
-		if defBlock.RootID == rootID { // 当前文档的定义块
-			links = append(links, defBlock)
-			if ref.DefBlockID == defBlock.ID {
-				defBlock.Refs = append(defBlock.Refs, refBlock)
-			}
-		}
-	}
-
-	for _, link := range links {
-		for _, ref := range link.Refs {
-			excludeBacklinkIDs.Add(ref.RootID, ref.ID)
-		}
-		linkRefsCount += len(link.Refs)
-	}
-
-	var linkRefs []*Block
-	var backlinkRefBlocks []*Block
-	for _, link := range links {
-		for _, ref := range link.Refs {
-			backlinkRefBlocks = append(backlinkRefBlocks, ref)
-		}
-	}
-	coveredRefIDs := map[string]bool{}
-	originalRefBlockIDs := map[string]string{}
-	for _, mapping := range buildBacklinkParentMappings(backlinkRefBlocks, boxID) {
-		parent := sql.GetBlockInBox(mapping.parent.ID, boxID)
-		if nil == parent {
-			continue
-		}
-		originalRefBlockIDs[mapping.parent.ID] = mapping.refBlock.ID
-		for refID := range mapping.coveredRefIDs {
-			coveredRefIDs[refID] = true
-		}
-		linkRefsCount -= len(mapping.coveredRefIDs) - 1
-		linkRefs = append(linkRefs, fromSQLBlock(parent, keyword, beforeLen))
-	}
-	for _, link := range links {
-		for _, ref := range link.Refs {
-			if coveredRefIDs[ref.ID] {
+	for start := 0; start < len(rootIDs); start += 512 {
+		for _, root := range sql.GetBlocksInBox(rootIDs[start:min(start+512, len(rootIDs))], boxID) {
+			if root == nil {
 				continue
 			}
-
-			ref.DefID = link.ID
-			ref.DefPath = link.Path
-
-			content := ref.Content
-			if "" != keyword {
-				_, content = search.MarkText(content, keyword, beforeLen, Conf.Search.CaseSensitive)
-				ref.Content = content
-			}
-			linkRefs = append(linkRefs, ref)
+			block := fromSQLBlock(root, "", 0)
+			ret = append(ret, &Path{
+				ID: block.ID, Box: block.Box, Name: root.Content, HPath: block.HPath,
+				NodeType: block.Type, Type: "backlink", SubType: block.SubType,
+				Count: counts[block.ID], Updated: block.IAL["updated"], Created: block.ID[:14],
+			})
 		}
 	}
-	linkPaths = toSubTreeInBox(linkRefs, keyword, boxID, originalRefBlockIDs)
-
-	mentions, _ := buildTreeBackmentionInBox(sqlBlock, linkRefs, mentionKeyword, excludeBacklinkIDs, beforeLen, boxID)
-	mentionsCount = len(mentions)
-	mentionPaths = toFlatTree(mentions, 0, "backlink", nil)
+	sort.Slice(ret, func(i, j int) bool { return ret[i].ID > ret[j].ID })
 	return
 }
 
@@ -805,7 +754,13 @@ func buildLinkRefs(defRootID string, refs []*sql.Ref, keywords []string) (ret []
 }
 
 // buildLinkRefsInBox 与 buildLinkRefs 一致，但按 boxID 路由到加密 db 或全局 db。
-func buildLinkRefsInBox(defRootID string, refs []*sql.Ref, keywords []string, boxID string) (ret []*Block, refsCount int, excludeBacklinkIDs *hashset.Set, originalRefBlockIDs map[string]string) {
+func buildLinkRefsInBox(defRootID string, refs []*sql.Ref, keywords []string, boxID string, filters ...*BacklinkSourceFilter) (ret []*Block, refsCount int, excludeBacklinkIDs *hashset.Set, originalRefBlockIDs map[string]string) {
+	return buildLinkRefsInBoxWithDocumentGrouping(defRootID, refs, keywords, boxID, true, filters...)
+}
+
+func buildLinkRefsInBoxWithDocumentGrouping(defRootID string, refs []*sql.Ref, keywords []string, boxID string, groupDocuments bool, filters ...*BacklinkSourceFilter) (ret []*Block, refsCount int, excludeBacklinkIDs *hashset.Set, originalRefBlockIDs map[string]string) {
+	// 数据库条件先约束实际引用来源，再合并父块，避免一个来源命中后放行同文档的其他引用。
+	refs = filterBacklinkDatabaseRefs(refs, boxID, filters...)
 	// 为了减少查询，组装好 IDs 后一次查出
 	defSQLBlockIDs, refSQLBlockIDs := map[string]bool{}, map[string]bool{}
 	var queryBlockIDs []string
@@ -874,7 +829,7 @@ func buildLinkRefsInBox(defRootID string, refs []*sql.Ref, keywords []string, bo
 		refBlocksByID[refBlock.ID] = refBlock
 	}
 	coveredRefIDs := map[string]bool{}
-	for _, mapping := range buildBacklinkParentMappings(backlinkRefBlocks, boxID) {
+	for _, mapping := range buildBacklinkParentMappingsWithDocumentGrouping(backlinkRefBlocks, boxID, groupDocuments) {
 		originalRefBlockIDs[mapping.parent.ID] = mapping.refBlock.ID
 		for refID := range mapping.coveredRefIDs {
 			coveredRefIDs[refID] = true
@@ -953,10 +908,11 @@ func matchBacklinkKeyword(block *Block, keywords []string) bool {
 		return true
 	}
 
+	title := documentTitleText(block.Box, block.RootID)
 	for _, k := range keywords {
 		k = strings.ToLower(k)
 		if strings.Contains(strings.ToLower(block.Content), k) ||
-			strings.Contains(strings.ToLower(path.Base(block.HPath)), k) ||
+			strings.Contains(strings.ToLower(title), k) ||
 			strings.Contains(strings.ToLower(block.Name), k) ||
 			strings.Contains(strings.ToLower(block.Alias), k) ||
 			strings.Contains(strings.ToLower(block.Memo), k) ||
@@ -973,7 +929,11 @@ func filterBacklinkSourcesInBox(linkRefs []*Block, defRootID, boxID string, filt
 		return linkRefs
 	}
 	dailyNoteRootIDs := backlinkDailyNoteRootIDsInBox(linkRefs, boxID, BacklinkDailyNoteAll != filter.DailyNote)
-	return filterBacklinkSources(linkRefs, defRootID, filter, dailyNoteRootIDs)
+	ret = filterBacklinkSources(linkRefs, defRootID, filter, dailyNoteRootIDs)
+	if 0 < len(filter.ExcludedRefDefIDs) {
+		ret = filterBacklinkRefDefs(ret, boxID, filter.ExcludedRefDefIDs)
+	}
+	return
 }
 
 func filterBacklinkSources(linkRefs []*Block, defRootID string, filter *BacklinkSourceFilter, dailyNoteRootIDs map[string]bool) (ret []*Block) {
@@ -1054,34 +1014,36 @@ func removeDuplicatedRefs(refs []*sql.Ref) (ret []*sql.Ref) {
 	return
 }
 
-func buildTreeBackmention(defSQLBlock *sql.Block, refBlocks []*Block, keyword string, excludeBacklinkIDs *hashset.Set, beforeLen int) (ret []*Block, mentionKeywords []string) {
-	return buildTreeBackmentionInBox(defSQLBlock, refBlocks, keyword, excludeBacklinkIDs, beforeLen, "")
+func buildTreeBackmention(defSQLBlock *sql.Block, refBlocks []*Block, keyword string, excludeBacklinkIDs *hashset.Set, beforeLen int, notifiers ...BackmentionNotifier) (ret []*Block, mentionKeywords []string) {
+	return buildTreeBackmentionInBox(defSQLBlock, refBlocks, keyword, excludeBacklinkIDs, beforeLen, "", notifiers...)
 }
 
 // buildTreeBackmentionInBox 与 buildTreeBackmention 一致，但按 boxID 路由到加密 db 或全局 db。
-func buildTreeBackmentionInBox(defSQLBlock *sql.Block, refBlocks []*Block, keyword string, excludeBacklinkIDs *hashset.Set, beforeLen int, boxID string) (ret []*Block, mentionKeywords []string) {
+func buildTreeBackmentionInBox(defSQLBlock *sql.Block, refBlocks []*Block, keyword string, excludeBacklinkIDs *hashset.Set, beforeLen int, boxID string, notifiers ...BackmentionNotifier) (ret []*Block, mentionKeywords []string) {
+	confSearchSnapshot := Conf.LoadSearch()
+
 	ret = []*Block{}
 
 	var names, aliases []string
 	var fName, rootID string
 	if "d" == defSQLBlock.Type {
-		if Conf.Search.BacklinkMentionName {
+		if confSearchSnapshot.BacklinkMentionName {
 			names = sql.QueryBlockNamesByRootIDInBox(defSQLBlock.ID, boxID)
 		}
-		if Conf.Search.BacklinkMentionAlias {
+		if confSearchSnapshot.BacklinkMentionAlias {
 			aliases = sql.QueryBlockAliasesInBox(defSQLBlock.ID, boxID)
 		}
-		if Conf.Search.BacklinkMentionDoc {
-			fName = path.Base(defSQLBlock.HPath)
+		if confSearchSnapshot.BacklinkMentionDoc {
+			fName = defSQLBlock.Content
 		}
 		rootID = defSQLBlock.ID
 	} else {
-		if Conf.Search.BacklinkMentionName {
+		if confSearchSnapshot.BacklinkMentionName {
 			if "" != defSQLBlock.Name {
 				names = append(names, defSQLBlock.Name)
 			}
 		}
-		if Conf.Search.BacklinkMentionAlias {
+		if confSearchSnapshot.BacklinkMentionAlias {
 			if "" != defSQLBlock.Alias {
 				aliases = strings.Split(defSQLBlock.Alias, ",")
 			}
@@ -1104,7 +1066,7 @@ func buildTreeBackmentionInBox(defSQLBlock *sql.Block, refBlocks []*Block, keywo
 		set.Add(fName)
 	}
 
-	if Conf.Search.BacklinkMentionAnchor {
+	if confSearchSnapshot.BacklinkMentionAnchor {
 		for _, refBlock := range refBlocks {
 			refs := sql.QueryRefsByDefIDRefIDInBox(refBlock.DefID, refBlock.ID, boxID)
 			for _, ref := range refs {
@@ -1116,39 +1078,50 @@ func buildTreeBackmentionInBox(defSQLBlock *sql.Block, refBlocks []*Block, keywo
 	for _, v := range set.Values() {
 		mentionKeywords = append(mentionKeywords, v.(string))
 	}
-	mentionKeywords = excludeKeywords(mentionKeywords, Conf.Editor.BacklinkMentionExclude)
+	mentionKeywords = excludeKeywords(mentionKeywords, Conf.Editor.Load().BacklinkMentionExclude)
 	mentionKeywords = prepareMarkKeywords(mentionKeywords)
-	mentionKeywords, ret = searchBackmentionInBox(mentionKeywords, keyword, excludeBacklinkIDs, rootID, beforeLen, boxID)
+	mentionKeywords, ret = searchBackmentionInBox(mentionKeywords, keyword, excludeBacklinkIDs, rootID, beforeLen, boxID, notifiers...)
 	return
 }
 
-func searchBackmention(mentionKeywords []string, keyword string, excludeBacklinkIDs *hashset.Set, rootID string, beforeLen int) (retMentionKeywords []string, ret []*Block) {
-	return searchBackmentionInBox(mentionKeywords, keyword, excludeBacklinkIDs, rootID, beforeLen, "")
+func searchBackmention(mentionKeywords []string, keyword string, excludeBacklinkIDs *hashset.Set, rootID string, beforeLen int, notifiers ...BackmentionNotifier) (retMentionKeywords []string, ret []*Block) {
+	return searchBackmentionInBox(mentionKeywords, keyword, excludeBacklinkIDs, rootID, beforeLen, "", notifiers...)
 }
 
 func quoteFTSPhrase(phrase string) string {
 	return "\"" + strings.ReplaceAll(phrase, "\"", "\"\"") + "\""
 }
 
-func buildBackmentionQuery(matchExpression, rootID string, limit int) (query string, args []any) {
+func buildBackmentionQuery(matchExpression, rootID, beforeID string, limit int) (query string, args []any) {
 	query = "SELECT * FROM blocks_fts WHERE blocks_fts MATCH ? AND root_id != ?" +
-		" AND type IN ('d', 'h', 'p', 't') ORDER BY id DESC LIMIT ?"
-	args = []any{matchExpression, rootID, limit}
+		" AND type IN ('d', 'h', 'p', 't')"
+	args = []any{matchExpression, rootID}
+	if "" != beforeID {
+		query += " AND id < ?"
+		args = append(args, beforeID)
+	}
+	query += " ORDER BY id DESC LIMIT ?"
+	args = append(args, limit)
 	return
 }
 
 // searchBackmentionInBox 与 searchBackmention 一致，但按 boxID 路由到加密 db 或全局 db。
-func searchBackmentionInBox(mentionKeywords []string, keyword string, excludeBacklinkIDs *hashset.Set, rootID string, beforeLen int, boxID string) (retMentionKeywords []string, ret []*Block) {
+func searchBackmentionInBox(mentionKeywords []string, keyword string, excludeBacklinkIDs *hashset.Set, rootID string, beforeLen int, boxID string, notifiers ...BackmentionNotifier) (retMentionKeywords []string, ret []*Block) {
+	confSearchSnapshot := Conf.LoadSearch()
+
 	ret = []*Block{}
 	if 1 > len(mentionKeywords) {
 		return
 	}
 
 	buf := bytes.Buffer{}
-	buf.WriteString(columnFilter() + ":(")
+	buf.WriteString(columnFilter())
+	buf.WriteString(":(")
 	for i, mentionKeyword := range mentionKeywords {
-		if Conf.Search.BacklinkMentionKeywordsLimit < i {
-			util.PushMsg(fmt.Sprintf(Conf.Language(38), len(mentionKeywords)), 5000)
+		if confSearchSnapshot.BacklinkMentionKeywordsLimit < i {
+			if notify := backmentionNotifier(notifiers); notify != nil {
+				notify(fmt.Sprintf(Conf.Language(38), len(mentionKeywords)), 5000)
+			}
 			buf.WriteString(quoteFTSPhrase(mentionKeyword))
 			break
 		}
@@ -1160,79 +1133,79 @@ func searchBackmentionInBox(mentionKeywords []string, keyword string, excludeBac
 	}
 	buf.WriteString(")")
 	if "" != keyword {
-		buf.WriteString(" AND (" + quoteFTSPhrase(keyword) + ")")
+		buf.WriteString(" AND (")
+		buf.WriteString(quoteFTSPhrase(keyword))
+		buf.WriteString(")")
 	}
-	query, args := buildBackmentionQuery(buf.String(), rootID, Conf.Search.Limit)
-
-	sqlBlocks := sql.SelectBlocksRawStmtArgsInBox(query, args, Conf.Search.Limit, boxID)
 	terms := mentionKeywords
 	if "" != keyword {
 		terms = append(terms, keyword)
 	}
-	blocks := fromSQLBlocks(&sqlBlocks, strings.Join(terms, search.TermSep), beforeLen)
-
 	luteEngine := util.NewLute()
-	var tmp []*Block
-	for _, b := range blocks {
-		tree := parse.Parse("", gulu.Str.ToBytes(b.Markdown), luteEngine.ParseOptions)
-		if nil == tree {
-			continue
+	limit := confSearchSnapshot.Limit
+	beforeID := ""
+	// 按块 ID 分批补取候选，正文校验和反链排除后的有效提及才占用结果额度。
+	for len(ret) < limit {
+		query, args := buildBackmentionQuery(buf.String(), rootID, beforeID, limit)
+		sqlBlocks := sql.SelectBlocksRawStmtArgsInBox(query, args, limit, boxID)
+		if len(sqlBlocks) == 0 {
+			break
 		}
+		beforeID = sqlBlocks[len(sqlBlocks)-1].ID
+		blocks := fromSQLBlocks(&sqlBlocks, strings.Join(terms, search.TermSep), beforeLen)
+		for _, b := range blocks {
+			if excludeBacklinkIDs.Contains(b.ID) {
+				continue
+			}
+			tree := parse.Parse("", gulu.Str.ToBytes(b.Markdown), luteEngine.ParseOptions)
+			if nil == tree {
+				continue
+			}
 
-		textBuf := &bytes.Buffer{}
-		ast.Walk(tree.Root, func(n *ast.Node, entering bool) ast.WalkStatus {
-			if !entering || n.IsBlock() {
+			textBuf := &bytes.Buffer{}
+			ast.Walk(tree.Root, func(n *ast.Node, entering bool) ast.WalkStatus {
+				if !entering || n.IsBlock() {
+					return ast.WalkContinue
+				}
+				if ast.NodeText == n.Type /* NodeText 包含了标签命中的情况 */ || ast.NodeLinkText == n.Type {
+					textBuf.Write(n.Tokens)
+				}
 				return ast.WalkContinue
-			}
-			if ast.NodeText == n.Type /* NodeText 包含了标签命中的情况 */ || ast.NodeLinkText == n.Type {
-				textBuf.Write(n.Tokens)
-			}
-			return ast.WalkContinue
-		})
+			})
 
-		text := textBuf.String()
-		text = strings.TrimSpace(text)
-		if "" == text {
-			continue
+			text := textBuf.String()
+			text = strings.TrimSpace(text)
+			if "" == text {
+				continue
+			}
+
+			newText, matched := markReplaceSpanWithSplit(text, mentionKeywords, search.GetMarkSpanStart(search.MarkDataType), search.GetMarkSpanEnd())
+			if matched {
+				ret = append(ret, b)
+
+				k := getMarkedTextContents(newText, search.GetMarkSpanStart(search.MarkDataType), search.GetMarkSpanEnd())
+				retMentionKeywords = append(retMentionKeywords, k...)
+			} else {
+				// columnFilter 中的命名、别名和备注命中的情况
+				// 反链提及搜索范围增加命名、别名和备注 https://github.com/siyuan-note/siyuan/issues/7639
+				if gulu.Str.Contains(trimMarkTags(b.Name), mentionKeywords) ||
+					gulu.Str.Contains(trimMarkTags(b.Alias), mentionKeywords) ||
+					gulu.Str.Contains(trimMarkTags(b.Memo), mentionKeywords) {
+					ret = append(ret, b)
+				}
+			}
+			if len(ret) == limit {
+				break
+			}
 		}
-
-		newText, matched := markReplaceSpanWithSplit(text, mentionKeywords, search.GetMarkSpanStart(search.MarkDataType), search.GetMarkSpanEnd())
-		if matched {
-			tmp = append(tmp, b)
-
-			k := getMarkedTextContents(newText, search.GetMarkSpanStart(search.MarkDataType), search.GetMarkSpanEnd())
-			retMentionKeywords = append(retMentionKeywords, k...)
-		} else {
-			// columnFilter 中的命名、别名和备注命中的情况
-			// 反链提及搜索范围增加命名、别名和备注 https://github.com/siyuan-note/siyuan/issues/7639
-			if gulu.Str.Contains(trimMarkTags(b.Name), mentionKeywords) ||
-				gulu.Str.Contains(trimMarkTags(b.Alias), mentionKeywords) ||
-				gulu.Str.Contains(trimMarkTags(b.Memo), mentionKeywords) {
-				tmp = append(tmp, b)
-			}
+		if len(sqlBlocks) < limit {
+			break
 		}
 	}
-	blocks = tmp
 	retMentionKeywords = gulu.Str.RemoveDuplicatedElem(retMentionKeywords)
-	mentionKeywords = retMentionKeywords
-
-	mentionBlockMap := map[string]*Block{}
-	for _, block := range blocks {
-		mentionBlockMap[block.ID] = block
-
-		refText := getContainStr(block.Content, mentionKeywords)
-		block.RefText = refText
+	for _, block := range ret {
+		block.RefText = getContainStr(block.Content, retMentionKeywords)
 	}
-
-	for _, mentionBlock := range mentionBlockMap {
-		if !excludeBacklinkIDs.Contains(mentionBlock.ID) {
-			ret = append(ret, mentionBlock)
-		}
-	}
-
-	sort.SliceStable(ret, func(i, j int) bool {
-		return ret[i].ID > ret[j].ID
-	})
 	return
 }
 
@@ -1268,7 +1241,7 @@ func buildFullLinks(condition string) (forwardlinks, backlinks []*Block) {
 func buildDefsAndRefs(condition string) (defBlocks []*Block) {
 	defBlockMap := map[string]*Block{}
 	refBlockMap := map[string]*Block{}
-	defRefs := sql.DefRefs(condition, Conf.Graph.MaxBlocks)
+	defRefs := sql.DefRefs(condition, Conf.Graph.Load().MaxBlocks)
 
 	// 将 sql block 转为 block
 	for _, row := range defRefs {

@@ -1,18 +1,6 @@
-// SiYuan - From thought to insight, with agents
+// SiYuan - https://github.com/siyuan-note/siyuan
 // Copyright (c) 2020-present, b3log.org
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU Affero General Public License for more details.
-//
-// You should have received a copy of the GNU Affero General Public License
-// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+// SPDX-License-Identifier: AGPL-3.0-or-later
 
 package model
 
@@ -22,14 +10,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	htmlstd "html"
 	"image"
 	_ "image/gif"
 	"image/jpeg"
 	"image/png"
-	"io"
 	"io/fs"
 	"maps"
-	"net/url"
 	"os"
 	"path"
 	"path/filepath"
@@ -60,6 +47,13 @@ import (
 	"github.com/siyuan-note/siyuan/kernel/util"
 	_ "golang.org/x/image/bmp"
 	_ "golang.org/x/image/webp"
+	"gopkg.in/yaml.v3"
+)
+
+var (
+	importPrePattern            = regexp.MustCompile(`(?sU)<pre [^>]*>(.*)</pre>`)
+	importSVGPattern            = regexp.MustCompile(`(?i)<svg[^>]*>(.*?)</svg>`)
+	importEncodedNewlinePattern = regexp.MustCompile(`(?i)%0A`)
 )
 
 // GetImportAssetsDir 返回导入资源的落盘目录。普通笔记本复用已有本地目录，否则回退到全局目录。
@@ -114,7 +108,7 @@ func HTML2TreeWithOptions(htmlStr string, luteEngine *lute.Lute, boxID string,
 		case ast.NodeHTMLBlock:
 			if bytes.HasPrefix(n.Tokens, []byte("<pre ")) && bytes.HasSuffix(n.Tokens, []byte("</pre>")) {
 				if bytes.Contains(n.Tokens, []byte("data:image/svg+xml;base64")) {
-					matches := regexp.MustCompile(`(?sU)<pre [^>]*>(.*)</pre>`).FindSubmatch(n.Tokens)
+					matches := importPrePattern.FindSubmatch(n.Tokens)
 					if len(matches) >= 2 {
 						n.Tokens = matches[1]
 					}
@@ -194,17 +188,6 @@ func importedSYRootIDs(importedDocs []*importedSYSortDoc) (ret []string) {
 	return
 }
 
-func importedTreeRootIDs(trees []*parse.Tree, parentPath string) (ret []string) {
-	for _, tree := range trees {
-		if nil == tree || parentPath != path.Dir(tree.Path) {
-			continue
-		}
-		ret = append(ret, tree.ID)
-	}
-	sort.Strings(ret)
-	return
-}
-
 func pushDocsImported(boxID, parentPath, format string, rootIDs []string) {
 	if 1 > len(rootIDs) {
 		return
@@ -245,7 +228,7 @@ func buildImportedSYSortValues(importedDocs []*importedSYSortDoc, sourceSortIDs 
 	sortValues := map[string]int{}
 	for _, docs := range groups {
 		for sortValue, doc := range docs {
-			sortValues[doc.newID] = sortValue
+			sortValues[doc.newID] = sortValue + 1
 		}
 	}
 
@@ -263,12 +246,14 @@ func buildImportedSYSortValues(importedDocs []*importedSYSortDoc, sourceSortIDs 
 		orderedRootIDs = append(orderedRootIDs, rootIDs...)
 	}
 	for sortValue, id := range orderedRootIDs {
-		sortValues[id] = sortValue
+		sortValues[id] = sortValue + 1
 	}
 	return sortValues
 }
 
 func applyImportedSYSort(boxID, targetPath string, importedDocs []*importedSYSortDoc, sourceSortIDs map[string]int) error {
+	confFileTreeSnapshot := Conf.LoadFileTree()
+
 	if 1 > len(importedDocs) {
 		return nil
 	}
@@ -298,7 +283,7 @@ func applyImportedSYSort(boxID, targetPath string, importedDocs []*importedSYSor
 		}
 	}
 
-	createDocAtTop := nil != Conf.FileTree.CreateDocAtTop && *Conf.FileTree.CreateDocAtTop
+	createDocAtTop := nil != confFileTreeSnapshot.CreateDocAtTop && *confFileTreeSnapshot.CreateDocAtTop
 	sortValues := buildImportedSYSortValues(importedDocs, sourceSortIDs, existingRootIDs, createDocAtTop)
 	if 1 > len(sortValues) {
 		return nil
@@ -311,8 +296,99 @@ func importSY(zipPath, boxID, toPath string, createNotebook, autoDetect bool) (c
 	return importSY0(zipPath, boxID, toPath, createNotebook, autoDetect, nil, false)
 }
 
+// checkEncryptedImportFlashcards 检查待导入文档是否带有闪卡属性。
+// 加密笔记本是孤岛，闪卡牌组与调度依赖全局数据库，因此必须拒绝导入；命中时返回具体文档，避免只提示"不支持该操作"。
+func checkEncryptedImportFlashcards(tree *parse.Tree, sourcePath string, encryptedTarget bool) error {
+	if !encryptedTarget || nil == tree || nil == tree.Root {
+		return nil
+	}
+
+	containsFlashcardAttrs := false
+	ast.Walk(tree.Root, func(n *ast.Node, entering bool) ast.WalkStatus {
+		if entering && n.IsBlock() && n.IALAttr(NodeAttrRiffDecks) != "" {
+			containsFlashcardAttrs = true
+			return ast.WalkStop
+		}
+		return ast.WalkContinue
+	})
+	if !containsFlashcardAttrs {
+		return nil
+	}
+
+	title := treenode.ReadDocumentTitle(tree.Root).Text
+	if "" == title {
+		title = filepath.Base(sourcePath)
+	}
+	return fmt.Errorf(Conf.Language(386), htmlstd.EscapeString(title))
+}
+
+// importedBlockDocTitles 建立本次导入块 ID 到所属文档标题的映射，供闪卡卡片反查文档。
+func importedBlockDocTitles(trees map[string]*parse.Tree) map[string]string {
+	ret := map[string]string{}
+	for _, tree := range trees {
+		if nil == tree || nil == tree.Root {
+			continue
+		}
+		title := treenode.ReadDocumentTitle(tree.Root).Text
+		ast.Walk(tree.Root, func(n *ast.Node, entering bool) ast.WalkStatus {
+			if entering && "" != n.ID {
+				ret[n.ID] = title
+			}
+			return ast.WalkContinue
+		})
+	}
+	return ret
+}
+
+// checkEncryptedImportDeck 检查导入包里的闪卡数据。
+// 加密笔记本是孤岛，闪卡牌组与调度依赖全局数据库，因此必须拒绝导入；
+// 报错会指出包内哪些文档的卡片位于牌组中，便于用户在源笔记本中移除闪卡后重新导出。
+func checkEncryptedImportDeck(unzipRootPath string, trees map[string]*parse.Tree, blockIDs map[string]string) error {
+	confFlashcardSnapshot := Conf.LoadFlashcard()
+
+	storageRiffDir := filepath.Join(unzipRootPath, "storage", "riff")
+	if !gulu.File.IsExist(storageRiffDir) {
+		return nil
+	}
+
+	deck, loadErr := riff.LoadDeck(storageRiffDir, builtinDeckID, confFlashcardSnapshot.RequestRetention, confFlashcardSnapshot.MaximumInterval, confFlashcardSnapshot.Weights)
+	if nil != loadErr || nil == deck {
+		// 牌组无法解析时仍要拒绝导入，此时无法指出具体文档，只报告包内牌组路径
+		logging.LogErrorf("load imported deck [%s] failed: %s", storageRiffDir, loadErr)
+		return fmt.Errorf(Conf.Language(385), filepath.ToSlash(filepath.Join("storage", "riff")))
+	}
+
+	var deckDocs []string
+	blockDocTitles := importedBlockDocTitles(trees)
+	for _, blockID := range deck.GetBlockIDs() {
+		// 卡片记录的是导出时的旧块 ID，需按导入时重建的映射换算
+		newBlockID := blockIDs[blockID]
+		if "" == newBlockID {
+			newBlockID = blockID
+		}
+		if title := blockDocTitles[newBlockID]; "" != title {
+			deckDocs = append(deckDocs, title)
+		} else {
+			// 卡片所属块不在本次导入范围内，保留块 ID 供用户定位
+			deckDocs = append(deckDocs, newBlockID)
+		}
+	}
+	if 0 == len(deckDocs) {
+		// 牌组存在但没有可定位的卡片，退回报告包内牌组路径
+		return fmt.Errorf(Conf.Language(385), filepath.ToSlash(filepath.Join("storage", "riff")))
+	}
+	deckDocs = gulu.Str.RemoveDuplicatedElem(deckDocs)
+	sort.Strings(deckDocs)
+	if 5 < len(deckDocs) {
+		deckDocs = append(deckDocs[:5], "...")
+	}
+	return fmt.Errorf(Conf.Language(385), htmlstd.EscapeString(strings.Join(deckDocs, ", ")))
+}
+
 func importSY0(zipPath, boxID, toPath string, createNotebook, autoDetect bool, sharedBlockIDs map[string]string,
 	precreatedBox bool) (createdBoxID string, err error) {
+	confFlashcardReadSnapshot := Conf.LoadFlashcard()
+
 	util.PushEndlessProgress(Conf.Language(73))
 	defer util.ClearPushProgress(100)
 
@@ -354,6 +430,19 @@ func importSY0(zipPath, boxID, toPath string, createNotebook, autoDetect bool, s
 		return
 	}
 	unzipRootPath := filepath.Join(unzipPath, entries[0].Name())
+	if err = checkImportedDocumentAddressing(unzipRootPath); err != nil {
+		return
+	}
+	// 全部标题源通过检查后才导入表情、创建笔记本或重新分配身份。
+	for _, syPath := range syPaths {
+		data, readErr := filelock.ReadFile(syPath)
+		if readErr != nil {
+			return "", readErr
+		}
+		if err = treenode.CheckSpecJSON(data); err != nil {
+			return
+		}
+	}
 	name := filepath.Base(unzipRootPath)
 	if strings.HasPrefix(name, "data-20") && len("data-20230321175442") == len(name) {
 		logging.LogErrorf("invalid .sy.zip [unzipRootPath=%s, baseName=%s]", unzipRootPath, name)
@@ -433,6 +522,9 @@ func importSY0(zipPath, boxID, toPath string, createNotebook, autoDetect bool, s
 		err = errors.New(Conf.Language(0))
 		return
 	}
+	if _, err = importEmojiFiles(unzipRootPath, true); err != nil {
+		return
+	}
 	if createNotebook {
 		if importedBoxConf != nil && importedBoxConf.Name != "" {
 			name = importedBoxConf.Name
@@ -472,10 +564,6 @@ func importSY0(zipPath, boxID, toPath string, createNotebook, autoDetect bool, s
 		createdBoxID = boxID
 	}
 	encryptedTarget := IsEncryptedBox(boxID)
-	storageRiffDir := filepath.Join(unzipRootPath, "storage", "riff")
-	if encryptedTarget && gulu.File.IsExist(storageRiffDir) {
-		return createdBoxID, errors.New(Conf.Language(313))
-	}
 	toPath = normalizeBoxDocTarget(boxID, toPath)
 
 	luteEngine := util.NewLute()
@@ -486,7 +574,6 @@ func importSY0(zipPath, boxID, toPath string, createNotebook, autoDetect bool, s
 	trees := map[string]*parse.Tree{}
 	var importedSortDocs []*importedSYSortDoc
 	importedBoxDoc := false
-	containsFlashcardAttrs := false
 
 	// 重新生成块 ID
 	for i, syPath := range syPaths {
@@ -505,13 +592,14 @@ func importSY0(zipPath, boxID, toPath string, createNotebook, autoDetect bool, s
 			err = parseErr
 			return
 		}
+		// 加密笔记本不支持闪卡，命中时给出具体文档而不是笼统的"不支持该操作"
+		if err = checkEncryptedImportFlashcards(tree, syPath, encryptedTarget); nil != err {
+			return
+		}
 		oldRootID := tree.Root.ID
 		ast.Walk(tree.Root, func(n *ast.Node, entering bool) ast.WalkStatus {
 			if !entering {
 				return ast.WalkContinue
-			}
-			if encryptedTarget && n.IsBlock() && n.IALAttr(NodeAttrRiffDecks) != "" {
-				containsFlashcardAttrs = true
 			}
 			if "" == n.ID {
 				return ast.WalkContinue
@@ -555,8 +643,36 @@ func importSY0(zipPath, boxID, toPath string, createNotebook, autoDetect bool, s
 		trees[tree.ID] = tree
 		util.PushEndlessProgress(Conf.language(73) + " " + fmt.Sprintf(Conf.language(70), fmt.Sprintf("%d/%d", i+1, len(syPaths))))
 	}
-	if containsFlashcardAttrs {
-		return createdBoxID, errors.New(Conf.Language(313))
+	if createNotebook && importedBoxConf != nil {
+		sourceBoxID := importedBoxDocID
+		if sourceBoxID == "" && ast.IsNodeIDPattern(filepath.Base(unzipRootPath)) {
+			sourceBoxID = filepath.Base(unzipRootPath)
+		}
+		box := &Box{ID: boxID}
+		boxConf := box.GetConf()
+		boxConf.DocCreateTarget = remapImportedDocumentTarget(importedBoxConf.DocCreateTarget, sourceBoxID, boxID, blockIDs)
+		boxConf.RefCreateTarget = remapImportedDocumentTarget(importedBoxConf.RefCreateTarget, sourceBoxID, boxID, blockIDs)
+		boxConf.DailyNoteTarget = remapImportedDocumentTarget(importedBoxConf.DailyNoteTarget, sourceBoxID, boxID, blockIDs)
+		boxConf.MetadataVersion = importedBoxConf.MetadataVersion
+		if err = box.SaveConf(boxConf); err != nil {
+			return
+		}
+	}
+	// 加密笔记本不支持闪卡：.sy.zip 内的牌组数据与文档闪卡属性都必须拒绝导入。
+	// 此时块 ID 已完成重映射，可以指出具体是哪些文档的卡片在包内，而不是只提示"不支持该操作"。
+	if encryptedTarget {
+		if err = checkEncryptedImportDeck(unzipRootPath, trees, blockIDs); nil != err {
+			return
+		}
+		// 兜底校验：禁止跨加密边界块引。包内文档尚未入库，块树查不到，因此把本次导入的全部块 ID
+		// 一并放行，既拦住包外引用（普通笔记本或其他加密笔记本的块），又不误伤包内跨文档引用。
+		importedBlockIDs := make(map[string]bool, len(blockIDs))
+		for _, newID := range blockIDs {
+			importedBlockIDs[newID] = true
+		}
+		for _, tree := range trees {
+			degradeCrossBoundaryBlockRefsWithAllowed(tree.Root, tree.Box, nil, importedBlockIDs)
+		}
 	}
 	if importedBoxDoc {
 		if err = writeBoxDocID(boxID); err != nil {
@@ -567,8 +683,8 @@ func importSY0(zipPath, boxID, toPath string, createNotebook, autoDetect bool, s
 	// 引用和嵌入指向重新生成的块 ID
 	for _, tree := range trees {
 		treenode.RemapTabsActiveIDs(tree.Root, blockIDs)
-		util.PushEndlessProgress(Conf.language(73) + " " + fmt.Sprintf(Conf.language(70), tree.Root.IALAttr("title")))
-		treenode.WalkWithTabTitles(tree.Root, func(n *ast.Node, entering bool) ast.WalkStatus {
+		util.PushEndlessProgress(Conf.language(73) + " " + fmt.Sprintf(Conf.language(70), treenode.ReadDocumentTitle(tree.Root).Text))
+		treenode.WalkWithInlineTitles(tree.Root, func(n *ast.Node, entering bool) ast.WalkStatus {
 			if !entering {
 				return ast.WalkContinue
 			}
@@ -597,6 +713,15 @@ func importSY0(zipPath, boxID, toPath string, createNotebook, autoDetect bool, s
 	}
 
 	var replacements []string
+	importedBlockIDs := map[string]bool{}
+	for _, tree := range trees {
+		ast.Walk(tree.Root, func(n *ast.Node, entering bool) ast.WalkStatus {
+			if entering && n.ID != "" {
+				importedBlockIDs[n.ID] = true
+			}
+			return ast.WalkContinue
+		})
+	}
 	for oldID, newID := range blockIDs {
 		replacements = append(replacements, oldID, newID)
 	}
@@ -666,6 +791,10 @@ func importSY0(zipPath, boxID, toPath string, createNotebook, autoDetect bool, s
 				newData = bytes.ReplaceAll(newData, []byte(oldAvID), []byte(newAvID))
 			}
 			newData = []byte(blockIDReplacer.Replace(string(newData)))
+			newData, err = isolateImportedAttributeViewBindings(newData, importedBlockIDs, encryptedTarget)
+			if err != nil {
+				return
+			}
 			newData, err = rewriteAttributeViewDataAssetReferences(newData, assetRewriteOptions)
 			if err != nil {
 				logging.LogErrorf("rewrite imported attribute view assets [%s] failed: %s", oldPath, err)
@@ -691,6 +820,8 @@ func importSY0(zipPath, boxID, toPath string, createNotebook, autoDetect bool, s
 			targetStorageAvDir := filepath.Join(util.DataDir, "storage", "av")
 			if copyErr := filelock.Copy(storageAvDir, targetStorageAvDir); nil != copyErr {
 				logging.LogErrorf("copy storage av dir from [%s] to [%s] failed: %s", storageAvDir, targetStorageAvDir, copyErr)
+				err = copyErr
+				return
 			}
 		} else {
 			// 加密笔记本：先把 AV 定义加密写入笔记本级目录，建立 box 映射后 mirror/relation 才能正确路由
@@ -701,7 +832,7 @@ func importSY0(zipPath, boxID, toPath string, createNotebook, autoDetect bool, s
 
 		// 重新指向数据库属性值
 		for _, tree := range trees {
-			util.PushEndlessProgress(Conf.language(73) + " " + fmt.Sprintf(Conf.language(70), tree.Root.IALAttr("title")))
+			util.PushEndlessProgress(Conf.language(73) + " " + fmt.Sprintf(Conf.language(70), treenode.ReadDocumentTitle(tree.Root).Text))
 			ast.Walk(tree.Root, func(n *ast.Node, entering bool) ast.WalkStatus {
 				if !entering || "" == n.ID {
 					return ast.WalkContinue
@@ -723,6 +854,9 @@ func importSY0(zipPath, boxID, toPath string, createNotebook, autoDetect bool, s
 				if ast.NodeAttributeView == n.Type {
 					n.AttributeViewID = avIDs[n.AttributeViewID]
 				}
+				if encryptedTarget {
+					retainImportedAttributeViewBindings(n, avIDs)
+				}
 				return ast.WalkContinue
 			})
 
@@ -733,10 +867,13 @@ func importSY0(zipPath, boxID, toPath string, createNotebook, autoDetect bool, s
 		for _, avID := range avIDs {
 			attrViewIDs = append(attrViewIDs, avID)
 		}
-		updateBoundBlockAvsAttribute(attrViewIDs)
+		avBoxID := ""
+		if encryptedTarget {
+			avBoxID = boxID
+		}
+		updateBoundBlockAvsAttribute(attrViewIDs, avBoxID)
 
 		// 插入关联关系 https://github.com/siyuan-note/siyuan/issues/11628
-		relationAvs := map[string]string{}
 		for _, avID := range avIDs {
 			attrView, _ := av.ParseAttributeView(avID)
 			if nil == attrView {
@@ -744,21 +881,17 @@ func importSY0(zipPath, boxID, toPath string, createNotebook, autoDetect bool, s
 			}
 
 			for _, keyValues := range attrView.KeyValues {
-				if nil != keyValues.Key && av.KeyTypeRelation == keyValues.Key.Type && nil != keyValues.Key.Relation {
-					relationAvs[avID] = keyValues.Key.Relation.AvID
+				if nil != keyValues.Key && av.KeyTypeRelation == keyValues.Key.Type && nil != keyValues.Key.Relation && keyValues.Key.Relation.AvID != "" {
+					av.UpsertAvBackRel(avID, keyValues.Key.Relation.AvID)
 				}
 			}
 		}
-
-		for srcAvID, destAvID := range relationAvs {
-			av.UpsertAvBackRel(srcAvID, destAvID)
-		}
 	}
 
-	// 将关联的闪卡数据合并到默认卡包 data/storage/riff/20230218211946-2kw8jgx 中
-	storageRiffDir = filepath.Join(storage, "riff")
+	// 普通笔记本将关联的闪卡数据合并到默认卡包 data/storage/riff/20230218211946-2kw8jgx 中
+	storageRiffDir := filepath.Join(storage, "riff")
 	if gulu.File.IsExist(storageRiffDir) {
-		deckToImport, loadErr := riff.LoadDeck(storageRiffDir, builtinDeckID, Conf.Flashcard.RequestRetention, Conf.Flashcard.MaximumInterval, Conf.Flashcard.Weights)
+		deckToImport, loadErr := riff.LoadDeck(storageRiffDir, builtinDeckID, confFlashcardReadSnapshot.RequestRetention, confFlashcardReadSnapshot.MaximumInterval, confFlashcardReadSnapshot.Weights)
 		if nil != loadErr {
 			logging.LogErrorf("load deck [%s] failed: %s", name, loadErr)
 		} else {
@@ -807,7 +940,7 @@ func importSY0(zipPath, boxID, toPath string, createNotebook, autoDetect bool, s
 
 	// 写回 .sy
 	for _, tree := range trees {
-		util.PushEndlessProgress(Conf.language(73) + " " + fmt.Sprintf(Conf.language(70), tree.Root.IALAttr("title")))
+		util.PushEndlessProgress(Conf.language(73) + " " + fmt.Sprintf(Conf.language(70), treenode.ReadDocumentTitle(tree.Root).Text))
 		syPath := filepath.Join(unzipRootPath, tree.Path)
 		// 加密前确定最终文件名：tree.ID + ".sy"，确保加密 AAD 用的是最终 box-relative path
 		finalSyName := tree.ID + ".sy"
@@ -816,7 +949,7 @@ func importSY0(zipPath, boxID, toPath string, createNotebook, autoDetect bool, s
 		renderer := render.NewJSONRenderer(tree, luteEngine.RenderOptions, luteEngine.ParseOptions)
 		data := renderer.Render()
 
-		if !util.UseSingleLineSave {
+		if !util.UseSingleLineSave.Load() {
 			buf := bytes.Buffer{}
 			buf.Grow(1024 * 1024 * 2)
 			if err = json.Indent(&buf, data, "", "\t"); err != nil {
@@ -828,6 +961,11 @@ func importSY0(zipPath, boxID, toPath string, createNotebook, autoDetect bool, s
 		newSyPath := filepath.Join(filepath.Dir(syPath), finalSyName)
 		if err = writeImportedTree(boxID, syPath, newSyPath, finalRelPath, data); err != nil {
 			logging.LogErrorf("write imported .sy [%s] failed: %s", syPath, err)
+			// 只有"目标笔记本未解锁导致拒绝写盘"才替换为提示解锁的文案，其余写盘错误原样上抛，避免归因错误。
+			// 相对路径的父目录名来自导入包，需与文档标题一样转义后再进入错误消息。
+			if errors.Is(err, errImportedTreeBoxLocked) {
+				err = fmt.Errorf(Conf.Language(388), htmlstd.EscapeString(finalRelPath))
+			}
 			return
 		}
 		tree.Path = finalRelPath
@@ -927,47 +1065,12 @@ func importSY0(zipPath, boxID, toPath string, createNotebook, autoDetect bool, s
 	// AV 定义已在 storage 删除前处理（加密笔记本DEK 加密拷到笔记本级，
 	// 普通 box 拷到全局 storage/av/），这里不再重复处理
 
-	// 将包含的自定义表情统一移动到 data/emojis/ 下
-	unzipRootEmojisPath := filepath.Join(unzipRootPath, "emojis")
-	filelock.Walk(unzipRootEmojisPath, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if d == nil {
-			return nil
-		}
-		if !util.IsValidUploadFileName(d.Name()) {
-			emojiFullName := path
-			fullPathFilteredName := filepath.Join(filepath.Dir(path), util.FilterUploadEmojiFileName(d.Name()))
-			// XSS through emoji name https://github.com/siyuan-note/siyuan/issues/15034
-			logging.LogWarnf("renaming invalid custom emoji file [%s] to [%s]", d.Name(), fullPathFilteredName)
-			if removeErr := filelock.Rename(emojiFullName, fullPathFilteredName); nil != removeErr {
-				logging.LogErrorf("renaming invalid custom emoji file to [%s] failed: %s", fullPathFilteredName, removeErr)
-			}
-		}
-		return nil
-	})
-	var emojiDirs []string
-	filelock.Walk(unzipRootPath, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if d == nil || unzipRootPath == path {
-			return nil
-		}
-		if d.Name() == "emojis" && d.IsDir() {
-			emojiDirs = append(emojiDirs, path)
-		}
-		return nil
-	})
-	dataEmojis := filepath.Join(util.DataDir, "emojis")
+	// 将包内表情复制到全局目录，冲突时不覆盖已有内容。
+	emojiDirs, err := importEmojiFiles(unzipRootPath, false)
+	if err != nil {
+		return
+	}
 	for _, emojis := range emojiDirs {
-		if gulu.File.IsDir(emojis) {
-			if err = filelock.Copy(emojis, dataEmojis); err != nil {
-				logging.LogErrorf("copy emojis from [%s] to [%s] failed: %s", emojis, dataEmojis, err)
-				return
-			}
-		}
 		os.RemoveAll(emojis)
 	}
 
@@ -1046,7 +1149,7 @@ func importSY0(zipPath, boxID, toPath string, createNotebook, autoDetect bool, s
 		}
 		av.BatchUpsertBlockRel(avNodes)
 		sql.IndexTreeQueue(tree)
-		util.PushEndlessProgress(Conf.language(73) + " " + fmt.Sprintf(Conf.language(70), tree.Root.IALAttr("title")))
+		util.PushEndlessProgress(Conf.language(73) + " " + fmt.Sprintf(Conf.language(70), treenode.ReadDocumentTitle(tree.Root).Text))
 	}
 	if sortErr = applyImportedSYSort(boxID, baseTargetPath, importedSortDocs, sourceSortIDs); nil != sortErr {
 		logging.LogErrorf("apply imported document sort failed: %s", sortErr)
@@ -1167,6 +1270,9 @@ func importSYAssets(unzipRootPath, boxID string) (assetPathMap map[string]string
 	return assetPathMap, nil
 }
 
+// errImportedTreeBoxLocked 表示导入写盘因目标加密笔记本未解锁被拒绝，供调用方映射为"请先解锁"文案。
+var errImportedTreeBoxLocked = errors.New("imported tree requires an unlocked encrypted notebook")
+
 func writeImportedTree(boxID, syPath, newSyPath, relPath string, data []byte) error {
 	if IsEncryptedBox(boxID) {
 		HoldBoxReadLock(boxID)
@@ -1174,7 +1280,7 @@ func writeImportedTree(boxID, syPath, newSyPath, relPath string, data []byte) er
 
 		dek, err := GetDEKIfUnlocked(boxID)
 		if err != nil {
-			return errors.New(Conf.Language(314))
+			return errImportedTreeBoxLocked
 		}
 		data, err = EncryptFile(boxID, relPath, dek, data)
 		if err != nil {
@@ -1188,76 +1294,24 @@ func writeImportedTree(boxID, syPath, newSyPath, relPath string, data []byte) er
 }
 
 func validateImportedNotebookIdentities(tmpDataPath string) ([]string, error) {
-	dirs, err := os.ReadDir(tmpDataPath)
+	if err := checkDocumentAddressingCopy(tmpDataPath, ""); err != nil {
+		return nil, err
+	}
+	identities, err := inspectDataImportNotebooks(tmpDataPath)
 	if err != nil {
 		return nil, err
 	}
-
 	var encryptedBoxIDs []string
-	for _, entry := range dirs {
-		if !entry.IsDir() || !ast.IsNodeIDPattern(entry.Name()) {
-			continue
-		}
-
-		boxID := entry.Name()
-		boxDir := filepath.Join(tmpDataPath, boxID)
-		confPath := filepath.Join(boxDir, ".siyuan", "conf.json")
-		backupPath := filepath.Join(boxDir, ".siyuan", notebookCryptoBackupFilename)
-
-		var boxConf *conf.BoxConf
-		if filelock.IsExist(confPath) {
-			data, readErr := filelock.ReadFile(confPath)
-			if readErr != nil {
-				return nil, fmt.Errorf("read imported notebook conf [%s] failed: %w", boxID, readErr)
-			}
-			boxConf = conf.NewBoxConf()
-			if unmarshalErr := gulu.JSON.UnmarshalJSON(data, boxConf); unmarshalErr != nil {
-				return nil, fmt.Errorf("parse imported notebook conf [%s] failed: %w", boxID, unmarshalErr)
-			}
-		}
-
-		var backup *conf.BoxEncryption
-		if filelock.IsExist(backupPath) {
-			backup, err = readBoxEncryptionFile(backupPath)
-			if err != nil {
-				return nil, fmt.Errorf("invalid imported notebook identity [%s]: %w", boxID, err)
-			}
-		}
-
-		var boxCrypt *conf.BoxEncryption
-		if boxConf != nil && boxConf.Encrypted {
-			if boxConf.BoxCrypt != nil && validateBoxEncryption(boxConf.BoxCrypt) == nil {
-				boxCrypt = boxConf.BoxCrypt
-			} else {
-				boxCrypt = backup
-			}
-			if boxCrypt == nil {
-				return nil, fmt.Errorf("encrypted notebook [%s] has no valid identity", boxID)
-			}
-		} else if boxConf != nil && backup != nil {
-			return nil, fmt.Errorf("notebook [%s] has conflicting normal and encrypted identities", boxID)
-		} else if backup != nil {
-			boxCrypt = backup
-		}
-
-		payloadFound, payloadErr := hasEncryptedNotebookPayloadAtPath(boxDir)
-		if payloadErr != nil {
-			return nil, fmt.Errorf("inspect imported notebook [%s] failed: %w", boxID, payloadErr)
-		}
-		if boxCrypt == nil && payloadFound {
-			return nil, fmt.Errorf("imported notebook [%s] contains encrypted payload without identity", boxID)
-		}
-		if boxCrypt == nil {
-			continue
-		}
-
-		if err = validateBoxEncryption(boxCrypt); err != nil {
-			return nil, fmt.Errorf("invalid imported notebook identity [%s]: %w", boxID, err)
-		}
-		if filelock.IsExist(filepath.Join(util.DataDir, boxID)) && IsEncryptedBox(boxID) {
+	for boxID, crypt := range identities {
+		if _, statErr := os.Lstat(filepath.Join(util.DataDir, boxID)); statErr == nil && IsEncryptedBox(boxID) {
 			return nil, fmt.Errorf("refuse to overwrite existing encrypted notebook [%s]", boxID)
 		}
-		encryptedBoxIDs = append(encryptedBoxIDs, boxID)
+		if crypt != nil {
+			if _, statErr := os.Lstat(filepath.Join(util.DataDir, boxID)); statErr == nil {
+				return nil, fmt.Errorf(Conf.Language(423), boxID)
+			}
+			encryptedBoxIDs = append(encryptedBoxIDs, boxID)
+		}
 	}
 	return encryptedBoxIDs, nil
 }
@@ -1306,12 +1360,12 @@ func ImportData(zipPath string) (err error) {
 		if d == nil {
 			return nil
 		}
-		if !util.IsValidUploadFileName(d.Name()) {
+		if !util.IsValidExistingEmojiFileName(d.Name()) {
 			emojiFullName := path
 			fullPathFilteredName := filepath.Join(filepath.Dir(path), util.FilterUploadEmojiFileName(d.Name()))
 			// XSS through emoji name https://github.com/siyuan-note/siyuan/issues/15034
 			logging.LogWarnf("renaming invalid custom emoji file [%s] to [%s]", d.Name(), fullPathFilteredName)
-			if removeErr := filelock.Rename(emojiFullName, fullPathFilteredName); nil != removeErr {
+			if removeErr := util.RenameEmojiFile(emojiFullName, fullPathFilteredName); nil != removeErr {
 				logging.LogErrorf("renaming invalid custom emoji file to [%s] failed: %s", fullPathFilteredName, removeErr)
 			}
 		}
@@ -1349,12 +1403,39 @@ func ImportFromLocalPathSkipRoot(boxID, localPath string, toPath string) (err er
 	return importFromLocalPath(boxID, localPath, toPath, true)
 }
 
+// ValidateImportFromLocalPath 校验 Markdown 导入来源和目标，不写入导入数据。
+func ValidateImportFromLocalPath(boxID, localPath, toPath string) error {
+	if _, err := getOpenedBox(boxID); err != nil {
+		return err
+	}
+	if _, err := os.Stat(localPath); err != nil {
+		return err
+	}
+	_, _, err := resolveMarkdownImportTarget(boxID, toPath)
+	return err
+}
+
+func resolveMarkdownImportTarget(boxID, toPath string) (baseHPath, baseTargetPath string, err error) {
+	toPath = path.Clean("/" + strings.TrimPrefix(toPath, "/"))
+	if toPath != "/" && !strings.HasSuffix(toPath, ".sy") {
+		toPath += ".sy"
+	}
+	toPath = normalizeBoxDocTarget(boxID, toPath)
+	if toPath == "/" {
+		return "/", "/", nil
+	}
+	block := treenode.GetBlockTreeRootByPath(boxID, toPath)
+	if block == nil || block.ID == "" {
+		return "", "", fmt.Errorf("target document not found in notebook %s: %s", boxID, toPath)
+	}
+	return block.HPath, strings.TrimSuffix(block.Path, ".sy"), nil
+}
+
 func importFromLocalPath(boxID, localPath string, toPath string, skipRoot bool) (err error) {
 	box, err := getOpenedBox(boxID)
 	if nil != err {
 		return err
 	}
-	toPath = normalizeBoxDocTarget(boxID, toPath)
 	util.PushEndlessProgress(Conf.Language(73))
 	defer func() {
 		util.PushClearProgress()
@@ -1372,24 +1453,37 @@ func importFromLocalPath(boxID, localPath string, toPath string, skipRoot bool) 
 
 	FlushTxQueue()
 
-	var baseHPath, baseTargetPath string
-	if "/" == toPath {
-		baseHPath = "/"
-		baseTargetPath = "/"
-	} else {
-		block := treenode.GetBlockTreeRootByPath(boxID, toPath)
-		if nil == block {
-			logging.LogErrorf("not found block by path [%s]", toPath)
-			return nil
-		}
-		baseHPath = block.HPath
-		baseTargetPath = strings.TrimSuffix(block.Path, ".sy")
+	baseHPath, baseTargetPath, err := resolveMarkdownImportTarget(boxID, toPath)
+	if err != nil {
+		return err
 	}
 	targetDocDirLocalPath := filepath.Join(util.DataDir, boxID,
 		filepath.FromSlash(strings.TrimPrefix(baseTargetPath, "/")))
 	assetDirPath := GetImportAssetsDir(boxID, targetDocDirLocalPath)
 	if err = os.MkdirAll(assetDirPath, 0755); err != nil {
 		return
+	}
+
+	spool := &markdownImportSpool{searchLinks: map[string]string{}}
+	if gulu.File.IsDir(localPath) {
+		spool, err = newMarkdownImportSpool()
+		if err != nil {
+			return err
+		}
+	}
+	defer spool.close()
+	stagedCount, stagedBytes := 0, 0
+	stageTree := func(tree *parse.Tree, sourcePath string) error {
+		if err := spool.addSource(tree, sourcePath); err != nil {
+			return err
+		}
+		stagedCount++
+		stagedBytes += spool.entries[len(spool.entries)-1].rawSize
+		if stagedCount >= markdownImportBatchDocuments || stagedBytes >= markdownImportBatchBytes {
+			debug.FreeOSMemory()
+			stagedCount, stagedBytes = 0, 0
+		}
+		return nil
 	}
 
 	hPathsIDs := map[string]string{}
@@ -1400,7 +1494,7 @@ func importFromLocalPath(boxID, localPath string, toPath string, skipRoot bool) 
 		targetPaths := map[string]string{}
 		count := 0
 		// md 转换 sy
-		filelock.Walk(localPath, func(currentPath string, d fs.DirEntry, err error) error {
+		if err = filelock.Walk(localPath, func(currentPath string, d fs.DirEntry, err error) error {
 			if err != nil {
 				return err
 			}
@@ -1456,11 +1550,11 @@ func importFromLocalPath(boxID, localPath string, toPath string, skipRoot bool) 
 			if skipRoot {
 				hPathRoot = ""
 			}
-			hPath := path.Join(baseHPath, hPathRoot, filepath.ToSlash(strings.TrimPrefix(currentPath, localPath)))
-			hPath = strings.TrimSuffix(hPath, ext)
+			externalPath := strings.TrimSuffix(path.Join("/", hPathRoot, filepath.ToSlash(strings.TrimPrefix(currentPath, localPath))), ext)
+			hPath := appendDocumentHPath(baseHPath, strings.TrimPrefix(externalPath, "/"))
 			if "" == curRelPath {
 				curRelPath = "/"
-				hPath = "/" + title
+				hPath = appendDocumentHPath(baseHPath, title)
 			} else {
 				dirPath := targetPaths[path.Dir(curRelPath)]
 				targetPath = path.Join(dirPath, id)
@@ -1487,13 +1581,17 @@ func importFromLocalPath(boxID, localPath string, toPath string, skipRoot bool) 
 				}
 
 				// 如果当前文件夹路径下包含同名的 Markdown 文件，则不创建空文档 https://github.com/siyuan-note/siyuan/issues/13149
-				if gulu.File.IsExist(currentPath+".md") || gulu.File.IsExist(currentPath+".markdown") {
-					targetPaths[curRelPath+".md"] = targetPath
-					return nil
+				for _, extension := range []string{".md", ".markdown"} {
+					if gulu.File.IsExist(currentPath + extension) {
+						targetPaths[curRelPath+extension] = targetPath
+						return nil
+					}
 				}
 
 				tree = treenode.NewTree(boxID, targetPath, hPath, title)
-				importTrees = append(importTrees, tree)
+				if err := stageTree(tree, externalPath); err != nil {
+					return err
+				}
 				return nil
 			}
 
@@ -1503,11 +1601,10 @@ func importFromLocalPath(boxID, localPath string, toPath string, skipRoot bool) 
 
 			data, readErr := os.ReadFile(currentPath)
 			if nil != readErr {
-				err = readErr
-				return io.EOF
+				return readErr
 			}
 
-			tree, yfmRootID, yfmTitle, yfmUpdated := parseStdMd(data)
+			tree, yfmRootID, yfmTitle, yfmUpdated := parseStdMd(data, true)
 			if nil == tree {
 				logging.LogErrorf("parse tree [%s] failed", currentPath)
 				return nil
@@ -1520,11 +1617,11 @@ func importFromLocalPath(boxID, localPath string, toPath string, skipRoot bool) 
 			if "" != yfmTitle {
 				title = yfmTitle
 			}
-			unescapedTitle, unescapeErr := url.PathUnescape(title)
-			if nil == unescapeErr {
-				title = unescapedTitle
+			parentDisplay := baseHPath
+			if curRelPath != "/" {
+				parentDisplay = appendDocumentHPath(baseHPath, strings.TrimPrefix(path.Dir(externalPath), "/"))
 			}
-			hPath = path.Join(path.Dir(hPath), title)
+			hPath = appendDocumentHPath(parentDisplay, title)
 			updated := yfmUpdated
 			fname := path.Base(targetPath)
 			targetPath = strings.ReplaceAll(targetPath, fname, id+".sy")
@@ -1539,7 +1636,8 @@ func importFromLocalPath(boxID, localPath string, toPath string, skipRoot bool) 
 			tree.Path = targetPath
 			targetPaths[curRelPath] = targetPath
 			tree.HPath = hPath
-			tree.Root.Spec = treenode.CurrentSpec
+			tree.Root.Spec = treenode.BaseSpec
+			treenode.UpgradeSpec(tree)
 
 			currentDir := filepath.Dir(currentPath)
 			ast.Walk(tree.Root, func(n *ast.Node, entering bool) ast.WalkStatus {
@@ -1628,9 +1726,11 @@ func importFromLocalPath(boxID, localPath string, toPath string, skipRoot bool) 
 			})
 
 			reassignIDUpdated(tree, id, updated)
-			importTrees = append(importTrees, tree)
+			if err := stageTree(tree, externalPath); err != nil {
+				return err
+			}
 
-			hPathsIDs[tree.HPath] = tree.ID
+			hPathsIDs[externalPath] = tree.ID
 			idPaths[tree.ID] = tree.Path
 
 			count++
@@ -1638,7 +1738,9 @@ func importFromLocalPath(boxID, localPath string, toPath string, skipRoot bool) 
 				util.PushEndlessProgress(fmt.Sprintf(Conf.language(70), fmt.Sprintf("%s", tree.HPath)))
 			}
 			return nil
-		})
+		}); err != nil {
+			return err
+		}
 	} else { // 导入单个文件
 		fileName := filepath.Base(localPath)
 		if !strings.HasSuffix(fileName, ".md") && !strings.HasSuffix(fileName, ".markdown") {
@@ -1655,7 +1757,7 @@ func importFromLocalPath(boxID, localPath string, toPath string, skipRoot bool) 
 		if err != nil {
 			return err
 		}
-		tree, yfmRootID, yfmTitle, yfmUpdated := parseStdMd(data)
+		tree, yfmRootID, yfmTitle, yfmUpdated := parseStdMd(data, true)
 		if nil == tree {
 			msg := fmt.Sprintf("parse tree [%s] failed", localPath)
 			logging.LogError(msg)
@@ -1668,10 +1770,6 @@ func importFromLocalPath(boxID, localPath string, toPath string, skipRoot bool) 
 		if "" != yfmTitle {
 			title = yfmTitle
 		}
-		unescapedTitle, unescapeErr := url.PathUnescape(title)
-		if nil == unescapeErr {
-			title = unescapedTitle
-		}
 		updated := yfmUpdated
 		fname := path.Base(targetPath)
 		targetPath = strings.ReplaceAll(targetPath, fname, id+".sy")
@@ -1682,8 +1780,9 @@ func importFromLocalPath(boxID, localPath string, toPath string, skipRoot bool) 
 		tree.Root.SetIALAttr("title", title)
 		tree.Box = boxID
 		tree.Path = targetPath
-		tree.HPath = path.Join(baseHPath, title)
-		tree.Root.Spec = treenode.CurrentSpec
+		tree.HPath = appendDocumentHPath(baseHPath, title)
+		tree.Root.Spec = treenode.BaseSpec
+		treenode.UpgradeSpec(tree)
 
 		localPathParentDir := filepath.Dir(localPath)
 		ast.Walk(tree.Root, func(n *ast.Node, entering bool) ast.WalkStatus {
@@ -1766,35 +1865,41 @@ func importFromLocalPath(boxID, localPath string, toPath string, skipRoot bool) 
 		reassignIDUpdated(tree, id, updated)
 		// 兜底校验：禁止跨加密边界块引（导入的 Markdown 可能含跨边界引用）
 		degradeCrossBoundaryBlockRefs(tree.Root, tree.Box)
-		importTrees = append(importTrees, tree)
+		if err := stageTree(tree, "/"+strings.TrimSuffix(fileName, util.Ext(fileName))); err != nil {
+			return err
+		}
 	}
 
 	var importedRootIDs []string
-	if 0 < len(importTrees) {
-		for id, newID := range moveIDs {
-			for _, importTree := range importTrees {
-				importTree.ID = strings.ReplaceAll(importTree.ID, id, newID)
-				importTree.Path = strings.ReplaceAll(importTree.Path, id, newID)
+	if len(spool.entries) > 0 {
+		spool.movePaths(moveIDs)
+		if err = spool.refreshDisplayPaths(baseTargetPath, baseHPath); err != nil {
+			return err
+		}
+		for _, entry := range spool.entries {
+			if _, ok := idPaths[entry.id]; ok {
+				idPaths[entry.id] = entry.path
 			}
 		}
-
-		initSearchLinks()
-		convertMdHyperlinks2WikiLinks()
-		convertWikiLinksAndTags()
-		mergeTextAndHandlerNestedInlines()
-
-		for i, tree := range importTrees {
-			indexWriteTreeIndexQueue(tree)
-			if 0 == i%4 {
-				util.PushEndlessProgress(fmt.Sprintf(Conf.Language(66), fmt.Sprintf("%d/%d ", i, len(importTrees))+tree.HPath))
+		i := 0
+		if err = spool.finish(func(tree *parse.Tree) error {
+			if err := indexWriteTreeIndexQueue(tree); err != nil {
+				return err
 			}
+			if i%4 == 0 {
+				util.PushEndlessProgress(fmt.Sprintf(Conf.Language(66), fmt.Sprintf("%d/%d ", i, len(spool.entries))+tree.HPath))
+			}
+			i++
+			return nil
+		}, func() {
+			sql.FlushQueue()
+			debug.FreeOSMemory()
+		}); err != nil {
+			return err
 		}
 		refreshBoxDocInfoByBoxID(boxID)
 		util.PushClearProgress()
-
-		importedRootIDs = importedTreeRootIDs(importTrees, baseTargetPath)
-		importTrees = []*parse.Tree{}
-		searchLinks = map[string]string{}
+		importedRootIDs = spool.rootIDs(baseTargetPath)
 
 		// 按照路径排序 Improve sort when importing markdown files https://github.com/siyuan-note/siyuan/issues/11390
 		var hPaths []string
@@ -1840,12 +1945,29 @@ func importFromLocalPath(boxID, localPath string, toPath string, skipRoot bool) 
 	return
 }
 
-func parseStdMd(markdown []byte) (ret *parse.Tree, yfmRootID, yfmTitle, yfmUpdated string) {
+func parseStdMd(markdown []byte, footnotes bool) (ret *parse.Tree, yfmRootID, yfmTitle, yfmUpdated string) {
 	luteEngine := util.NewStdLute()
+	setImportMathDelimiters(luteEngine)
+	luteEngine.SetFootnotes(footnotes)
 	luteEngine.SetYamlFrontMatter(true) // 解析 YAML Front Matter https://github.com/siyuan-note/siyuan/issues/10878
+	luteEngine.ParseOptions.PreserveTableCellSource = true
 	ret = parse.Parse("", markdown, luteEngine.ParseOptions)
 	if nil == ret {
 		return
+	}
+	if first := ret.Root.FirstChild; first != nil && first.Type == ast.NodeYamlFrontMatter {
+		attrs := map[string]any{}
+		if content := first.ChildByType(ast.NodeYamlFrontMatterContent); content != nil {
+			if err := yaml.Unmarshal(content.Tokens, &attrs); err != nil {
+				// 无效的元数据按普通 Markdown 解析，保留开头分隔线之间的正文。
+				luteEngine.SetYamlFrontMatter(false)
+				ret = parse.Parse("", markdown, luteEngine.ParseOptions)
+			}
+		}
+	}
+	lute.NormalizeMarkdownTableCells(ret)
+	if footnotes {
+		convertMarkdownFootnotes(ret)
 	}
 	parse.NormalizeInlineHTMLTextStyles(ret)
 	normalizeImportedHTMLTextStyles(ret)
@@ -1885,8 +2007,7 @@ func htmlBlock2Media(tree *parse.Tree) {
 }
 
 func processHTMLBlockSvgImg(n *ast.Node, assetDirPath, boxID string) {
-	re := regexp.MustCompile(`(?i)<svg[^>]*>(.*?)</svg>`)
-	matches := re.FindStringSubmatch(string(n.Tokens))
+	matches := importSVGPattern.FindStringSubmatch(string(n.Tokens))
 	if 1 >= len(matches) {
 		return
 	}
@@ -1921,8 +2042,7 @@ func processBase64Img(n *ast.Node, dest string, assetDirPath, boxID string) {
 	}
 	typ = strings.ToLower(typ)
 	str := strings.TrimSpace(dest[sep+8:])
-	re := regexp.MustCompile(`(?i)%0A`)
-	str = re.ReplaceAllString(str, "\n")
+	str = importEncodedNewlinePattern.ReplaceAllString(str, "\n")
 	var decodeErr error
 	unbased, decodeErr := base64.StdEncoding.DecodeString(str)
 	if nil != decodeErr {
@@ -2172,11 +2292,13 @@ func htmlBlock2Inline(tree *parse.Tree) {
 }
 
 func reassignIDUpdated(tree *parse.Tree, rootID, updated string) {
+	blockIDs := map[string]string{}
 	ast.Walk(tree.Root, func(n *ast.Node, entering bool) ast.WalkStatus {
 		if !entering || "" == n.ID {
 			return ast.WalkContinue
 		}
 
+		oldID := n.ID
 		n.ID = ast.NewNodeID()
 		if ast.NodeDocument == n.Type && "" != rootID {
 			n.ID = rootID
@@ -2191,6 +2313,16 @@ func reassignIDUpdated(tree *parse.Tree, rootID, updated string) {
 			}
 		} else {
 			n.SetIALAttr("updated", util.TimeFromID(n.ID))
+		}
+		blockIDs[oldID] = n.ID
+		return ast.WalkContinue
+	})
+	// 导入时为块分配新 ID，同时更新文档内脚注等块引用的目标。
+	ast.Walk(tree.Root, func(n *ast.Node, entering bool) ast.WalkStatus {
+		if entering && treenode.IsBlockRef(n) {
+			if id := blockIDs[n.TextMarkBlockRefID]; id != "" {
+				n.TextMarkBlockRefID = id
+			}
 		}
 		return ast.WalkContinue
 	})
@@ -2212,84 +2344,74 @@ func domAttrValue(n *html.Node, attrName string) string {
 	return ""
 }
 
-var importTrees []*parse.Tree
-var searchLinks = map[string]string{}
-
-func initSearchLinks() {
-	for _, tree := range importTrees {
-		ast.Walk(tree.Root, func(n *ast.Node, entering bool) ast.WalkStatus {
-			if !entering || (ast.NodeDocument != n.Type && ast.NodeHeading != n.Type) {
-				return ast.WalkContinue
-			}
-
-			nodePath := tree.HPath + "#"
-			if ast.NodeHeading == n.Type {
-				nodePath += n.Text()
-			}
-
-			searchLinks[nodePath] = n.ID
+func addImportSearchLinks(tree *parse.Tree, searchLinks map[string]string) {
+	ast.Walk(tree.Root, func(n *ast.Node, entering bool) ast.WalkStatus {
+		if !entering || (ast.NodeDocument != n.Type && ast.NodeHeading != n.Type) {
 			return ast.WalkContinue
-		})
-	}
+		}
+
+		nodePath := tree.HPath + "#"
+		if ast.NodeHeading == n.Type {
+			nodePath += n.Text()
+		}
+
+		searchLinks[nodePath] = n.ID
+		return ast.WalkContinue
+	})
 }
 
-func convertMdHyperlinks2WikiLinks() {
+func convertMdHyperlinks2WikiLinks(tree *parse.Tree) {
 	// Supports converting relative path hyperlinks into document block references after importing Markdown https://github.com/siyuan-note/siyuan/issues/13817
 
 	var unlinks []*ast.Node
-	for _, tree := range importTrees {
-		ast.Walk(tree.Root, func(n *ast.Node, entering bool) ast.WalkStatus {
-			if !entering || ast.NodeTextMark != n.Type {
-				return ast.WalkContinue
-			}
-
-			if "a" != n.TextMarkType {
-				return ast.WalkContinue
-			}
-
-			linkText := n.TextMarkTextContent
-			if "" == linkText {
-				return ast.WalkContinue
-			}
-			linkDest := n.TextMarkAHref
-			if "" == linkDest {
-				return ast.WalkContinue
-			}
-			if strings.HasPrefix(linkDest, "assets/") {
-				return ast.WalkContinue
-			}
-			if !strings.HasSuffix(linkDest, ".md") && !strings.HasSuffix(linkDest, ".markdown") {
-				return ast.WalkContinue
-			}
-			linkDest = strings.TrimSuffix(linkDest, ".md")
-			linkDest = strings.TrimSuffix(linkDest, ".markdown")
-
-			buf := bytes.Buffer{}
-			buf.WriteString("[[")
-			buf.WriteString(linkDest)
-			buf.WriteString("|")
-			buf.WriteString(linkText)
-			buf.WriteString("]]")
-
-			wikilinkNode := &ast.Node{Type: ast.NodeText, Tokens: buf.Bytes()}
-			n.InsertBefore(wikilinkNode)
-			unlinks = append(unlinks, n)
+	ast.Walk(tree.Root, func(n *ast.Node, entering bool) ast.WalkStatus {
+		if !entering || ast.NodeTextMark != n.Type {
 			return ast.WalkContinue
-		})
-	}
+		}
+
+		if "a" != n.TextMarkType {
+			return ast.WalkContinue
+		}
+
+		linkText := n.TextMarkTextContent
+		if "" == linkText {
+			return ast.WalkContinue
+		}
+		linkDest := n.TextMarkAHref
+		if "" == linkDest {
+			return ast.WalkContinue
+		}
+		if strings.HasPrefix(linkDest, "assets/") {
+			return ast.WalkContinue
+		}
+		linkPath, fragment, hasFragment := strings.Cut(linkDest, "#")
+		if !strings.HasSuffix(linkPath, ".md") && !strings.HasSuffix(linkPath, ".markdown") {
+			return ast.WalkContinue
+		}
+		linkDest = strings.TrimSuffix(strings.TrimSuffix(linkPath, ".md"), ".markdown")
+		if hasFragment {
+			linkDest += "#" + fragment
+		}
+
+		buf := bytes.Buffer{}
+		buf.WriteString("[[")
+		buf.WriteString(linkDest)
+		buf.WriteString("|")
+		buf.WriteString(linkText)
+		buf.WriteString("]]")
+
+		wikilinkNode := &ast.Node{Type: ast.NodeText, Tokens: buf.Bytes()}
+		n.InsertBefore(wikilinkNode)
+		unlinks = append(unlinks, n)
+		return ast.WalkContinue
+	})
 
 	for _, n := range unlinks {
 		n.Unlink()
 	}
 }
 
-func convertWikiLinksAndTags() {
-	for _, tree := range importTrees {
-		convertWikiLinksAndTags0(tree)
-	}
-}
-
-func convertWikiLinksAndTags0(tree *parse.Tree) {
+func convertWikiLinksAndTags(tree *parse.Tree, searchLinks map[string]string) {
 	ast.Walk(tree.Root, func(n *ast.Node, entering bool) ast.WalkStatus {
 		if !entering || ast.NodeText != n.Type {
 			return ast.WalkContinue
@@ -2327,7 +2449,7 @@ func convertWikiLinksAndTags0(tree *parse.Tree) {
 				link += "#" // 在结尾统一带上锚点方便后续查找
 			}
 
-			id := searchLinkID(link)
+			id := searchLinkID(link, searchLinks)
 			if "" == id {
 				start, end = end, length
 				continue
@@ -2351,7 +2473,7 @@ func convertWikiLinksAndTags0(tree *parse.Tree) {
 }
 
 func convertTags(text string) (ret string) {
-	if !util.MarkdownSettings.InlineTag {
+	if !util.MarkdownSettings.Load().InlineTag {
 		return text
 	}
 
@@ -2381,7 +2503,7 @@ func convertTags(text string) (ret string) {
 	return string(tokens)
 }
 
-func searchLinkID(link string) (id string) {
+func searchLinkID(link string, searchLinks map[string]string) (id string) {
 	id = searchLinks[link]
 	if "" != id {
 		return
@@ -2396,37 +2518,33 @@ func searchLinkID(link string) (id string) {
 	return
 }
 
-func mergeTextAndHandlerNestedInlines() {
-	luteEngine := NewLute()
-	luteEngine.SetHTMLTag2TextMark(true)
-	for _, tree := range importTrees {
-		tree.MergeText()
+func mergeTextAndHandlerNestedInlines(tree *parse.Tree, luteEngine *lute.Lute) {
+	tree.MergeText()
 
-		var unlinkTextNodes []*ast.Node
-		ast.Walk(tree.Root, func(n *ast.Node, entering bool) ast.WalkStatus {
-			if !entering || ast.NodeText != n.Type {
-				return ast.WalkContinue
-			}
-
-			if nil == n.Tokens {
-				return ast.WalkContinue
-			}
-
-			t := parse.Inline("", n.Tokens, luteEngine.ParseOptions) // 使用行级解析
-			parse.NestedInlines2FlattedSpans(t, false)
-			var children []*ast.Node
-			for c := t.Root.FirstChild.FirstChild; nil != c; c = c.Next {
-				children = append(children, c)
-			}
-			for _, c := range children {
-				n.InsertBefore(c)
-			}
-			unlinkTextNodes = append(unlinkTextNodes, n)
+	var unlinkTextNodes []*ast.Node
+	ast.Walk(tree.Root, func(n *ast.Node, entering bool) ast.WalkStatus {
+		if !entering || ast.NodeText != n.Type {
 			return ast.WalkContinue
-		})
-
-		for _, node := range unlinkTextNodes {
-			node.Unlink()
 		}
+
+		if nil == n.Tokens {
+			return ast.WalkContinue
+		}
+
+		t := parse.Inline("", n.Tokens, luteEngine.ParseOptions) // 使用行级解析
+		parse.NestedInlines2FlattedSpans(t, false)
+		var children []*ast.Node
+		for c := t.Root.FirstChild.FirstChild; nil != c; c = c.Next {
+			children = append(children, c)
+		}
+		for _, c := range children {
+			n.InsertBefore(c)
+		}
+		unlinkTextNodes = append(unlinkTextNodes, n)
+		return ast.WalkContinue
+	})
+
+	for _, node := range unlinkTextNodes {
+		node.Unlink()
 	}
 }

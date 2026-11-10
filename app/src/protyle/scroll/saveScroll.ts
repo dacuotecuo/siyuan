@@ -1,5 +1,6 @@
+import type {FileTreeGetDocRequestInput} from "../../types/api";
 import {hasClosestBlock} from "../util/hasClosest";
-import {getSelectionOffset} from "../util/selection";
+import {getSelectionOffset} from "../util/selectionOffsets";
 import {fetchPost} from "../../util/fetch";
 import {onGet} from "../util/onGet";
 import {Constants} from "../../constants";
@@ -76,13 +77,16 @@ export const getDocByScroll = (options: {
     scrollAttr?: IScrollAttr,
     mergedOptions?: IProtyleOptions,
     cb?: (keys: string[]) => void,
+    beforeAVRender?: () => void,
+    afterAVRender?: () => void | Promise<void>,
+    onRenderError?: () => void,
     focus?: boolean,
     updateReadonly?: boolean,
     signal?: AbortSignal,
     fail?: (invalid?: boolean) => void,
     isValid?: () => boolean,
 }) => {
-    const fetchDoc = (params: Record<string, any>, callback: (response: IWebSocketData) => void) => {
+    const fetchDoc = (params: FileTreeGetDocRequestInput, callback: (response: IWebSocketData) => void) => {
         params.includeDocInfo = true;
         let handled = false;
         void fetchPost("/api/filetree/getDoc", params, (response) => {
@@ -90,6 +94,7 @@ export const getDocByScroll = (options: {
             callback(response);
         }, undefined, undefined, options.signal).then(() => {
             if (!handled) {
+                options.onRenderError?.();
                 options.fail?.();
             }
         });
@@ -105,6 +110,9 @@ export const getDocByScroll = (options: {
         }
     }
     const renderDoc = (response: IWebSocketData) => {
+        if (response.code !== 0) {
+            options.onRenderError?.();
+        }
         try {
             onGet({
                 scrollPosition: options.mergedOptions?.scrollPosition,
@@ -117,20 +125,24 @@ export const getDocByScroll = (options: {
                 } : undefined,
                 updateReadonly: options.updateReadonly,
                 isValid: options.isValid,
+                beforeAVRender: options.beforeAVRender,
+                afterAVRender: options.afterAVRender,
+                onAVRenderError: options.onRenderError,
             });
         } catch (error) {
             console.error(error);
+            options.onRenderError?.();
             options.fail?.();
             return;
         }
     };
     if (options.scrollAttr?.zoomInId && options.scrollAttr?.rootId && options.scrollAttr.zoomInId !== options.scrollAttr.rootId) {
-        const getDocParam: Record<string, any> = {
+        const getDocParam: FileTreeGetDocRequestInput = {
             id: options.scrollAttr.zoomInId,
             size: Constants.SIZE_GET_MAX,
             query: options.protyle.query?.key,
             queryMethod: options.protyle.query?.method,
-            queryTypes: options.protyle.query?.types,
+            queryTypes: options.protyle.query?.types ? {...options.protyle.query.types} : undefined,
             querySubTypes: options.protyle.query?.subTypes,
             highlight: !isSupportCSSHL(),
         };
@@ -139,12 +151,12 @@ export const getDocByScroll = (options: {
         }
         fetchDoc(getDocParam, response => {
             if (response.code === 1) {
-                const getDocParam: Record<string, any> = {
+                const getDocParam: FileTreeGetDocRequestInput = {
                     id: options.scrollAttr.rootId || options.mergedOptions?.blockId || options.protyle.block?.rootID || options.scrollAttr.startId,
                     ...getScrollRequestParams(window.siyuan.config.editor.dynamicLoadBlocks),
                     query: options.protyle.query?.key,
                     queryMethod: options.protyle.query?.method,
-                    queryTypes: options.protyle.query?.types,
+                    queryTypes: options.protyle.query?.types ? {...options.protyle.query.types} : undefined,
                     querySubTypes: options.protyle.query?.subTypes,
                     highlight: !isSupportCSSHL(),
                 };
@@ -169,7 +181,7 @@ export const getDocByScroll = (options: {
         });
         return;
     }
-    const getDocParam: Record<string, any> = {
+    const getDocParam: FileTreeGetDocRequestInput = {
         id: options.scrollAttr?.rootId || options.mergedOptions?.blockId || options.protyle.block?.rootID || options.scrollAttr?.startId,
         ...getScrollRequestParams(
             window.siyuan.config.editor.dynamicLoadBlocks,
@@ -178,7 +190,7 @@ export const getDocByScroll = (options: {
         ),
         query: options.protyle.query?.key,
         queryMethod: options.protyle.query?.method,
-        queryTypes: options.protyle.query?.types,
+        queryTypes: options.protyle.query?.types ? {...options.protyle.query.types} : undefined,
         querySubTypes: options.protyle.query?.subTypes,
         highlight: !isSupportCSSHL(),
     };

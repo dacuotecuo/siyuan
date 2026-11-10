@@ -1,10 +1,11 @@
+import {bindPanelSearch} from "./panelSearch";
 import {Tab} from "../Tab";
 import {getInstanceById, setPanelFocus} from "../util";
 import {getDockByType} from "../tabUtil";
 import {Model} from "../Model";
 import {BlockPanel} from "../../block/Panel";
 import {fullscreen} from "../../protyle/breadcrumb/action";
-import {fetchPost} from "../../util/fetch";
+import {fetchPost, fetchSyncPost} from "../../util/fetch";
 import {openFileById} from "../../editor/util";
 import {updateHotkeyAfterTip} from "../../protyle/util/compatibility";
 import {openGlobalSearch} from "../../search/util";
@@ -13,7 +14,10 @@ import {checkFold} from "../../util/noRelyPCFunction";
 import {Editor} from "../../editor";
 import {getDocDisplayName, isEncryptedBox} from "../../util/pathName";
 import {GraphEngine} from "./graph/GraphEngine";
-import {IGraphNodeClick, IGraphSourceLink, IGraphSourceNode} from "./graph/types";
+import {IGraphNodeClick, IGraphNodeContextMenu, IGraphSourceLink, IGraphSourceNode} from "./graph/types";
+import {openDocumentMenu} from "../../protyle/header/documentMenu";
+import {Constants} from "../../constants";
+import {config as configApi} from "../../config/util/configApi";
 
 interface IGraphSearchOptions {
     id?: string;
@@ -30,6 +34,7 @@ export class Graph extends Model {
     private element: HTMLElement;
     private saveTimeout: number;
     private searchTimeout: number;
+    private settingsSavingSuspended = false;
     private pendingGraphConf: IGraphCommon & {dailyNote: boolean, minRefs?: number};
     public blockId: string; // "local" / "pin" 必填
     public rootId: string; // "local" 必填
@@ -41,6 +46,8 @@ export class Graph extends Model {
     };
     private renderedGraphData: Graph["graphData"];
     private requestVersion = 0;
+    private menuRequestVersion = 0;
+    private menuAbort?: AbortController;
     public type: "local" | "pin" | "global";
 
     constructor(options: {
@@ -240,9 +247,10 @@ export class Graph extends Model {
 <button class="b3-button b3-button--small fn__block">${window.siyuan.languages.reset}</button>`;
         }
         this.element.innerHTML = `<div class="block__icons"> 
-    <div class="block__logo block__logo--counter fn__flex-1">${this.type === "global" ? window.siyuan.languages.globalGraph : window.siyuan.languages.graphView}<span class="counter fn__none" data-type="node-count"></span></div>
-    <input class="b3-text-field search__label fn__size200 fn__none" placeholder="${window.siyuan.languages.searchPlaceholder}" />
-    <span data-type="search" class="block__icon ariaLabel" data-position="north" aria-label="${window.siyuan.languages.search}"><svg><use xlink:href='#iconFilter'></use></svg></span>
+    <div class="block__logo block__logo--counter">${this.type === "global" ? window.siyuan.languages.globalGraph : window.siyuan.languages.graphView}<span class="counter fn__none" data-type="node-count"></span></div>
+    <div class="fn__flex-1"></div>
+    <input spellcheck="false" class="b3-text-field search__label fn__size200 fn__none" placeholder="${window.siyuan.languages.searchPlaceholder}" />
+    <span data-type="search" class="block__icon ariaLabel" data-position="north" aria-label="${window.siyuan.languages.search}"><svg><use xlink:href='#iconSearch'></use></svg></span>
     <span class="fn__space"></span>
     <span data-type="refresh" class="block__icon ariaLabel" data-position="north" aria-label="${window.siyuan.languages.refresh}"><svg><use xlink:href='#iconRefresh'></use></svg></span>
     <div class="fn__space"></div>
@@ -264,6 +272,8 @@ export class Graph extends Model {
         this.graphElement = this.element.querySelector(".graph__svg");
         this.ensureGraphEngine();
         this.inputElement = this.element.querySelector("input");
+        const showSearch = bindPanelSearch(this.inputElement,
+            this.element.querySelector('[data-type="search"]'), () => this.scheduleGraphSearch());
         this.panelElement = this.element.querySelector(".graph__panel") as HTMLElement;
         this.element.addEventListener("click", (event) => {
             if (this.type === "local") {
@@ -297,8 +307,7 @@ export class Graph extends Model {
                             this.panelElement.style.right = "0";
                         }
                     } else if (dataType === "search") {
-                        target.previousElementSibling.classList.remove("fn__none");
-                        (target.previousElementSibling as HTMLInputElement).select();
+                        showSearch();
                     } else if (dataType === "refresh") {
                         this.searchGraph({refresh: true});
                     } else if (dataType === "fullscreen") {
@@ -316,7 +325,9 @@ export class Graph extends Model {
                     }
                     break;
                 } else if (target.classList.contains("graph__svg")) {
-                    this.element.querySelectorAll(".block__icon.block__icon--active").forEach(item => {
+                    // 图谱阻止了指针按下的默认行为，需要主动让搜索框失焦。
+                    this.inputElement.blur();
+                    this.element.querySelectorAll('.block__icon[data-type="menu"].block__icon--active').forEach(item => {
                         item.classList.remove("block__icon--active");
                     });
                     this.panelElement.style.right = "";
@@ -324,19 +335,6 @@ export class Graph extends Model {
                 }
                 target = target.parentElement;
             }
-        });
-        this.inputElement.addEventListener("compositionend", () => {
-            this.scheduleGraphSearch();
-        });
-        this.inputElement.addEventListener("blur", (event: InputEvent) => {
-            const inputElement = event.target as HTMLInputElement;
-            inputElement.classList.add("fn__none");
-        });
-        this.inputElement.addEventListener("input", (event: InputEvent) => {
-            if (event.isComposing) {
-                return;
-            }
-            this.scheduleGraphSearch();
         });
         this.element.querySelectorAll(".b3-slider").forEach((item: HTMLInputElement) => {
             item.addEventListener("input", () => {
@@ -419,6 +417,9 @@ export class Graph extends Model {
             window.siyuan.config.graph.local = conf as IGraphCommon & { dailyNote: boolean };
         }
         this.inputElement.value = "";
+        const searchElement = this.element.querySelector('[data-type="search"]');
+        searchElement.classList.remove("block__icon--active");
+        searchElement.setAttribute("aria-label", window.siyuan.languages.search);
         this.panelElement.querySelector("[data-type='nodeSize']").setAttribute("aria-label", conf.d3.nodeSize.toString());
         this.panelElement.querySelector("[data-type='centerStrength']").setAttribute("aria-label", conf.d3.centerStrength.toString());
         this.panelElement.querySelector("[data-type='collideRadius']").setAttribute("aria-label", conf.d3.collideRadius.toString());
@@ -450,6 +451,7 @@ export class Graph extends Model {
     }
 
     public searchGraph(options: IGraphSearchOptions = {}) {
+        if (this.settingsSavingSuspended) return;
         const refresh = options.refresh || false;
         const resetLayout = options.resetLayout ?? refresh;
         const id = options.id;
@@ -462,9 +464,7 @@ export class Graph extends Model {
             this.searchTimeout = 0;
         }
         if (this.saveTimeout) {
-            window.clearTimeout(this.saveTimeout);
-            this.saveTimeout = 0;
-            this.persistGraphConf();
+            this.flushPendingSettings();
         }
         const requestVersion = ++this.requestVersion;
         element.classList.add("fn__rotate");
@@ -478,7 +478,11 @@ export class Graph extends Model {
                 if (requestVersion !== this.requestVersion) {
                     return;
                 }
-                this.graphData = response.data;
+                if (response.code !== 0 || !response.data?.conf) {
+                    element.classList.remove("fn__rotate");
+                    return;
+                }
+                this.graphData = {nodes: response.data.nodes, links: response.data.links, box: response.data.box};
                 window.siyuan.config.graph.global = response.data.conf;
                 this.onGraph(undefined, resetLayout);
                 element.classList.remove("fn__rotate");
@@ -495,7 +499,7 @@ export class Graph extends Model {
                     return;
                 }
                 element.classList.remove("fn__rotate");
-                if (response.code !== 0) {
+                if (response.code !== 0 || !response.data?.conf) {
                     this.graphData = undefined;
                     this.onGraph();
                     return;
@@ -518,7 +522,7 @@ export class Graph extends Model {
                         return;
                     }
                 }
-                this.graphData = response.data;
+                this.graphData = {nodes: response.data.nodes, links: response.data.links, box: response.data.box};
                 window.siyuan.config.graph.local = response.data.conf;
                 this.onGraph(this.blockId, resetLayout);
             });
@@ -531,14 +535,12 @@ export class Graph extends Model {
 
     public destroy() {
         this.requestVersion++;
+        this.menuRequestVersion++;
+        this.menuAbort?.abort();
         if (this.searchTimeout) {
             window.clearTimeout(this.searchTimeout);
         }
-        if (this.saveTimeout) {
-            window.clearTimeout(this.saveTimeout);
-            this.saveTimeout = 0;
-        }
-        this.persistGraphConf();
+        this.flushPendingSettings();
         this.graphEngine?.destroy();
         this.graphEngine = undefined;
         this.renderedGraphData = undefined;
@@ -602,19 +604,34 @@ export class Graph extends Model {
         }
         this.pendingGraphConf = conf;
         this.saveTimeout = window.setTimeout(() => {
-            this.saveTimeout = 0;
-            this.persistGraphConf();
+            this.flushPendingSettings();
         }, 300);
     }
 
-    private persistGraphConf() {
+    // 重置期间暂停会保存配置的查询，取消重置后恢复面板刷新。
+    public suspendSettingsSaving() {
+        if (this.searchTimeout) {
+            window.clearTimeout(this.searchTimeout);
+            this.searchTimeout = 0;
+            this.pendingGraphConf = this.getGraphConf();
+        }
+        this.flushPendingSettings();
+        this.settingsSavingSuspended = true;
+        return () => {
+            this.settingsSavingSuspended = false;
+            this.searchGraph();
+        };
+    }
+
+    private flushPendingSettings() {
+        if (this.saveTimeout) {
+            window.clearTimeout(this.saveTimeout);
+            this.saveTimeout = 0;
+        }
         if (!this.pendingGraphConf) {
             return;
         }
-        fetchPost("/api/graph/setGraphConf", {
-            type: this.type === "global" ? "global" : "local",
-            conf: this.pendingGraphConf,
-        });
+        void configApi.set(`graph.${this.type === "global" ? "global" : "local"}`, this.pendingGraphConf);
         this.pendingGraphConf = undefined;
     }
 
@@ -668,7 +685,15 @@ export class Graph extends Model {
     private ensureGraphEngine() {
         if (!this.graphEngine) {
             this.graphEngine = new GraphEngine(this.graphElement, {
+                onPointerDown: () => window.siyuan.menus.menu.remove(),
                 onNodeClick: (details) => this.openGraphNode(details),
+                onNodeContextMenu: (details) => {
+                    if (details.node.type !== "NodeDocument") {
+                        return false;
+                    }
+                    void this.openGraphNodeMenu(details);
+                    return true;
+                },
             });
             this.renderedGraphData = undefined;
         }
@@ -728,6 +753,56 @@ export class Graph extends Model {
                     zoomIn
                 });
             });
+        }
+    }
+
+    private async openGraphNodeMenu(details: IGraphNodeContextMenu) {
+        this.menuAbort?.abort();
+        const abort = new AbortController();
+        this.menuAbort = abort;
+        const request = ++this.menuRequestVersion;
+        const cancel = () => {
+            this.menuRequestVersion++;
+            abort.abort();
+        };
+        document.addEventListener("pointerdown", cancel, true);
+        document.addEventListener("keydown", cancel, true);
+        window.siyuan.menus.menu.remove();
+        try {
+            const [info, doc] = await Promise.all([
+                fetchSyncPost("/api/block/getBlockInfo", {id: details.node.id}, undefined, false, abort.signal),
+                fetchSyncPost("/api/block/getDocInfo", {id: details.node.id}, undefined, false, abort.signal),
+            ]);
+            if (request !== this.menuRequestVersion || info.code !== 0 || doc.code !== 0 || !info.data || !doc.data ||
+                !info.data.box || !info.data.path || doc.data.rootID !== details.node.id) {
+                return;
+            }
+            if (!this.graphElement.isConnected) {
+                return;
+            }
+            const position = {x: details.x, y: details.y};
+            openDocumentMenu({
+                app: this.app,
+                id: details.node.id,
+                notebookId: info.data.box,
+                path: info.data.path,
+                docInfo: doc.data,
+                target: this.graphElement,
+                position,
+                from: "graph",
+                disabled: window.siyuan.config.readonly || window.siyuan.config.editor.readOnly ||
+                    doc.data.ial?.[Constants.CUSTOM_SY_READONLY] === "true",
+            });
+        } catch (error) {
+            if (!abort.signal.aborted) {
+                console.warn("Unable to open graph document menu", error);
+            }
+        } finally {
+            document.removeEventListener("pointerdown", cancel, true);
+            document.removeEventListener("keydown", cancel, true);
+            if (this.menuAbort === abort) {
+                this.menuAbort = undefined;
+            }
         }
     }
 }

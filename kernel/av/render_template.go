@@ -1,24 +1,13 @@
-// SiYuan - From thought to insight, with agents
+// SiYuan - https://github.com/siyuan-note/siyuan
 // Copyright (c) 2020-present, b3log.org
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU Affero General Public License for more details.
-//
-// You should have received a copy of the GNU Affero General Public License
-// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+// SPDX-License-Identifier: AGPL-3.0-or-later
 
 package av
 
 type renderedContentBinding struct {
-	value   *Value
-	content string
+	value       *Value
+	content     string
+	hasTemplate bool
 }
 
 // CloneStoredValue 复制字段存储值，并递归剥离运行时显示模板结果。
@@ -28,6 +17,7 @@ func CloneStoredValue(value *Value) (ret *Value) {
 	}
 	cloned := *value
 	cloned.RenderedContent = ""
+	cloned.HasRenderTemplate = false
 	ret = &cloned
 	if nil != value.Relation {
 		relation := *value.Relation
@@ -58,16 +48,19 @@ func (av *AttributeView) suspendRenderedContents() (restore func()) {
 	var bindings []renderedContentBinding
 	if nil != av {
 		av.visitPersistedValues(func(value *Value) {
-			if "" == value.RenderedContent {
+			if "" == value.RenderedContent && !value.HasRenderTemplate {
 				return
 			}
-			bindings = append(bindings, renderedContentBinding{value: value, content: value.RenderedContent})
+			bindings = append(bindings, renderedContentBinding{value: value, content: value.RenderedContent,
+				hasTemplate: value.HasRenderTemplate})
 			value.RenderedContent = ""
+			value.HasRenderTemplate = false
 		})
 	}
 	return func() {
 		for _, binding := range bindings {
 			binding.value.RenderedContent = binding.content
+			binding.value.HasRenderTemplate = binding.hasTemplate
 		}
 	}
 }
@@ -126,6 +119,7 @@ func (av *AttributeView) visitPersistedValues(visit func(*Value)) {
 			}
 		}
 	}
+	av.visitAutomationValues(visitValue)
 }
 
 func visitKeyValues(key *Key, visitValue func(*Value)) {
@@ -160,14 +154,22 @@ func visitViewValues(view *View, visitValue func(*Value)) {
 	visitKeyValues(view.GroupKey, visitValue)
 	visitValue(view.GroupVal)
 	visitFilterValues(view.Filters, visitValue)
+	for _, rule := range view.ConditionalColors {
+		if nil != rule {
+			visitFilterValues([]*ViewFilter{rule.Filter}, visitValue)
+		}
+	}
 	if nil != view.GroupCalc && nil != view.GroupCalc.FieldCalc {
 		visitValue(view.GroupCalc.FieldCalc.Result)
 	}
-	if nil != view.Table {
-		if nil != view.Table.BaseLayout {
-			visitFilterValues(view.Table.Filters, visitValue)
+	for _, layout := range view.TableLayouts() {
+		if nil == layout {
+			continue
 		}
-		for _, column := range view.Table.Columns {
+		if nil != layout.BaseLayout {
+			visitFilterValues(layout.Filters, visitValue)
+		}
+		for _, column := range layout.Columns {
 			if nil == column {
 				continue
 			}

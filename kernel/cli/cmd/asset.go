@@ -1,18 +1,6 @@
-// SiYuan - From thought to insight, with agents
+// SiYuan - https://github.com/siyuan-note/siyuan
 // Copyright (c) 2020-present, b3log.org
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU Affero General Public License for more details.
-//
-// You should have received a copy of the GNU Affero General Public License
-// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+// SPDX-License-Identifier: AGPL-3.0-or-later
 
 package cmd
 
@@ -112,7 +100,10 @@ var assetUnusedCmd = &cobra.Command{
 	Use:   "unused",
 	Short: "List unused assets",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		items := model.UnusedAssets(true)
+		items, err := model.UnusedAssets(true)
+		if err != nil {
+			return err
+		}
 		switch outputFormat {
 		case "json":
 			data, _ := json.MarshalIndent(items, "", "  ")
@@ -164,7 +155,10 @@ var assetCleanCmd = &cobra.Command{
 			return nil
 		}
 
-		removed := model.RemoveUnusedAssets()
+		removed, err := model.RemoveUnusedAssets()
+		if err != nil {
+			return err
+		}
 		if len(removed) == 0 {
 			fmt.Println("No unused assets to clean.")
 			return nil

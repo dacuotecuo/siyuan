@@ -2,6 +2,7 @@ import {confirmDialog} from "../dialog/confirmDialog";
 import {Plugin} from "./index";
 import {hideMessage, showMessage} from "../dialog/message";
 import {Dialog} from "../dialog";
+import {openInputDialog} from "../dialog/inputDialog";
 import {fetchGet, fetchPost, fetchSyncPost} from "../util/fetch";
 import {getBackend, getFrontend} from "../util/functions";
 /// #if !MOBILE
@@ -25,22 +26,24 @@ import {getAllModels, getAllTabs} from "../layout/getAll";
 import {exportLayout} from "../layout/util";
 /// #endif
 import {getAllEditor} from "../layout/getAll";
-import {openSetting} from "../config";
+import {openPluginSetting} from "../config";
 import {openAttr, openFileAttr} from "../menus/commonMenuItem";
 import {globalCommand} from "../boot/globalEvent/command/global";
-import {saveScroll} from "../protyle/scroll/saveScroll";
+import {saveMobileLayout} from "../mobile/util/saveLayout";
 import {hasClosestByClassName} from "../protyle/util/hasClosest";
 import type {MobileFiles} from "../mobile/dock/MobileFiles";
 import type {Files} from "../layout/dock/Files";
 import {ProtyleMethod} from "./ProtyleMethod";
 import {openEmojiPanel} from "../emoji";
+import {openAssetPicker} from "../asset/picker";
 import {adjustEditorFontSize, setEditorFontSize} from "../util/editorFontSize";
+import {insertEditorContent, IInsertContentOptions} from "./insertContent";
 /// #if !MOBILE
 import {isDockPanelVisible, toggleDockPanel} from "../layout/dock/panel";
 /// #endif
 
-let openTab;
-let openWindow;
+let openTab: (options: any) => any;
+let openWindow: (options: any) => void;
 /// #if MOBILE
 openTab = () => {
     // TODO: Mobile
@@ -222,14 +225,13 @@ const openAttributePanel = (options: {
 
 const saveLayout = (cb: () => void) => {
     /// #if MOBILE
-    if (window.siyuan.mobile.editor) {
-        const result = saveScroll(window.siyuan.mobile.editor.protyle);
-        if (cb && result instanceof Promise) {
-            result.then(() => {
-                cb();
-            });
+    void saveMobileLayout().then((saved) => {
+        if (saved) {
+            cb?.();
+        } else {
+            showMessage(window.siyuan.languages.mobileLayoutSaveError, 6000, "error");
         }
-    }
+    });
     /// #else
     exportLayout({cb, errorExit: false});
     /// #endif
@@ -285,6 +287,19 @@ const getActiveEditor = (wndActive = true) => {
     return editor;
 };
 
+const insertContent = (options: IInsertContentOptions) => {
+    if (options?.editor) {
+        return insertEditorContent(options, []);
+    }
+    let editors: Protyle[];
+    /// #if MOBILE
+    editors = [window.siyuan.mobile.popEditor, window.siyuan.mobile.editor].filter(Boolean);
+    /// #else
+    editors = getAllModels().editor.map(model => model.editor);
+    /// #endif
+    return insertEditorContent(options, editors);
+};
+
 export const expandDocTree = async (options: {
     id: string,
     isSetCurrent?: boolean
@@ -306,7 +321,7 @@ export const expandDocTree = async (options: {
         liElement = file.element.querySelector(`.b3-list[data-url="${options.id}"]`)?.firstElementChild as HTMLElement;
     } else {
         const response = await fetchSyncPost("/api/block/getBlockInfo", {id: options.id});
-        if (response.code === -1) {
+        if (response.code !== 0 || response.data.publishAccessRequired) {
             return;
         }
         notebookId = response.data.box;
@@ -393,7 +408,7 @@ const isBottomDockVisible = () => {
     /// #endif
 };
 
-export const API = {
+const createAPI = () => ({
     adaptHotkey: updateHotkeyTip,
     confirm: confirmDialog,
     Constants,
@@ -416,6 +431,7 @@ export const API = {
     ProtyleMethod,
     Plugin,
     Dialog,
+    openInputDialog,
     Menu,
     Setting,
     getAllEditor,
@@ -426,17 +442,29 @@ export const API = {
     getAllTabs,
     /// #endif
     getActiveEditor,
+    insertContent,
     platformUtils,
-    openSetting,
+    openSetting: openPluginSetting,
     openAttributePanel,
     saveLayout,
     globalCommand,
     expandDocTree,
     openEmoji,
+    openAssetPicker,
     toggleLeftDock,
     toggleRightDock,
     toggleBottomDock,
     isLeftDockVisible,
     isRightDockVisible,
     isBottomDockVisible,
+});
+
+let api: ReturnType<typeof createAPI>;
+
+export const getAPI = () => {
+    // 在插件首次请求接口时初始化，避免循环依赖读取尚未初始化的模块成员。
+    if (!api) {
+        api = createAPI();
+    }
+    return api;
 };

@@ -1,18 +1,6 @@
-// SiYuan - From thought to insight, with agents
+// SiYuan - https://github.com/siyuan-note/siyuan
 // Copyright (c) 2020-present, b3log.org
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU Affero General Public License for more details.
-//
-// You should have received a copy of the GNU Affero General Public License
-// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+// SPDX-License-Identifier: AGPL-3.0-or-later
 
 package model
 
@@ -21,6 +9,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	ignore "github.com/sabhiram/go-gitignore"
 	"github.com/siyuan-note/siyuan/kernel/util"
 )
 
@@ -96,6 +85,71 @@ func TestPathsAffectSync(t *testing.T) {
 		if PathsAffectSync(ignored) {
 			t.Fatalf("repository ignored path should not affect sync: %s", ignored)
 		}
+	}
+}
+
+func TestPathsAffectSyncMetadata(t *testing.T) {
+	oldDataDir := util.DataDir
+	util.DataDir = t.TempDir()
+	t.Cleanup(func() {
+		util.DataDir = oldDataDir
+	})
+
+	for _, tc := range []struct {
+		path string
+		want bool
+	}{
+		{".siyuan/searchignore", true},
+		{".siyuan/embeddingignore", true},
+		{".siyuan/indexignore", true},
+		{".siyuan/refsearchignore", true},
+		{".siyuan/data-crypto-backup.json", true},
+		{".siyuan/conf.json", false},
+		{".siyuan/.hidden/file.json", false},
+		{".hidden/.siyuan/file.json", false},
+		{"notebook/.siyuan/conf.json", true},
+		{".siyuan/recovery.tmp", false},
+		{"storage/view-state-corrupted-20260913000000.json", false},
+	} {
+		t.Run(tc.path, func(t *testing.T) {
+			path := filepath.Join(util.DataDir, filepath.FromSlash(tc.path))
+			writeSyncPathTestFile(t, path)
+			if got := PathsAffectSync(path); got != tc.want {
+				t.Fatalf("existing path: got %v, want %v", got, tc.want)
+			}
+			if err := os.Remove(path); nil != err {
+				t.Fatal(err)
+			}
+			if got := PathsAffectSync(path); got != tc.want {
+				t.Fatalf("removed path: got %v, want %v", got, tc.want)
+			}
+		})
+	}
+
+	metadataDir := filepath.Join(util.DataDir, ".siyuan")
+	writeSyncPathTestFile(t, filepath.Join(metadataDir, "data-crypto-backup.json"))
+	matcher := ignore.CompileIgnoreLines(mustSyncIgnoreLines(t)...)
+	if err := os.Remove(filepath.Join(metadataDir, "syncignore")); nil != err {
+		t.Fatal(err)
+	}
+	if !pathAffectsSync(util.DataDir, metadataDir, matcher) {
+		t.Fatal("metadata directory without syncignore should affect sync")
+	}
+	matcher = ignore.CompileIgnoreLines("/.siyuan/data-crypto-backup.json")
+	if pathAffectsSync(util.DataDir, metadataDir, matcher) {
+		t.Fatal("ignored metadata should not affect sync")
+	}
+}
+
+func TestSyncIgnoreLegacyConfReadFailure(t *testing.T) {
+	oldDataDir := util.DataDir
+	util.DataDir = t.TempDir()
+	t.Cleanup(func() {
+		util.DataDir = oldDataDir
+	})
+	writeSyncPathTestFile(t, filepath.Join(util.DataDir, ".siyuan"))
+	if _, _, err := getSyncIgnoreRules(); err == nil {
+		t.Fatal("unreadable rules must prevent repository creation")
 	}
 }
 

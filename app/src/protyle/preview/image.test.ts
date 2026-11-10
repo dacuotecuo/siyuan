@@ -6,8 +6,11 @@ import {ModuleKind, ScriptTarget, transpileModule} from "typescript";
 
 test("image preview initializes its toolbar when ready is dispatched on the source element", async () => {
     const actions = ["zoom-in", "zoom-out", "one-to-one", "reset", "prev", "play", "next",
-        "rotate-left", "rotate-right", "flip-horizontal", "flip-vertical", "copy", "copy-file", "close"];
+        "rotate-left", "rotate-right", "flip-horizontal", "flip-vertical", "copy", "copy-file"];
     class Classes extends Set<string> {
+        public remove(name: string) {
+            this.delete(name);
+        }
         public toggle(name: string, force: boolean) {
             if (force) {
                 this.add(name);
@@ -28,9 +31,12 @@ test("image preview initializes its toolbar when ready is dispatched on the sour
     const copied: string[] = [];
     const copiedFiles: string[] = [];
     let supportsFiles = true;
-    const sourceElement = new EventTarget();
+    const sourceElement = Object.assign(new EventTarget(), {childElementCount: 2});
     class TestViewer {
         public viewed = true;
+        public viewer = {
+            querySelector: (selector: string) => buttons.get(selector.replace(".viewer-navigation > ", "")),
+        };
         public image = {src: "blob:first"};
         public toolbar = {
             querySelector: (selector: string) => {
@@ -40,8 +46,9 @@ test("image preview initializes its toolbar when ready is dispatched on the sour
         };
 
         constructor(element: EventTarget, public options: {
+            title: [number, (image: {alt: string}, data: {naturalWidth: number, naturalHeight: number}) => string],
             ready: EventListener,
-            view: () => void,
+            view: (event?: {detail: {index: number}}) => void,
             viewed: () => void,
             toolbar: {copy: () => void, copyFile: () => void},
         }) {
@@ -52,6 +59,8 @@ test("image preview initializes its toolbar when ready is dispatched on the sour
             // Viewer.js 将生命周期事件派发给源元素，回调的 this 指向该元素。
             sourceElement.dispatchEvent(new Event("ready"));
         }
+
+        public destroy() {}
     }
     const source = readFileSync("src/protyle/preview/image.ts", "utf8");
     const compiled = transpileModule(source, {
@@ -80,14 +89,22 @@ test("image preview initializes its toolbar when ready is dispatched on the sour
     exports.previewImages(["blob:first", "blob:second"]);
     await Promise.resolve();
     const instance = previewWindow.siyuan.viewer;
+    const title = () => instance.options.title[1]({alt: "photo.png"}, {naturalWidth: 640, naturalHeight: 480});
+    assert.equal(title(), "1/2 photo [640 × 480]");
+    instance.options.view({detail: {index: 1}});
+    assert.equal(title(), "2/2 photo [640 × 480]");
+    instance.options.view({detail: {index: 0}});
+    sourceElement.childElementCount = 1;
+    assert.equal(title(), "1/1 photo [640 × 480]");
     assert.match(buttons.get(".viewer-copy").innerHTML, /#iconImage/);
     assert.match(buttons.get(".viewer-copy-file").innerHTML, /#iconFile/);
     assert.equal(buttons.get(".viewer-copy").attributes.get("aria-label"), "Copy as PNG");
-    buttons.forEach(button => {
+    buttons.forEach((button, selector) => {
         assert.ok(button.classList.has("ariaLabel"));
         assert.equal(button.attributes.has("title"), false);
         assert.ok(button.attributes.get("aria-label"));
-        assert.equal(button.attributes.get("data-position"), "north");
+        assert.equal(button.attributes.get("data-position"), selector === ".viewer-prev" ? "east" :
+            selector === ".viewer-next" ? "west" : "north");
     });
     instance.options.toolbar.copy();
     instance.image.src = "blob:second";

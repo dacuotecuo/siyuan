@@ -121,6 +121,7 @@ interface ILuteRender {
 interface IBreadcrumb {
     id: string,
     name: string,
+    documentTitle?: string,
     type: string,
     subType: string,
     children: IBreadcrumb[],
@@ -141,6 +142,7 @@ declare class Viz {
 }
 
 declare class Viewer {
+    public viewer: HTMLElement;
     public destroyed: boolean;
     public image: HTMLImageElement;
     public viewed: boolean;
@@ -150,6 +152,8 @@ declare class Viewer {
         title: [number, (image: HTMLImageElement, imageData: IObject) => string],
         button: boolean,
         initialViewIndex?: number,
+        magnifier?: boolean,
+        navigation?: boolean,
         transition: boolean,
         hidden: () => void,
         ready?: (this: HTMLElement, event: CustomEvent) => void,
@@ -169,13 +173,15 @@ declare class Viewer {
             flipVertical: boolean,
             copy?: () => void,
             copyFile?: () => void,
-            close: () => void
+            close?: () => void
         }
     })
 
     public destroy(): void
 
     public show(): void
+
+    public hide(): void
 }
 
 declare class Lute {
@@ -186,8 +192,6 @@ declare class Lute {
     public static Caret: string;
 
     public static New(): Lute;
-
-    public static EChartsMindmapStr(text: string): string;
 
     public static NewNodeID(): string;
 
@@ -248,6 +252,7 @@ declare class Lute {
     public SetTag(enable: boolean): void;
 
     public SetInlineMath(enable: boolean): void;
+    public SetLatexMath(enable: boolean): void;
 
     public SetGFMStrikethrough(enable: boolean): void;
 
@@ -489,6 +494,7 @@ interface IProtyleOptions {
         snapshot?: string
     },
     backlinkData?: {
+        referenceBlockID?: string,
         id?: string,
         revision?: string,
         blockPaths: IBreadcrumb[],
@@ -497,11 +503,12 @@ interface IProtyleOptions {
     }[],
     action?: TProtyleAction[],
     scrollPosition?: ScrollLogicalPosition,
+    scrollAttr?: IScrollAttr,
     mode?: TEditorMode,
     blockId?: string
     rootId?: string
     notebookId?: string
-    originalRefBlockIDs?: IObject
+    originalRefBlockIDs?: Record<string, string>
     key?: string
     defIds?: string[]
     render?: {
@@ -609,7 +616,7 @@ interface IProtyle {
     gutter?: import("../protyle/gutter").Gutter,
     breadcrumb?: import("../protyle/breadcrumb").Breadcrumb,
     title?: import("../protyle/header/Title").Title,
-    background?: import("../protyle/header/background").Background,
+    background?: import("../protyle/header/Background").Background,
     databaseAttributePanel?: import("../protyle/render/av/attributePanel").AVAttributePanel,
     contentElement?: HTMLElement,
     options: IProtyleOptions;

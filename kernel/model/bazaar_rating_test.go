@@ -1,18 +1,6 @@
-// SiYuan - From thought to insight, with agents
+// SiYuan - https://github.com/siyuan-note/siyuan
 // Copyright (c) 2020-present, b3log.org
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU Affero General Public License for more details.
-//
-// You should have received a copy of the GNU Affero General Public License
-// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+// SPDX-License-Identifier: AGPL-3.0-or-later
 
 package model
 
@@ -124,14 +112,15 @@ func TestGetInstalledBazaarPackageUserRatings(t *testing.T) {
 		return []installedPackageInfo{
 			{Pkg: &bazaar.Package{Name: "rated"}},
 			{Pkg: &bazaar.Package{Name: "unrated"}},
+			{Pkg: &bazaar.Package{Name: "pending"}},
 			{Pkg: &bazaar.Package{Name: "local-zip"}},
 		}, "", "", nil
 	}
 	bazaarRatingExistingPackageNames = func(_ context.Context, pkgType string, packageNames []string) ([]string, error) {
-		if "plugins" != pkgType || !slices.Equal([]string{"rated", "unrated", "local-zip"}, packageNames) {
+		if "plugins" != pkgType || !slices.Equal([]string{"rated", "unrated", "pending", "local-zip"}, packageNames) {
 			t.Fatalf("unexpected package filter: type=%s names=%v", pkgType, packageNames)
 		}
-		return []string{"rated", "unrated"}, nil
+		return []string{"rated", "unrated", "pending"}, nil
 	}
 
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
@@ -145,8 +134,12 @@ func TestGetInstalledBazaarPackageUserRatings(t *testing.T) {
 		if err := json.NewDecoder(request.Body).Decode(&body); nil != err {
 			t.Fatal(err)
 		}
-		if "secret" != body.Token || ("rated" != body.PackageName && "unrated" != body.PackageName) {
+		if "secret" != body.Token || ("rated" != body.PackageName && "unrated" != body.PackageName && "pending" != body.PackageName) {
 			t.Fatalf("unexpected request body: %+v", body)
+		}
+		if "pending" == body.PackageName {
+			writer.WriteHeader(http.StatusBadRequest)
+			return
 		}
 		writer.Header().Set("Content-Type", "application/json")
 		rating := 0
@@ -159,12 +152,12 @@ func TestGetInstalledBazaarPackageUserRatings(t *testing.T) {
 	bazaarRatingCloudServer = func() string { return server.URL }
 
 	userRatings, eligiblePackageNames, err := GetInstalledBazaarPackageUserRatings(context.Background(), "plugins",
-		[]string{"rated", "unrated", "local-zip", "missing", "rated"})
+		[]string{"rated", "unrated", "pending", "local-zip", "missing", "rated"})
 	if nil != err {
 		t.Fatal(err)
 	}
 	if !slices.Equal([]string{"rated", "unrated"}, eligiblePackageNames) ||
-		4 != userRatings["rated"] || 0 != userRatings["unrated"] {
+		len(userRatings) != 2 || 4 != userRatings["rated"] || 0 != userRatings["unrated"] {
 		t.Fatalf("unexpected user ratings: ratings=%v eligible=%v", userRatings, eligiblePackageNames)
 	}
 }
@@ -281,6 +274,35 @@ func TestRequestBazaarPackageRatingStatus(t *testing.T) {
 	err := requestBazaarPackageRating(context.Background(), "/rating", map[string]any{}, &data)
 	if !errors.Is(err, ErrBazaarRatingRateLimited) {
 		t.Fatalf("expected stable rate-limit error, got %v", err)
+	}
+	for _, code := range []int{http.StatusBadRequest, http.StatusInternalServerError, http.StatusServiceUnavailable} {
+		status.Store(int32(code))
+		err = requestBazaarPackageRating(context.Background(), "/rating", map[string]any{}, &data)
+		if nil == err || errors.Is(err, ErrFailedToConnectCloudServer) ||
+			err.Error() != fmt.Sprintf("request bazaar package rating failed: HTTP %d (%s)", code, http.StatusText(code)) {
+			t.Fatalf("unexpected HTTP error for %d: %v", code, err)
+		}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err = requestBazaarPackageUserRatings(ctx, "secret", []string{"rated"}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected cancellation, got %v", err)
+	}
+}
+
+func TestRequestBazaarPackageRatingPending(t *testing.T) {
+	oldServer := bazaarRatingCloudServer
+	t.Cleanup(func() { bazaarRatingCloudServer = oldServer })
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte(`{"code":-1,"data":{"errorCode":"bazaarPackagePending"}}`))
+	}))
+	defer server.Close()
+	bazaarRatingCloudServer = func() string { return server.URL }
+	data := bazaarPackageUserRatingData{}
+	if err := requestBazaarPackageRating(context.Background(), "/rating", map[string]any{}, &data); !errors.Is(err, ErrBazaarPackagePending) {
+		t.Fatalf("expected pending package error, got %v", err)
 	}
 }
 

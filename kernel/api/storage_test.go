@@ -1,18 +1,6 @@
-// SiYuan - From thought to insight, with agents
+// SiYuan - https://github.com/siyuan-note/siyuan
 // Copyright (c) 2020-present, b3log.org
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU Affero General Public License for more details.
-//
-// You should have received a copy of the GNU Affero General Public License
-// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+// SPDX-License-Identifier: AGPL-3.0-or-later
 
 package api
 
@@ -20,16 +8,22 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/gin-gonic/gin"
+	"github.com/siyuan-note/siyuan/kernel/conf"
 	"github.com/siyuan-note/siyuan/kernel/model"
 	"github.com/siyuan-note/siyuan/kernel/util"
 )
 
 func TestCriteriaCRUD(t *testing.T) {
 	gin.SetMode(gin.TestMode)
+	oldConf := model.Conf
+	model.Conf = model.NewAppConf()
+	model.Conf.Sync.Store(conf.NewSync())
+	t.Cleanup(func() { model.Conf = oldConf })
 
 	oldDataDir := util.DataDir
 	util.DataDir = t.TempDir()
@@ -51,8 +45,9 @@ func TestCriteriaCRUD(t *testing.T) {
 		return recorder
 	}
 	type criterionData struct {
-		Name     string          `json:"name"`
-		SubTypes map[string]bool `json:"subTypes"`
+		Name     string               `json:"name"`
+		Types    map[string]bool      `json:"types"`
+		SubTypes model.SearchSubTypes `json:"subTypes"`
 	}
 	getCriteria := func() []criterionData {
 		t.Helper()
@@ -70,22 +65,48 @@ func TestCriteriaCRUD(t *testing.T) {
 		return response.Data
 	}
 
-	setRecorder := perform("/api/storage/setCriterion", `{"criterion":{"name":"Public notes","subTypes":{"h1":true}}}`)
+	setRecorder := perform("/api/storage/setCriterion", `{"criterion":{"name":"Public notes","subTypes":{"heading":{"h1":true},"list":{"o":true},"listItem":{"t":true}}}}`)
 	if responseCode(t, setRecorder) != 0 {
 		t.Fatalf("set criterion failed: %s", setRecorder.Body.String())
 	}
 	criteria := getCriteria()
-	if len(criteria) != 1 || criteria[0].Name != "Public notes" || !criteria[0].SubTypes["h1"] {
+	if len(criteria) != 1 || criteria[0].Name != "Public notes" || !criteria[0].SubTypes.Heading["h1"] || !criteria[0].SubTypes.List["o"] || !criteria[0].SubTypes.ListItem["t"] {
 		t.Fatalf("criterion was not persisted: %#v", criteria)
 	}
 
-	overwriteRecorder := perform("/api/storage/setCriterion", `{"criterion":{"name":"Public notes","subTypes":{"h2":true}}}`)
+	overwriteRecorder := perform("/api/storage/setCriterion", `{"criterion":{"name":"Public notes","subTypes":{"heading":{"h2":true},"list":{"u":true},"listItem":{"o":true}}}}`)
 	if responseCode(t, overwriteRecorder) != 0 {
 		t.Fatalf("overwrite criterion failed: %s", overwriteRecorder.Body.String())
 	}
 	criteria = getCriteria()
-	if len(criteria) != 1 || criteria[0].SubTypes["h1"] || !criteria[0].SubTypes["h2"] {
+	if len(criteria) != 1 || criteria[0].SubTypes.Heading["h1"] || !criteria[0].SubTypes.Heading["h2"] || criteria[0].SubTypes.List["o"] || !criteria[0].SubTypes.List["u"] || criteria[0].SubTypes.ListItem["t"] || !criteria[0].SubTypes.ListItem["o"] {
 		t.Fatalf("criterion was not overwritten: %#v", criteria)
+	}
+
+	typeKeys := []string{
+		"document", "heading", "paragraph", "list", "listItem", "codeBlock", "mathBlock", "table",
+		"blockquote", "superBlock", "htmlBlock", "embedBlock", "databaseBlock", "audioBlock",
+		"videoBlock", "iframeBlock", "widgetBlock", "callout", "tabs", "tabItem",
+	}
+	for _, enabled := range []bool{true, false} {
+		wantTypes := make(map[string]bool, len(typeKeys))
+		for _, key := range typeKeys {
+			wantTypes[key] = enabled
+		}
+		body, err := json.Marshal(map[string]criterionData{
+			"criterion": {Name: "Public notes", Types: wantTypes},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		recorder := perform("/api/storage/setCriterion", string(body))
+		if responseCode(t, recorder) != 0 {
+			t.Fatalf("set criterion types failed: %s", recorder.Body.String())
+		}
+		criteria = getCriteria()
+		if len(criteria) != 1 || !reflect.DeepEqual(criteria[0].Types, wantTypes) {
+			t.Fatalf("criterion type keys or values changed after persistence: got %#v, want %#v", criteria, wantTypes)
+		}
 	}
 
 	removeRecorder := perform("/api/storage/removeCriterion", `{"name":"Public notes"}`)

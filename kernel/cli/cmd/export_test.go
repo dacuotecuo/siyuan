@@ -1,10 +1,6 @@
-// SiYuan - From thought to insight, with agents
+// SiYuan - https://github.com/siyuan-note/siyuan
 // Copyright (c) 2020-present, b3log.org
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
+// SPDX-License-Identifier: AGPL-3.0-or-later
 
 package cmd
 
@@ -15,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/siyuan-note/siyuan/kernel/util"
+	"github.com/spf13/cobra"
 )
 
 func TestMaterializeExportArtifact(t *testing.T) {
@@ -65,5 +62,40 @@ func TestMaterializeExportArtifact(t *testing.T) {
 func TestMaterializeExportArtifactRejectsEmptyPath(t *testing.T) {
 	if _, err := materializeExportArtifact("", ""); err == nil {
 		t.Fatal("expected empty export path to fail")
+	}
+}
+
+func TestWriteExportContentPreservesExistingOutputOnFailure(t *testing.T) {
+	output := filepath.Join(t.TempDir(), "existing.md")
+	if err := os.WriteFile(output, []byte("keep"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeExportContent("", output); err == nil {
+		t.Fatal("empty export was accepted")
+	}
+	if data, err := os.ReadFile(output); err != nil || string(data) != "keep" {
+		t.Fatalf("output changed: %q %v", data, err)
+	}
+	if err := writeExportContent("exported", output); err != nil {
+		t.Fatal(err)
+	}
+	if data, err := os.ReadFile(output); err != nil || string(data) != "exported" {
+		t.Fatalf("unexpected output: %q %v", data, err)
+	}
+}
+
+func TestTextExportDryRunWithoutOutput(t *testing.T) {
+	previous := dryRun
+	dryRun = true
+	t.Cleanup(func() { dryRun = previous })
+	for _, command := range []*cobra.Command{exportMdCmd, exportHTMLCmd, exportPreviewCmd} {
+		t.Run(command.Name(), func(t *testing.T) {
+			input := &cobra.Command{}
+			input.Flags().String("id", "20260913000000-missing", "")
+			input.Flags().String("output", "", "")
+			if err := command.RunE(input, nil); err != nil {
+				t.Fatal(err)
+			}
+		})
 	}
 }

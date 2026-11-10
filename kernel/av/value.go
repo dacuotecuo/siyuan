@@ -1,18 +1,6 @@
-// SiYuan - From thought to insight, with agents
+// SiYuan - https://github.com/siyuan-note/siyuan
 // Copyright (c) 2020-present, b3log.org
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU Affero General Public License for more details.
-//
-// You should have received a copy of the GNU Affero General Public License
-// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+// SPDX-License-Identifier: AGPL-3.0-or-later
 
 package av
 
@@ -24,6 +12,7 @@ import (
 	"path"
 	"reflect"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -39,6 +28,8 @@ import (
 	"golang.org/x/text/language"
 	"golang.org/x/text/message"
 )
+
+const codeTabSpacesAttr = "custom-sy-code-tab-spaces"
 
 type Value struct {
 	ID         string  `json:"id,omitempty"`
@@ -58,6 +49,7 @@ type Value struct {
 	URL      *ValueURL      `json:"url,omitempty"`
 	Email    *ValueEmail    `json:"email,omitempty"`
 	Phone    *ValuePhone    `json:"phone,omitempty"`
+	Location *ValueLocation `json:"location,omitempty"`
 	MAsset   []*ValueAsset  `json:"mAsset,omitempty"`
 	Template *ValueTemplate `json:"template,omitempty"`
 	Created  *ValueCreated  `json:"created,omitempty"`
@@ -66,8 +58,9 @@ type Value struct {
 	Relation *ValueRelation `json:"relation,omitempty"`
 	Rollup   *ValueRollup   `json:"rollup,omitempty"`
 
-	RenderedContent  string `json:"renderedContent,omitempty"` // 显示模板的运行时渲染结果，保存时剥离
-	IsRenderAutoFill bool   `json:"-"`                         // 标识是否是渲染阶段自动填充的值，保存数据的时候要删掉
+	RenderedContent   string `json:"renderedContent,omitempty"`   // 显示模板的运行时渲染结果，保存时剥离
+	HasRenderTemplate bool   `json:"hasRenderTemplate,omitempty"` // 标识已计算显示模板，包括空结果，保存时剥离
+	IsRenderAutoFill  bool   `json:"-"`                           // 标识是否是渲染阶段自动填充的值，保存数据的时候要删掉
 }
 
 func (value *Value) SetUpdatedAt(mills int64) {
@@ -136,6 +129,8 @@ func (value *Value) String(format bool) string {
 			return ""
 		}
 		return strings.TrimSpace(value.Email.Content)
+	case KeyTypeLocation:
+		return value.Location.String()
 	case KeyTypePhone:
 		if nil == value.Phone {
 			return ""
@@ -196,14 +191,6 @@ func (value *Value) String(format bool) string {
 	}
 }
 
-func (value *Value) ToJSONString() string {
-	data, err := gulu.JSON.MarshalJSON(value)
-	if err != nil {
-		return ""
-	}
-	return string(data)
-}
-
 func (value *Value) Clone() (ret *Value) {
 	data, err := gulu.JSON.MarshalJSON(value)
 	if err != nil {
@@ -238,54 +225,42 @@ func (value *Value) IsEdited() bool {
 	return value.CreatedAt != value.UpdatedAt
 }
 
-func (value *Value) IsBlank() bool {
+// isBlankContent 判断内容是否为空，trimSpace 为真时忽略首尾空白。
+func isBlankContent(content string, trimSpace bool) bool {
+	if trimSpace {
+		return "" == strings.TrimSpace(content)
+	}
+	return "" == content
+}
+
+// isEmpty 判断值是否为空。IsEmpty 按原始内容比较，IsBlank 额外忽略首尾空白；
+// 生成字段的模板内容始终按去空白后比较。
+func (value *Value) isEmpty(trimSpace bool) bool {
 	if nil == value {
 		return true
 	}
 
 	switch value.Type {
 	case KeyTypeBlock:
-		if nil == value.Block {
-			return true
-		}
-		return "" == strings.TrimSpace(value.Block.Content)
+		return nil == value.Block || isBlankContent(value.Block.Content, trimSpace)
 	case KeyTypeText:
-		if nil == value.Text {
-			return true
-		}
-		return "" == strings.TrimSpace(value.Text.Content)
+		return nil == value.Text || isBlankContent(value.Text.Content, trimSpace)
 	case KeyTypeNumber:
-		if nil == value.Number {
-			return true
-		}
-		return !value.Number.IsNotEmpty
+		return nil == value.Number || !value.Number.IsNotEmpty
 	case KeyTypeDate:
-		if nil == value.Date {
-			return true
-		}
-		return !value.Date.IsNotEmpty
+		return nil == value.Date || !value.Date.IsNotEmpty
 	case KeyTypeSelect:
-		if 1 > len(value.MSelect) {
-			return true
-		}
-		return "" == strings.TrimSpace(value.MSelect[0].Content)
+		return 1 > len(value.MSelect) || nil == value.MSelect[0] || isBlankContent(value.MSelect[0].Content, trimSpace)
 	case KeyTypeMSelect:
 		return 1 > len(value.MSelect)
 	case KeyTypeURL:
-		if nil == value.URL {
-			return true
-		}
-		return "" == strings.TrimSpace(value.URL.Content)
+		return nil == value.URL || isBlankContent(value.URL.Content, trimSpace)
 	case KeyTypeEmail:
-		if nil == value.Email {
-			return true
-		}
-		return "" == strings.TrimSpace(value.Email.Content)
+		return nil == value.Email || isBlankContent(value.Email.Content, trimSpace)
+	case KeyTypeLocation:
+		return value.Location.IsEmpty()
 	case KeyTypePhone:
-		if nil == value.Phone {
-			return true
-		}
-		return "" == strings.TrimSpace(value.Phone.Content)
+		return nil == value.Phone || isBlankContent(value.Phone.Content, trimSpace)
 	case KeyTypeMAsset:
 		return 1 > len(value.MAsset)
 	case KeyTypeTemplate:
@@ -294,104 +269,27 @@ func (value *Value) IsBlank() bool {
 		}
 		return "" == strings.TrimSpace(value.Template.Content)
 	case KeyTypeCreated:
-		if nil == value.Created {
-			return true
-		}
-		return !value.Created.IsNotEmpty
+		return nil == value.Created || !value.Created.IsNotEmpty
 	case KeyTypeUpdated:
-		if nil == value.Updated {
-			return true
-		}
-		return !value.Updated.IsNotEmpty
+		return nil == value.Updated || !value.Updated.IsNotEmpty
 	case KeyTypeCheckbox:
-		if nil == value.Checkbox {
-			return true
-		}
-		return false // 复选框不会为空
+		return nil == value.Checkbox // 复选框不会为空
 	case KeyTypeRelation:
-		return 1 > len(value.Relation.Contents)
+		return nil == value.Relation || 1 > len(value.Relation.Contents)
 	case KeyTypeRollup:
-		return 1 > len(value.Rollup.Contents)
+		return nil == value.Rollup || 1 > len(value.Rollup.Contents)
 	}
 	return false
 }
 
-func (value *Value) IsEmpty() bool {
-	if nil == value {
-		return true
-	}
+// IsBlank 判断值是否为空，忽略内容首尾空白。
+func (value *Value) IsBlank() bool {
+	return value.isEmpty(true)
+}
 
-	switch value.Type {
-	case KeyTypeBlock:
-		if nil == value.Block {
-			return true
-		}
-		return "" == value.Block.Content
-	case KeyTypeText:
-		if nil == value.Text {
-			return true
-		}
-		return "" == value.Text.Content
-	case KeyTypeNumber:
-		if nil == value.Number {
-			return true
-		}
-		return !value.Number.IsNotEmpty
-	case KeyTypeDate:
-		if nil == value.Date {
-			return true
-		}
-		return !value.Date.IsNotEmpty
-	case KeyTypeSelect:
-		if 1 > len(value.MSelect) {
-			return true
-		}
-		return "" == value.MSelect[0].Content
-	case KeyTypeMSelect:
-		return 1 > len(value.MSelect)
-	case KeyTypeURL:
-		if nil == value.URL {
-			return true
-		}
-		return "" == value.URL.Content
-	case KeyTypeEmail:
-		if nil == value.Email {
-			return true
-		}
-		return "" == value.Email.Content
-	case KeyTypePhone:
-		if nil == value.Phone {
-			return true
-		}
-		return "" == value.Phone.Content
-	case KeyTypeMAsset:
-		return 1 > len(value.MAsset)
-	case KeyTypeTemplate:
-		if nil == value.Template {
-			return true
-		}
-		return "" == strings.TrimSpace(value.Template.Content)
-	case KeyTypeCreated:
-		if nil == value.Created {
-			return true
-		}
-		return !value.Created.IsNotEmpty
-	case KeyTypeUpdated:
-		if nil == value.Updated {
-			return true
-		}
-		return !value.Updated.IsNotEmpty
-	case KeyTypeCheckbox:
-		if nil == value.Checkbox {
-			return true
-		}
-		return false // 复选框不会为空
-	case KeyTypeRelation:
-		return 1 > len(value.Relation.Contents)
-	case KeyTypeRollup:
-		return 1 > len(value.Rollup.Contents)
-	}
-	return false
+// IsEmpty 判断值是否为空，按原始内容比较。
+func (value *Value) IsEmpty() bool {
+	return value.isEmpty(false)
 }
 
 func (value *Value) SetValByType(typ KeyType, val any) {
@@ -412,6 +310,8 @@ func (value *Value) SetValByType(typ KeyType, val any) {
 		value.URL = val.(*ValueURL)
 	case KeyTypeEmail:
 		value.Email = val.(*ValueEmail)
+	case KeyTypeLocation:
+		value.Location = val.(*ValueLocation)
 	case KeyTypePhone:
 		value.Phone = val.(*ValuePhone)
 	case KeyTypeMAsset:
@@ -457,6 +357,8 @@ func (value *Value) GetValByType(typ KeyType) (ret any) {
 		return value.URL
 	case KeyTypeEmail:
 		return value.Email
+	case KeyTypeLocation:
+		return value.Location
 	case KeyTypePhone:
 		return value.Phone
 	case KeyTypeMAsset:
@@ -489,12 +391,13 @@ func (subtype BlockRefSubtype) IsValid() bool {
 }
 
 type ValueBlock struct {
-	ID         string          `json:"id,omitempty"` // 绑定的块 ID，非绑定块时为空
-	Icon       string          `json:"icon,omitempty"`
-	Content    string          `json:"content"`
-	RefSubtype BlockRefSubtype `json:"refSubtype,omitempty"`
-	Created    int64           `json:"created,omitempty"`
-	Updated    int64           `json:"updated,omitempty"`
+	CollectionRuleID string          `json:"collectionRuleID,omitempty"` // 创建条目的收集规则；缺省表示手动条目
+	ID               string          `json:"id,omitempty"`               // 绑定的块 ID，非绑定块时为空
+	Icon             string          `json:"icon,omitempty"`
+	Content          string          `json:"content"`
+	RefSubtype       BlockRefSubtype `json:"refSubtype,omitempty"`
+	Created          int64           `json:"created,omitempty"`
+	Updated          int64           `json:"updated,omitempty"`
 }
 
 func (value *Value) NormalizeBlockRefSubtype(avID string, attrs map[string]string) (changed bool) {
@@ -554,6 +457,14 @@ func ParseValueTextRich(rich *ValueTextRich) (tree *parse.Tree, err error) {
 }
 
 func parseValueTextRich(rich *ValueTextRich) (blockDOM string, tree *parse.Tree, err error) {
+	return parseValueTextRichWithImages(rich, false)
+}
+
+func parseValueTextRichWithImages(rich *ValueTextRich, images bool) (blockDOM string, tree *parse.Tree, err error) {
+	return parseValueTextRichWithLute(rich, images, newValueTextRichLute())
+}
+
+func parseValueTextRichWithLute(rich *ValueTextRich, images bool, luteEngine *lute.Lute) (blockDOM string, tree *parse.Tree, err error) {
 	if nil == rich {
 		return
 	}
@@ -566,7 +477,6 @@ func parseValueTextRich(rich *ValueTextRich) (blockDOM string, tree *parse.Tree,
 		return
 	}
 
-	luteEngine := newValueTextRichLute()
 	content, protectedStyleEntities, protectErr := protectValueTextRichKramdownStyleEntities(rich.Content)
 	if nil != protectErr {
 		err = protectErr
@@ -583,11 +493,15 @@ func parseValueTextRich(rich *ValueTextRich) (blockDOM string, tree *parse.Tree,
 		}
 		blockDOM = luteEngine.Tree2BlockDOM(tree, luteEngine.RenderOptions, luteEngine.ParseOptions)
 	}
-	err = validateValueTextRichTree(tree)
+	err = validateValueTextRichTreeWithImages(tree, images)
 	return
 }
 
 func validateValueTextRichTree(tree *parse.Tree) (err error) {
+	return validateValueTextRichTreeWithImages(tree, false)
+}
+
+func validateValueTextRichTreeWithImages(tree *parse.Tree, images bool) (err error) {
 	if nil == tree || nil == tree.Root {
 		return fmt.Errorf("attribute view rich text tree is missing")
 	}
@@ -595,7 +509,14 @@ func validateValueTextRichTree(tree *parse.Tree) (err error) {
 		if !entering {
 			return ast.WalkContinue
 		}
-		if !isAllowedValueTextRichNode(node) {
+		allowed := isAllowedValueTextRichNode(node, images)
+		if images && ast.NodeKramdownBlockIAL == node.Type {
+			allowed = isAllowedValueTextRichBlockIAL(node, true)
+		}
+		if images && !allowed {
+			allowed = isAllowedTableCellRichCustomNode(node)
+		}
+		if !allowed && !(images && isAllowedTableCellRichImageNode(node)) {
 			err = fmt.Errorf("unsupported attribute view rich text node [%s]", node.Type.String())
 			return ast.WalkStop
 		}
@@ -607,6 +528,7 @@ func validateValueTextRichTree(tree *parse.Tree) (err error) {
 // newValueTextRichLute 固定启用存储格式支持的语法，避免编辑器开关变化后重解释既有数据。
 func newValueTextRichLute() *lute.Lute {
 	ret := lute.New()
+	ret.ParseOptions.KeepEscaped = true
 	ret.SetTextMark(true)
 	ret.SetEmoji(false)
 	ret.SetProtyleWYSIWYG(true)
@@ -649,7 +571,7 @@ func newValueTextRichLute() *lute.Lute {
 	return ret
 }
 
-func isAllowedValueTextRichNode(node *ast.Node) bool {
+func isAllowedValueTextRichNode(node *ast.Node, localLinks bool) bool {
 	if nil == node {
 		return false
 	}
@@ -688,15 +610,16 @@ func isAllowedValueTextRichNode(node *ast.Node) bool {
 		ast.NodeFileAnnotationRefText:
 		return true
 	case ast.NodeLinkDest:
-		return isAllowedValueTextRichLinkTarget(node.TokensStr())
+		return isAllowedValueTextRichLinkTarget(node.TokensStr(), !node.ParentIs(ast.NodeImage)) ||
+			localLinks && !node.ParentIs(ast.NodeImage) && isAllowedTableCellRichLocalLinkTarget(node.TokensStr())
 	case ast.NodeCodeBlock, ast.NodeCodeBlockFenceInfoMarker:
 		return !isValueTextRichExecutableCodeFence(node.CodeBlockInfo)
 	case ast.NodeKramdownBlockIAL:
-		return isAllowedValueTextRichBlockIAL(node)
+		return isAllowedValueTextRichBlockIAL(node, false)
 	case ast.NodeKramdownSpanIAL:
 		return isAllowedValueTextRichSpanIAL(node)
 	case ast.NodeTextMark:
-		return isAllowedValueTextMark(node)
+		return isAllowedValueTextMark(node, localLinks)
 	}
 	return false
 }
@@ -707,14 +630,14 @@ func isValueTextRichExecutableCodeFence(info []byte) bool {
 		return false
 	}
 	switch fields[0] {
-	case "abc", "echarts", "flowchart", "graphviz", "infographic", "mermaid", "mindmap", "plantuml":
+	case "abc", "echarts", "flowchart", "graphviz", "infographic", "mermaid", "plantuml":
 		return true
 	}
 	return false
 }
 
-func isAllowedValueTextMark(node *ast.Node) bool {
-	if !isAllowedValueTextMarkType(node) || !isAllowedValueTextMarkReferenceData(node) {
+func isAllowedValueTextMark(node *ast.Node, localLinks bool) bool {
+	if !isAllowedValueTextMarkType(node) || !isAllowedValueTextMarkReferenceData(node, localLinks) {
 		return false
 	}
 	if 1 > len(node.KramdownIAL) {
@@ -728,7 +651,7 @@ func isAllowedValueTextMarkType(node *ast.Node) bool {
 	if "" == node.TextMarkType || "" != node.TextMarkFlashcardOcclusionID {
 		return false
 	}
-	for _, typ := range strings.Fields(node.TextMarkType) {
+	for typ := range strings.FieldsSeq(node.TextMarkType) {
 		switch typ {
 		case "text", "block-ref", "kbd", "file-annotation-ref", "a", "strong", "em", "u", "s", "mark",
 			"sup", "sub", "tag", "code", "inline-math", "inline-memo":
@@ -739,7 +662,7 @@ func isAllowedValueTextMarkType(node *ast.Node) bool {
 	return true
 }
 
-func isAllowedValueTextMarkReferenceData(node *ast.Node) bool {
+func isAllowedValueTextMarkReferenceData(node *ast.Node, localLinks bool) bool {
 	if node.IsTextMarkType("block-ref") {
 		if !ast.IsNodeIDPattern(node.TextMarkBlockRefID) ||
 			("d" != node.TextMarkBlockRefSubtype && "s" != node.TextMarkBlockRefSubtype) ||
@@ -763,7 +686,8 @@ func isAllowedValueTextMarkReferenceData(node *ast.Node) bool {
 	}
 
 	if node.IsTextMarkType("a") {
-		if !isAllowedValueTextRichLinkTarget(node.TextMarkAHref) {
+		if !isAllowedValueTextRichLinkTarget(node.TextMarkAHref, true) &&
+			!(localLinks && isAllowedTableCellRichLocalLinkTarget(node.TextMarkAHref)) {
 			return false
 		}
 	} else if "" != node.TextMarkAHref || "" != node.TextMarkATitle {
@@ -780,7 +704,7 @@ func isAllowedValueTextMarkReferenceData(node *ast.Node) bool {
 	return true
 }
 
-func isAllowedValueTextRichLinkTarget(target string) bool {
+func isAllowedValueTextRichLinkTarget(target string, customProtocols bool) bool {
 	if "" == target {
 		return true
 	}
@@ -811,14 +735,19 @@ func isAllowedValueTextRichLinkTarget(target string) bool {
 			strings.HasPrefix(strings.ToLower(target), scheme+"://")
 	case "":
 		return isAllowedValueTextRichRelativeLinkTarget(target, decodedTarget, parsed)
-	default:
+	case "javascript", "vbscript", "data", "blob", "file", "filesystem", "about", "chrome", "chrome-extension",
+		"devtools", "view-source", "resource", "moz-extension":
 		return false
+	default:
+		// 自定义协议仅用于主动点击的链接，不能作为图片等自动加载的资源地址。
+		return customProtocols && parsed.Host != "" && parsed.Opaque == "" &&
+			strings.HasPrefix(strings.ToLower(target), scheme+"://")
 	}
 }
 
 func decodeValueTextRichLinkTarget(target string) (ret, decoded string, ok bool) {
 	ret = target
-	for iteration := 0; iteration < 8; iteration++ {
+	for range 8 {
 		next := html.UnescapeString(ret)
 		if next == ret {
 			decoded, err := url.PathUnescape(ret)
@@ -851,14 +780,15 @@ func isAllowedValueTextRichRelativeLinkTarget(target, decodedTarget string, pars
 }
 
 func isAllowedValueTextRichInlineMemoContent(content string) bool {
-	if !utf8.ValidString(content) || containsValueTextRichMemoControl(content) {
+	if !utf8.ValidString(content) || containsValueTextRichMemoControl(content) || containsValueTextRichHTMLTag(content) {
 		return false
 	}
 	decoded := content
-	for iteration := 0; iteration < 8; iteration++ {
+	for range 8 {
 		next := html.UnescapeString(decoded)
 		if next == decoded {
-			return !containsValueTextRichHTMLTag(decoded)
+			// 实体由渲染器保留编码，解码仅用于检查隐藏的控制字符。
+			return true
 		}
 		decoded = next
 		if containsValueTextRichMemoControl(decoded) {
@@ -1261,6 +1191,9 @@ func normalizeValueTextRichBuiltinStyleValue(property, value string) (ret string
 	if "background-color" == property {
 		valueSuffix, legacySuffix = "background-color", "background"
 	}
+	if match := valueTextRichBuiltinThemeStylePattern.FindStringSubmatch(value); len(match) == 3 {
+		return value, match[2] == legacySuffix
+	}
 	match := valueTextRichBuiltinStylePattern.FindStringSubmatch(value)
 	if 5 != len(match) || match[1] != match[3] || match[2] != valueSuffix || match[4] != legacySuffix {
 		return "", false
@@ -1269,7 +1202,7 @@ func normalizeValueTextRichBuiltinStyleValue(property, value string) (ret string
 		match[1], valueSuffix, match[1], legacySuffix), true
 }
 
-func normalizeValueTextRichTreeStyles(tree *parse.Tree) (err error) {
+func normalizeValueTextRichTreeStyles(tree *parse.Tree, images bool) (err error) {
 	ast.Walk(tree.Root, func(node *ast.Node, entering bool) ast.WalkStatus {
 		if !entering || ast.NodeTextMark != node.Type || 1 > len(node.KramdownIAL) {
 			return ast.WalkContinue
@@ -1277,7 +1210,12 @@ func normalizeValueTextRichTreeStyles(tree *parse.Tree) (err error) {
 		style := node.IALAttr("style")
 		var normalized string
 		var ok bool
-		if normalized, ok = normalizeValueTextRichStyle(style); !ok {
+		if images && isTableCellRichCustomTextMark(node) {
+			normalized, ok = normalizeTableCellRichCustomStyle(style)
+		} else {
+			normalized, ok = normalizeValueTextRichStyle(style)
+		}
+		if !ok {
 			err = fmt.Errorf("unsupported attribute view rich text style")
 			return ast.WalkStop
 		}
@@ -1288,7 +1226,7 @@ func normalizeValueTextRichTreeStyles(tree *parse.Tree) (err error) {
 	return
 }
 
-func isAllowedValueTextRichBlockIAL(node *ast.Node) bool {
+func isAllowedValueTextRichBlockIAL(node *ast.Node, codeSettings bool) bool {
 	ial := parse.Tokens2IAL(node.Tokens)
 	if 1 > len(ial) {
 		return false
@@ -1310,6 +1248,22 @@ func isAllowedValueTextRichBlockIAL(node *ast.Node) bool {
 			}
 		case "type":
 			if "doc" != attr[1] {
+				return false
+			}
+		case "linewrap", "ligatures", "linenumber":
+			// 普通表格的代码设置仅允许布尔值，且必须属于紧邻的代码块。
+			if !codeSettings || nil == node.Previous || ast.NodeCodeBlock != node.Previous.Type ||
+				("true" != attr[1] && "false" != attr[1]) || node.Previous.IALAttr(attr[0]) != attr[1] {
+				return false
+			}
+		case codeTabSpacesAttr:
+			if !codeSettings || nil == node.Previous || ast.NodeCodeBlock != node.Previous.Type ||
+				node.Previous.IALAttr(attr[0]) != attr[1] {
+				return false
+			}
+			switch attr[1] {
+			case "0", "2", "4", "6", "8":
+			default:
 				return false
 			}
 		default:
@@ -1353,8 +1307,9 @@ var valueTextRichStylePropertyOrder = []string{
 }
 
 var (
-	valueTextRichBuiltinPalettePattern = regexp.MustCompile(`^var\(--b3-font-(color|background)(\d+)\)$`)
-	valueTextRichBuiltinStylePattern   = regexp.MustCompile(
+	valueTextRichBuiltinThemeStylePattern = regexp.MustCompile(`^var\(--b3-card-(error|warning|info|success)-(color|background)\)$`)
+	valueTextRichBuiltinPalettePattern    = regexp.MustCompile(`^var\(--b3-font-(color|background)(\d+)\)$`)
+	valueTextRichBuiltinStylePattern      = regexp.MustCompile(
 		`^var\(--b3-inline-builtin-(error|warning|info|success)-(color|background-color),\s*` +
 			`var\(--b3-card-(error|warning|info|success)-(color|background)\)\)$`,
 	)
@@ -1378,7 +1333,38 @@ func RenderValueTextRich(tree *parse.Tree) (content string, err error) {
 }
 
 func valueTextRichBlockDOM2Kramdown(luteEngine *lute.Lute, blockDOM string) string {
-	blockDOM = valueTextRichBlockDOMStructuralAttrs.ReplaceAllString(blockDOM, "")
+	tree := luteEngine.BlockDOM2Tree(blockDOM)
+	first := tree.Root.FirstChild
+	singleEmptyParagraph := nil != first && ast.NodeParagraph == first.Type &&
+		"" == strings.TrimSpace(strings.ReplaceAll(first.Content(), "\u200b", ""))
+	if singleEmptyParagraph {
+		for next := first.Next; nil != next; next = next.Next {
+			singleEmptyParagraph = ast.NodeKramdownBlockIAL == next.Type
+			if !singleEmptyParagraph {
+				break
+			}
+		}
+	}
+	// 空段落和代码设置依靠块属性列表保留，相邻块的标识也必须保留以隔开属性列表。
+	preserveBlockIDs := false
+	ast.Walk(tree.Root, func(node *ast.Node, entering bool) ast.WalkStatus {
+		if !entering {
+			return ast.WalkContinue
+		}
+		if ast.NodeParagraph == node.Type && !singleEmptyParagraph && "" == strings.TrimSpace(strings.ReplaceAll(node.Content(), "\u200b", "")) ||
+			ast.NodeCodeBlock == node.Type && ("" != node.IALAttr("linewrap") || "" != node.IALAttr("ligatures") ||
+				"" != node.IALAttr("linenumber") || "" != node.IALAttr(codeTabSpacesAttr)) {
+			preserveBlockIDs = true
+			return ast.WalkStop
+		}
+		return ast.WalkContinue
+	})
+	blockDOM = valueTextRichBlockDOMStructuralAttrs.ReplaceAllStringFunc(blockDOM, func(attribute string) string {
+		if preserveBlockIDs && strings.HasPrefix(strings.TrimSpace(attribute), "data-node-id=") {
+			return attribute
+		}
+		return ""
+	})
 	blockDOM, backslashSentinel, backtickSentinel := protectValueTextRichBlockDOMStyleCharacters(blockDOM)
 	markdown := strings.TrimSpace(luteEngine.BlockDOM2Md(blockDOM))
 	if "" != backtickSentinel {
@@ -1461,12 +1447,7 @@ func valueTextRichBlockDOMAttribute(tag, name string) (value string, ok bool) {
 }
 
 func containsValueTextRichDataType(dataType, expected string) bool {
-	for _, typ := range strings.Fields(dataType) {
-		if expected == typ {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(strings.Fields(dataType), expected)
 }
 
 type valueTextRichStyleEntityProtection struct {
@@ -1643,8 +1624,8 @@ func valueTextRichBlockLiteralMarkdownRanges(markdown string) (ret []valueTextRi
 func stripValueTextRichMarkdownContainer(line string) string {
 	for {
 		line = strings.TrimLeft(line, " \t")
-		if strings.HasPrefix(line, ">") {
-			line = strings.TrimPrefix(line, ">")
+		if after, ok := strings.CutPrefix(line, ">"); ok {
+			line = after
 			continue
 		}
 		if 2 <= len(line) && ('-' == line[0] || '+' == line[0] || '*' == line[0]) &&
@@ -2091,12 +2072,16 @@ func newValueTextRichBackslashSentinel(content string) string {
 
 // NormalizeValueTextRich 校验并将文本字段的富文本源规范化为 SiYuan Kramdown。
 func NormalizeValueTextRich(rich *ValueTextRich) (tree *parse.Tree, err error) {
-	_, tree, err = parseValueTextRich(rich)
+	return normalizeValueTextRichWithLute(rich, newValueTextRichLute())
+}
+
+func normalizeValueTextRichWithLute(rich *ValueTextRich, luteEngine *lute.Lute) (tree *parse.Tree, err error) {
+	_, tree, err = parseValueTextRichWithLute(rich, false, luteEngine)
 	if nil != err || nil == rich {
 		return tree, err
 	}
 	var normalized string
-	if normalized, tree, err = normalizeValueTextRichTreeSource(tree); nil != err {
+	if normalized, tree, err = normalizeValueTextRichTreeSourceWithLute(tree, false, luteEngine); nil != err {
 		return nil, err
 	}
 	rich.Content = normalized
@@ -2104,13 +2089,20 @@ func NormalizeValueTextRich(rich *ValueTextRich) (tree *parse.Tree, err error) {
 }
 
 func normalizeValueTextRichTreeSource(tree *parse.Tree) (content string, normalizedTree *parse.Tree, err error) {
+	return normalizeValueTextRichTreeSourceWithImages(tree, false)
+}
+
+func normalizeValueTextRichTreeSourceWithImages(tree *parse.Tree, images bool) (content string, normalizedTree *parse.Tree, err error) {
+	return normalizeValueTextRichTreeSourceWithLute(tree, images, newValueTextRichLute())
+}
+
+func normalizeValueTextRichTreeSourceWithLute(tree *parse.Tree, images bool, luteEngine *lute.Lute) (content string, normalizedTree *parse.Tree, err error) {
 	normalizedTree = tree
 	previous := ""
-	for iteration := 0; iteration < 4; iteration++ {
-		if err = normalizeValueTextRichTreeStyles(normalizedTree); nil != err {
+	for iteration := range 4 {
+		if err = normalizeValueTextRichTreeStyles(normalizedTree, images); nil != err {
 			return "", nil, err
 		}
-		luteEngine := newValueTextRichLute()
 		blockDOM := luteEngine.Tree2BlockDOM(normalizedTree, luteEngine.RenderOptions, luteEngine.ParseOptions)
 		content = valueTextRichBlockDOM2Kramdown(luteEngine, blockDOM)
 		if 0 < iteration && previous == content {
@@ -2120,7 +2112,7 @@ func normalizeValueTextRichTreeSource(tree *parse.Tree) (content string, normali
 		candidate := &ValueTextRich{
 			Spec: ValueTextRichSpec, Format: ValueTextRichFormatKramdown, Content: content,
 		}
-		if _, normalizedTree, err = parseValueTextRich(candidate); nil != err {
+		if _, normalizedTree, err = parseValueTextRichWithLute(candidate, images, luteEngine); nil != err {
 			return "", nil, err
 		}
 	}
@@ -2203,15 +2195,7 @@ func NewFormattedValueNumber(content float64, format NumberFormat) (ret *ValueNu
 		Content:          content,
 		IsNotEmpty:       true,
 		Format:           format,
-		FormattedContent: fmt.Sprintf("%f", content),
-	}
-
-	ret.FormattedContent = formatNumber(content, format)
-
-	switch format {
-	case NumberFormatNone:
-		s := fmt.Sprintf("%.5f", content)
-		ret.FormattedContent = strings.TrimRight(strings.TrimRight(s, "0"), ".")
+		FormattedContent: formatNumber(content, format),
 	}
 	return
 }
@@ -2318,12 +2302,13 @@ const (
 	DateDisplayFormatMonthDayYear DateDisplayFormat = "month-day-year"
 	DateDisplayFormatDayMonthYear DateDisplayFormat = "day-month-year"
 	DateDisplayFormatYearMonthDay DateDisplayFormat = "year-month-day"
+	DateDisplayFormatLunar        DateDisplayFormat = "lunar"
 )
 
 func (format DateDisplayFormat) IsValid() bool {
 	switch format {
 	case DateDisplayFormatDefault, DateDisplayFormatFull, DateDisplayFormatMonthDayYear,
-		DateDisplayFormatDayMonthYear, DateDisplayFormatYearMonthDay:
+		DateDisplayFormatDayMonthYear, DateDisplayFormatYearMonthDay, DateDisplayFormatLunar:
 		return true
 	}
 	return false
@@ -2333,6 +2318,12 @@ func formatDateDisplay(content int64, format DateDisplayFormat, isNotTime bool) 
 	contentTime := time.UnixMilli(content)
 	var formatted string
 	switch format {
+	case DateDisplayFormatLunar:
+		if lunar, ok := solarToLunar(contentTime); ok {
+			formatted = formatLunarDate(lunar)
+		} else {
+			formatted = contentTime.Format("2006-01-02") + " (" + GetAttributeViewI18n("lunarRange") + ")"
+		}
 	case DateDisplayFormatFull:
 		months := strings.Split(GetAttributeViewI18n("dateMonths"), "|")
 		month := contentTime.Month().String()
@@ -2446,21 +2437,6 @@ func NewFormattedValueDate(content, content2 int64, format DateFormat, isNotTime
 		FormattedContent: formatted,
 	}
 	return
-}
-
-// RoundUp rounds like 12.3416 -> 12.35
-func RoundUp(val float64, precision int) float64 {
-	return math.Ceil(val*(math.Pow10(precision))) / math.Pow10(precision)
-}
-
-// RoundDown rounds like 12.3496 -> 12.34
-func RoundDown(val float64, precision int) float64 {
-	return math.Floor(val*(math.Pow10(precision))) / math.Pow10(precision)
-}
-
-// Round rounds to nearest like 12.3456 -> 12.35
-func Round(val float64, precision int) float64 {
-	return math.Round(val*(math.Pow10(precision))) / math.Pow10(precision)
 }
 
 type ValueSelect struct {
@@ -2663,7 +2639,7 @@ func (r *ValueRollup) BuildContents(attrView *AttributeView, destKey *Key, relat
 
 		destVal := GetValue(attrView.KeyValues, destKey.ID, blockID)
 		if nil != context && nil != context.FurtherCollection &&
-			(KeyTypeTemplate == destKey.Type || KeyTypeUpdated == destKey.Type || KeyTypeCreated == destKey.Type) {
+			(HasKeyGroup(destKey.Type, KeyGroupNoFilterDefault)) {
 			destVal = context.FurtherCollection.GetValue(blockID, destKey.ID)
 		}
 
@@ -2676,6 +2652,17 @@ func (r *ValueRollup) BuildContents(attrView *AttributeView, destKey *Key, relat
 			continue
 		}
 
+		if KeyTypeRollup == destKey.Type {
+			// 嵌套汇总使用目标字段的计算结果，保持外层显示、筛选和统计的值类型一致。
+			if nil != destVal.Rollup {
+				for _, content := range destVal.Rollup.Contents {
+					if nil != content {
+						r.Contents = append(r.Contents, content.Clone())
+					}
+				}
+			}
+			continue
+		}
 		if val := destVal.GetValByType(destKey.Type); nil == val || reflect.ValueOf(val).IsNil() {
 			// 目标字段因为修改类型导致空值
 			continue
@@ -2834,33 +2821,33 @@ func (r *ValueRollup) calcContents(calc *RollupCalc, destKey *Key) {
 			r.Contents = []*Value{{Type: KeyTypeNumber, Number: NewFormattedValueNumber(float64(countUniqueValues)/float64(len(r.Contents)), NumberFormatPercent)}}
 		}
 	case CalcOperatorSum:
-		sum := 0.0
+		var sum decimalSum
 		for _, v := range r.Contents {
 			if KeyTypeNumber == v.Type && nil != v.Number && v.Number.IsNotEmpty {
-				sum += v.Number.Content
+				sum.add(v.Number.Content)
 			} else {
 				content := v.String(false)
 				f, _ := util.Convert2Float(content)
-				sum += f
+				sum.add(f)
 			}
 		}
-		r.Contents = []*Value{{Type: KeyTypeNumber, Number: NewFormattedValueNumber(sum, destKey.NumberFormat)}}
+		r.Contents = []*Value{{Type: KeyTypeNumber, Number: NewFormattedValueNumber(sum.float64(), destKey.NumberFormat)}}
 	case CalcOperatorAverage:
-		sum := 0.0
+		var sum decimalSum
 		count := 0
 		for _, v := range r.Contents {
 			if KeyTypeNumber == v.Type && nil != v.Number && v.Number.IsNotEmpty {
-				sum += v.Number.Content
+				sum.add(v.Number.Content)
 				count++
 			} else {
 				content := v.String(false)
 				f, _ := util.Convert2Float(content)
-				sum += f
+				sum.add(f)
 				count++
 			}
 		}
 		if 0 < count {
-			r.Contents = []*Value{{Type: KeyTypeNumber, Number: NewFormattedValueNumber(sum/float64(count), destKey.NumberFormat)}}
+			r.Contents = []*Value{{Type: KeyTypeNumber, Number: NewFormattedValueNumber(sum.average(count), destKey.NumberFormat)}}
 		}
 	case CalcOperatorMedian:
 		var numbers []float64
@@ -2876,7 +2863,7 @@ func (r *ValueRollup) calcContents(calc *RollupCalc, destKey *Key) {
 		sort.Float64s(numbers)
 		if 0 < len(numbers) {
 			if 0 == len(numbers)%2 {
-				r.Contents = []*Value{{Type: KeyTypeNumber, Number: NewFormattedValueNumber((numbers[len(numbers)/2-1]+numbers[len(numbers)/2])/2, destKey.NumberFormat)}}
+				r.Contents = []*Value{{Type: KeyTypeNumber, Number: NewFormattedValueNumber(numberMean(numbers[len(numbers)/2-1], numbers[len(numbers)/2]), destKey.NumberFormat)}}
 			} else {
 				r.Contents = []*Value{{Type: KeyTypeNumber, Number: NewFormattedValueNumber(numbers[len(numbers)/2], destKey.NumberFormat)}}
 			}
@@ -2984,7 +2971,7 @@ func (r *ValueRollup) calcContents(calc *RollupCalc, destKey *Key) {
 		switch typ {
 		case KeyTypeNumber:
 			if math.MaxFloat64 != minVal && -math.MaxFloat64 != maxVal {
-				r.Contents = []*Value{{Type: KeyTypeNumber, Number: NewFormattedValueNumber(maxVal-minVal, destKey.NumberFormat)}}
+				r.Contents = []*Value{{Type: KeyTypeNumber, Number: NewFormattedValueNumber(numberDifference(maxVal, minVal), destKey.NumberFormat)}}
 			}
 		case KeyTypeDate:
 			if 0 != earliest && 0 != latest {
@@ -3010,7 +2997,7 @@ func (r *ValueRollup) calcContents(calc *RollupCalc, destKey *Key) {
 			}
 		default:
 			if math.MaxFloat64 != minVal && -math.MaxFloat64 != maxVal {
-				r.Contents = []*Value{{Type: KeyTypeNumber, Number: NewFormattedValueNumber(maxVal-minVal, destKey.NumberFormat)}}
+				r.Contents = []*Value{{Type: KeyTypeNumber, Number: NewFormattedValueNumber(numberDifference(maxVal, minVal), destKey.NumberFormat)}}
 			}
 		}
 	case CalcOperatorEarliest:
@@ -3162,7 +3149,7 @@ func (r *ValueRollup) calcContents(calc *RollupCalc, destKey *Key) {
 			}
 		}
 		if 0 < len(r.Contents) {
-			r.Contents = []*Value{{Type: KeyTypeNumber, Number: NewFormattedValueNumber(float64(countChecked*100/len(r.Contents)), NumberFormatNone)}}
+			r.Contents = []*Value{{Type: KeyTypeNumber, Number: newRollupCheckboxPercent(countChecked, len(r.Contents))}}
 		}
 	case CalcOperatorPercentUnchecked:
 		countUnchecked := 0
@@ -3174,9 +3161,17 @@ func (r *ValueRollup) calcContents(calc *RollupCalc, destKey *Key) {
 			}
 		}
 		if 0 < len(r.Contents) {
-			r.Contents = []*Value{{Type: KeyTypeNumber, Number: NewFormattedValueNumber(float64(countUnchecked*100/len(r.Contents)), NumberFormatNone)}}
+			r.Contents = []*Value{{Type: KeyTypeNumber, Number: newRollupCheckboxPercent(countUnchecked, len(r.Contents))}}
 		}
 	}
+}
+
+func newRollupCheckboxPercent(count, total int) *ValueNumber {
+	ratio := float64(count) / float64(total)
+	// 保留筛选、模板和列底部统计使用的百分数数值，仅将显示文本格式化为百分比。
+	number := NewFormattedValueNumber(ratio*100, NumberFormatNone)
+	number.FormattedContent = formatNumber(ratio, NumberFormatPercent)
+	return number
 }
 
 func GetAttributeViewDefaultValue(valueID, keyID, blockID string, typ KeyType, keyDateIsTime bool) (ret *Value) {
@@ -3214,6 +3209,8 @@ func GetAttributeViewDefaultValue(valueID, keyID, blockID string, typ KeyType, k
 		ret.URL = &ValueURL{}
 	case KeyTypeEmail:
 		ret.Email = &ValueEmail{}
+	case KeyTypeLocation:
+		ret.Location = &ValueLocation{}
 	case KeyTypePhone:
 		ret.Phone = &ValuePhone{}
 	case KeyTypeMAsset:

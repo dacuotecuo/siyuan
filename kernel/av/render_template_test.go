@@ -1,18 +1,6 @@
-// SiYuan - From thought to insight, with agents
+// SiYuan - https://github.com/siyuan-note/siyuan
 // Copyright (c) 2020-present, b3log.org
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU Affero General Public License for more details.
-//
-// You should have received a copy of the GNU Affero General Public License
-// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+// SPDX-License-Identifier: AGPL-3.0-or-later
 
 package av
 
@@ -29,7 +17,8 @@ func TestSuspendRenderedContents(t *testing.T) {
 		RenderedContent: "<strong>rendered</strong>",
 	}
 	nestedValue := &Value{Type: KeyTypeText, Text: &ValueText{Content: "nested"}, RenderedContent: "nested rendered"}
-	storedValue.Relation = &ValueRelation{Contents: []*Value{nestedValue}}
+	emptyValue := &Value{Type: KeyTypeBlock, Block: &ValueBlock{Content: "original"}, HasRenderTemplate: true}
+	storedValue.Relation = &ValueRelation{Contents: []*Value{nestedValue, emptyValue}}
 	filterValue := &Value{Type: KeyTypeText, Text: &ValueText{Content: "filter"}, RenderedContent: "filter rendered"}
 	attrView := &AttributeView{
 		KeyValues: []*KeyValues{{Key: &Key{ID: "key", Type: KeyTypeText}, Values: []*Value{storedValue}}},
@@ -51,7 +40,7 @@ func TestSuspendRenderedContents(t *testing.T) {
 	if nil != err {
 		t.Fatal(err)
 	}
-	if bytes.Contains(data, []byte("renderedContent")) {
+	if bytes.Contains(data, []byte("renderedContent")) || bytes.Contains(data, []byte("hasRenderTemplate")) {
 		t.Fatalf("rendered content leaked into persisted attribute view: %s", data)
 	}
 	if "" != storedValue.RenderedContent || "" != nestedValue.RenderedContent || "" != filterValue.RenderedContent {
@@ -59,6 +48,9 @@ func TestSuspendRenderedContents(t *testing.T) {
 	}
 
 	restore()
+	if !emptyValue.HasRenderTemplate {
+		t.Fatal("empty template result marker was not restored")
+	}
 	if "<strong>rendered</strong>" != storedValue.RenderedContent || "nested rendered" != nestedValue.RenderedContent ||
 		"filter rendered" != filterValue.RenderedContent {
 		t.Fatal("rendered content was not restored after serialization")
@@ -70,12 +62,13 @@ func TestCloneStoredValueRemovesRenderedContents(t *testing.T) {
 		Type:            KeyTypeRollup,
 		RenderedContent: "outer",
 		Rollup: &ValueRollup{Contents: []*Value{{
-			Type: KeyTypeText, Text: &ValueText{Content: "stored"}, RenderedContent: "inner",
+			Type: KeyTypeText, Text: &ValueText{Content: "stored"}, RenderedContent: "inner", HasRenderTemplate: true,
 		}}},
 	}
 
 	cloned := CloneStoredValue(value)
-	if nil == cloned || "" != cloned.RenderedContent || "" != cloned.Rollup.Contents[0].RenderedContent {
+	if nil == cloned || "" != cloned.RenderedContent || "" != cloned.Rollup.Contents[0].RenderedContent ||
+		cloned.Rollup.Contents[0].HasRenderTemplate {
 		t.Fatalf("rendered content leaked into stored clone: %+v", cloned)
 	}
 	if "outer" != value.RenderedContent || "inner" != value.Rollup.Contents[0].RenderedContent {

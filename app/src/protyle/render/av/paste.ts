@@ -1,11 +1,3 @@
-export const AV_PASTE_READONLY_TYPES = new Set<TAVCol>([
-    "created",
-    "updated",
-    "template",
-    "rollup",
-    "lineNumber",
-]);
-
 const isStrictNumber = (value: string) => {
     const trimmed = value.trim();
     if (!/^[+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?$/.test(trimmed)) {
@@ -124,17 +116,26 @@ export const getAVPasteMatrixWidth = (rows: unknown[][], header?: string[]) => {
     return Math.max(header?.length || 0, ...rows.map(row => row.length), 0);
 };
 
+export const getAVPasteContentRowCount = (rows: unknown[][]) => {
+    let rowCount = rows.length;
+    while (rowCount > 1 && rows[rowCount - 1].every(value => typeof value === "string" && value === "")) {
+        rowCount--;
+    }
+    return rowCount;
+};
+
 export const shouldShowAVPasteSkeleton = (rows: unknown[][]) => {
     return rows.reduce((count, row) => count + row.length, 0) >= 100;
 };
 
 export const compactAVCellOperations = (operations: IOperation[]) => {
-    const cellOperations = operations.filter(operation => operation.action === "updateAttrViewCell");
+    const cellOperations = operations.filter((operation): operation is Extract<IOperation, {action: "updateAttrViewCell"}> =>
+        operation.action === "updateAttrViewCell");
     if (cellOperations.length < 2) {
         return operations;
     }
-    const otherOperations = operations.filter(operation => operation.action !== "updateAttrViewCell");
-    const operationsByAV = new Map<string, IOperation[]>();
+    const otherOperations: IOperation[] = operations.filter(operation => operation.action !== "updateAttrViewCell");
+    const operationsByAV = new Map<string, Extract<IOperation, {action: "updateAttrViewCell"}>[]>();
     cellOperations.forEach(operation => {
         const avID = operation.avID || "";
         const groupedOperations = operationsByAV.get(avID) || [];

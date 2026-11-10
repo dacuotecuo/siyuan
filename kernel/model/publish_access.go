@@ -1,18 +1,6 @@
-// SiYuan - From thought to insight, with agents
+// SiYuan - https://github.com/siyuan-note/siyuan
 // Copyright (c) 2020-present, b3log.org
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU Affero General Public License for more details.
-//
-// You should have received a copy of the GNU Affero General Public License
-// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+// SPDX-License-Identifier: AGPL-3.0-or-later
 
 package model
 
@@ -140,6 +128,7 @@ func SetPublishAccess(inputPublishAccess PublishAccess) (err error) {
 		err = errors.New(msg)
 		return
 	}
+	IncSyncIfNeeded(publishAccessPath)
 	return
 }
 
@@ -291,7 +280,6 @@ func PurgePublishAccess() {
 		}
 	}
 	SetPublishAccess(tempPublishAccess)
-	return
 }
 
 func CheckPathAccessableByPublishIgnore(box string, path string, publishIgnore PublishAccess) bool {
@@ -301,6 +289,17 @@ func CheckPathAccessableByPublishIgnore(box string, path string, publishIgnore P
 		}
 	}
 	return true
+}
+
+// PublishVisibleDocPathFilter 返回发布读者可见文档路径的判定函数，口径与读者可见的发布视图一致：
+// 隐藏、禁止发布以及加密笔记本中的文档都不计入读者统计。
+func PublishVisibleDocPathFilter(boxID string, publishAccess PublishAccess) func(docPath string) bool {
+	publishInvisible := GetInvisiblePublishAccess(publishAccess)
+	publishDisable := GetDisablePublishAccess(publishAccess)
+	return func(docPath string) bool {
+		return CheckPathAccessableByPublishIgnore(boxID, docPath, publishInvisible) &&
+			CheckPathAccessableByPublishIgnore(boxID, docPath, publishDisable)
+	}
 }
 
 // IsEncryptedPublishRuntimeTarget 判断发布读取目标是否属于当前可解析的加密笔记本。
@@ -420,11 +419,6 @@ func CheckBlockTreeMetadataAccessableByPublishAccess(c *gin.Context, publishAcce
 	return password == "" || CheckPublishAuthCookie(c, passwordID, password)
 }
 
-func CheckBlockIdDiscoverableByPublishAccessInBox(publishAccess PublishAccess, blockID, boxID string) bool {
-	bt := treenode.GetBlockTreeInBox(blockID, boxID)
-	return CheckBlockTreeDiscoverableByPublishAccess(publishAccess, bt)
-}
-
 func CheckBlockTreeDiscoverableByPublishAccess(publishAccess PublishAccess, bt *treenode.BlockTree) bool {
 	if bt == nil || IsEncryptedBoxDeniedByPublishAccess(bt.BoxID) {
 		return false
@@ -437,11 +431,14 @@ func CheckBlockTreeDiscoverableByPublishAccess(publishAccess PublishAccess, bt *
 }
 
 func GetBlockTreePublishAccessStatus(c *gin.Context, publishAccess PublishAccess, bt *treenode.BlockTree) PublishAccessStatus {
+	return getBlockTreePublishAccessStatus(c, publishAccess, filterDisablePublishAccess(publishAccess), bt)
+}
+
+func getBlockTreePublishAccessStatus(c *gin.Context, publishAccess, publishDisable PublishAccess, bt *treenode.BlockTree) PublishAccessStatus {
 	if bt == nil || IsEncryptedBoxDeniedByPublishAccess(bt.BoxID) {
 		return PublishAccessDenied
 	}
 
-	publishDisable := filterDisablePublishAccess(publishAccess)
 	if !CheckPathAccessableByPublishIgnore(bt.BoxID, bt.Path, publishDisable) {
 		return PublishAccessDenied
 	}
@@ -460,11 +457,13 @@ func checkBlockTreeAccessableByPublishAccess(c *gin.Context, publishAccess Publi
 func SetPublishAuthCookie(c *gin.Context, ID string, password string) {
 	authCookie := util.SHA256Hash([]byte(ID + password))
 	http.SetCookie(c.Writer, &http.Cookie{
-		Name:     "publish-auth-" + ID,
-		Value:    authCookie,
-		MaxAge:   24 * 60 * 60,
-		Path:     "/",
-		Secure:   util.SSL,
+		Name:   "publish-auth-" + ID,
+		Value:  authCookie,
+		MaxAge: 24 * 60 * 60,
+		Path:   "/",
+		// 只有客户端连接确实使用 TLS 时才标记 Secure，与发布会话 Cookie 保持一致
+		// https://github.com/siyuan-note/siyuan/security/advisories/GHSA-hpj5-f7cj-vvwr
+		Secure:   util.SSL || util.IsTLSRequest(c.Request),
 		HttpOnly: true,
 	})
 }
@@ -501,14 +500,14 @@ func CheckAbsPathAccessableByPublishAccess(c *gin.Context, absPath string, publi
 	if gulu.File.IsSubPath(util.DataDir, absPath) {
 		relPath, err := filepath.Rel(util.DataDir, absPath)
 		if err != nil {
-			return true
+			return false
 		}
 
 		relPath = strings.ReplaceAll(relPath, "\\", "/")
 
 		pathParts := strings.Split(relPath, "/")
 		if len(pathParts) <= 1 {
-			return true
+			return false
 		}
 
 		if assetPath, box, ok := AssetPathFromDataRelativePath(relPath); ok {
@@ -566,8 +565,8 @@ func FilterViewByPublishAccess(c *gin.Context, publishAccess PublishAccess, view
 	ret = viewable
 
 	switch ret.GetType() {
-	case av.LayoutTypeTable:
-		table := ret.(*av.Table)
+	case av.LayoutTypeTable, av.LayoutTypeList, av.LayoutTypeCalendar:
+		table := av.TableFromViewable(ret)
 		filteredRows := []*av.TableRow{}
 		for _, row := range table.Rows {
 			if checkAttributeViewItemAccessableByPublishAccess(c, publishAccess, row) {
@@ -575,6 +574,10 @@ func FilterViewByPublishAccess(c *gin.Context, publishAccess PublishAccess, view
 			}
 		}
 		table.Rows = filteredRows
+		if ret.GetType() == av.LayoutTypeCalendar {
+			table.RowCount = len(filteredRows)
+			table.CalendarTargetDate = nil
+		}
 		if table.Groups != nil {
 			for i, viewable := range table.Groups {
 				table.Groups[i] = FilterViewByPublishAccess(c, publishAccess, viewable)
@@ -670,6 +673,21 @@ func FilterAttributeViewByPublishAccess(c *gin.Context, publishAccess PublishAcc
 	return viewable
 }
 
+// AVExportPublishFilter 为导出路径提供发布访问过滤，nil 表示调用方已确认无需过滤（管理员导出）。
+type AVExportPublishFilter func(view av.Viewable, avID, blockID string) av.Viewable
+
+// NewAVExportPublishFilter 为发布读者构造导出用的属性视图过滤器，非读者角色返回 nil。
+func NewAVExportPublishFilter(c *gin.Context) AVExportPublishFilter {
+	if !IsReadOnlyRoleContext(c) {
+		return nil
+	}
+
+	publishAccess := GetPublishAccess()
+	return func(view av.Viewable, avID, blockID string) av.Viewable {
+		return FilterAttributeViewByPublishAccess(c, publishAccess, avID, blockID, view)
+	}
+}
+
 func parseAttributeViewForPublishAccess(avID, blockID string) (attrView *av.AttributeView, boxID string) {
 	if "" != blockID {
 		blockTree := treenode.GetBlockTree(blockID)
@@ -708,8 +726,8 @@ func (filter *attributeViewPublishAccessFilter) filterViewable(attrView *av.Attr
 	}
 
 	switch viewable.GetType() {
-	case av.LayoutTypeTable:
-		table := viewable.(*av.Table)
+	case av.LayoutTypeTable, av.LayoutTypeList, av.LayoutTypeCalendar:
+		table := av.TableFromViewable(viewable)
 		filter.filterGroupValue(attrView, table.BaseInstance)
 		for _, row := range table.Rows {
 			if nil == row {
@@ -1249,6 +1267,10 @@ func FilterBlockInfoByPublishAccess(c *gin.Context, publishAccess PublishAccess,
 		return
 	}
 
+	// 反链块 ID 逐个按发布访问过滤，避免读者据此获知禁止发布、密码保护文档中的引用块
+	ret.RefIDs = FilterRefIDsByPublishAccess(c, publishAccess, ret.RefIDs)
+	ret.RefCount = len(ret.RefIDs)
+
 	publishIgnore := GetDisablePublishAccess(publishAccess)
 	filteredAttrViews := []*AttrView{}
 	avIDs := []string{}
@@ -1274,17 +1296,30 @@ func FilterBlockInfoByPublishAccess(c *gin.Context, publishAccess PublishAccess,
 	ret.IAL[av.NodeAttrNameAvs] = strings.Join(avIDs, ",")
 
 	bt := treenode.GetBlockTree(info.RootID)
-	if bt != nil {
-		passwordID, password := GetPathPasswordByPublishAccess(bt.BoxID, bt.Path, publishAccess)
-		if (password != "" && !CheckPublishAuthCookie(c, passwordID, password)) || !CheckPathAccessableByPublishIgnore(bt.BoxID, bt.Path, publishIgnore) {
-			ret.IAL["name"] = ""
-			ret.IAL["alias"] = ""
-			ret.IAL["memo"] = ""
-			ret.IAL["bookmark"] = ""
-			ret.IAL["tags"] = ""
-			ret.RefCount = 0
-			ret.RefIDs = []string{}
+	if nil == bt {
+		// 无法定位文档路径时不给出下级文档数，避免泄漏发布排除文档的数量
+		ret.SubFileCount = 0
+		return
+	}
+
+	// 下级文档数只统计发布可见的文档，与读者可见的文档树口径一致
+	if 0 < ret.SubFileCount {
+		if IsBoxDoc(bt.BoxID, bt.ID) {
+			ret.SubFileCount = BoxDocSubFileCountForPublish(bt.BoxID, publishAccess)
+		} else {
+			ret.SubFileCount = BoxDocSubFileCountForPublishAt(bt.BoxID, bt.Path, publishAccess)
 		}
+	}
+
+	passwordID, password := GetPathPasswordByPublishAccess(bt.BoxID, bt.Path, publishAccess)
+	if (password != "" && !CheckPublishAuthCookie(c, passwordID, password)) || !CheckPathAccessableByPublishIgnore(bt.BoxID, bt.Path, publishIgnore) {
+		ret.IAL["name"] = ""
+		ret.IAL["alias"] = ""
+		ret.IAL["memo"] = ""
+		ret.IAL["bookmark"] = ""
+		ret.IAL["tags"] = ""
+		ret.RefCount = 0
+		ret.RefIDs = []string{}
 	}
 	return
 }

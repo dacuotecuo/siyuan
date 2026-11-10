@@ -1,6 +1,11 @@
+// SiYuan - https://github.com/siyuan-note/siyuan
+// Copyright (c) 2020-present, b3log.org
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 package av
 
 import (
+	"fmt"
 	"maps"
 	"sync"
 
@@ -8,6 +13,41 @@ import (
 	"github.com/88250/lute/ast"
 	"github.com/siyuan-note/logging"
 )
+
+// AddCopiedBlockRels 在同一存储边界内登记副本的镜像关系，认证失败或写入失败时返回错误。
+// 调用方须先写入全部副本文档，并在失败时清理本次新建的文档。
+func AddCopiedBlockRels(boxID string, nodes []*ast.Node) error {
+	if len(nodes) == 0 {
+		return nil
+	}
+	AttributeViewBlocksLock.Lock()
+	defer AttributeViewBlocksLock.Unlock()
+	rels, err := readMirrorBlocksWithErr(boxID)
+	if err != nil {
+		return err
+	}
+	if rels == nil {
+		return fmt.Errorf("invalid database mirror index")
+	}
+	for _, node := range nodes {
+		if node.Type != ast.NodeAttributeView || !ast.IsNodeIDPattern(node.ID) || !ast.IsNodeIDPattern(node.AttributeViewID) {
+			return fmt.Errorf("invalid copied database block [%s]", node.ID)
+		}
+		// 磁盘认证不能由已缓存的数据库定义替代。
+		data, readErr := ReadAttributeViewDataInBox(node.AttributeViewID, boxID)
+		if readErr != nil {
+			return readErr
+		}
+		if data == nil {
+			return fmt.Errorf("database [%s] not found", node.AttributeViewID)
+		}
+		if _, readErr = ParseAttributeViewData(node.AttributeViewID, data); readErr != nil {
+			return readErr
+		}
+		rels[node.AttributeViewID] = gulu.Str.RemoveDuplicatedElem(append(rels[node.AttributeViewID], node.ID))
+	}
+	return writeMirrorBlocks(boxID, rels)
+}
 
 var (
 	AttributeViewBlocksLock = sync.Mutex{}
@@ -79,7 +119,11 @@ func RemoveBlockRel(avID, blockID string, existBlockTree func(string) bool) (ret
 	defer AttributeViewBlocksLock.Unlock()
 
 	_, boxID := FindAttributeViewPath(avID)
-	avBlocks := readMirrorBlocks(boxID)
+	avBlocks, err := readMirrorBlocksWithErr(boxID)
+	if err != nil {
+		logging.LogErrorf("read attribute view blocks failed: %s", err)
+		return
+	}
 
 	blockIDs := avBlocks[avID]
 	if nil == blockIDs {
@@ -134,7 +178,12 @@ func BatchUpsertBlockRel(nodes []*ast.Node) {
 		boxID := avBoxID
 		avBlocks, ok := boxAvBlocks[boxID]
 		if !ok {
-			avBlocks = readMirrorBlocks(boxID)
+			var err error
+			avBlocks, err = readMirrorBlocksWithErr(boxID)
+			if err != nil {
+				logging.LogErrorf("read attribute view blocks failed: %s", err)
+				return
+			}
 			boxAvBlocks[boxID] = avBlocks
 		}
 
@@ -166,7 +215,11 @@ func UpsertBlockRel(avID, blockID string) (ret bool) {
 		}
 	}
 	boxID := avBoxID
-	avBlocks := readMirrorBlocks(boxID)
+	avBlocks, err := readMirrorBlocksWithErr(boxID)
+	if err != nil {
+		logging.LogErrorf("read attribute view blocks failed: %s", err)
+		return
+	}
 
 	blockIDs := avBlocks[avID]
 	oldLen := len(blockIDs)

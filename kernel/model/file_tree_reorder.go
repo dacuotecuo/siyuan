@@ -1,6 +1,11 @@
+// SiYuan - https://github.com/siyuan-note/siyuan
+// Copyright (c) 2020-present, b3log.org
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 package model
 
 import (
+	"errors"
 	"fmt"
 	"maps"
 	"path"
@@ -81,7 +86,7 @@ type DocTreeReorderResult struct {
 func resolveDraggedDocSortMode(boxID, listPath string) (*int, error) {
 	mode := util.SortModeCustom
 	if listPath == "/" {
-		if Conf.FileTree.Sort == util.SortModeCustom {
+		if Conf.FileTree.Load().Sort == util.SortModeCustom {
 			mode = util.SortModeFileTree
 		}
 		return &mode, nil
@@ -153,7 +158,7 @@ func ReorderDocTree(sourceIDs []string, targetID, position string, preview, remo
 		}
 		if source.BoxID == target.BoxID && (target.Path == source.Path ||
 			strings.HasPrefix(target.Path, strings.TrimSuffix(source.Path, ".sy")+"/")) {
-			return nil, fmt.Errorf("cannot move document [%s] into itself", id)
+			return nil, errors.New(Conf.Language(87))
 		}
 		if byID[id] != nil {
 			continue
@@ -200,7 +205,7 @@ func ReorderDocTree(sourceIDs []string, targetID, position string, preview, remo
 		}
 	}
 	if len(fromPaths) > 0 {
-		if err = MoveDocs(fromPaths, box.ID, listPath, nil); err != nil {
+		if err = moveDocs(fromPaths, box.ID, listPath, nil, false); err != nil {
 			return ret, err
 		}
 	}

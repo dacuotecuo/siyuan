@@ -1,12 +1,19 @@
 import {openMobileFileById} from "../editor";
+import {refreshSettingConfig} from "../../config/setting/sync";
+import {closeNotebookHistoryDialogs} from "../../history/notebookDialogs";
+import {clearDocumentCreationPlans} from "../../util/configuredDocument";
+import {closeNotebookLivePhotos} from "../../protyle/preview/livePhoto";
 import {
+    downloadProgress,
     forceQuit,
+    processBacklinkIndexCommit,
     processSync,
-    progressLoading,
     setDefRefCount,
     setRefDynamicText,
     transactionError
 } from "../../dialog/processSystem";
+import {progressLoading} from "../../dialog/progress";
+import {syncCheckoutProgress} from "../../sync/checkoutProgress";
 import type {App} from "../../index";
 import {applyPluginReload, syncGlobalPluginConfig} from "../../plugin/globalState";
 import {reloadEmoji} from "../../emoji";
@@ -19,11 +26,15 @@ import {reloadInlineStyles} from "../../util/assets";
 import {renderMobileBottomBar} from "./mobileBottomBar";
 import {Constants} from "../../constants";
 import {MOBILE_SIDE_PANEL_CONFIG_CHANGE_EVENT} from "./mobileSidePanelConfig";
-import {appearanceConfigApi} from "../../config/tabs/appearanceRuntime";
+import {appearanceConfigApi, refreshAppearance} from "../../config/tabs/appearanceRuntime";
 import {applyCloudUserState} from "../../config/tabs/accountUi";
 import {isInMobileApp} from "../../protyle/util/compatibility";
 import {handleMobileKernelExit} from "./kernelExit";
 import {sanitizeKernelHTML} from "../../util/hostCapabilities";
+import {applyEntryVisibility} from "../../config/entryVisibility/runtime";
+import {removeMobileBacklinkContent} from "./backlinkPanels";
+import {removeMobileReferenceSheet} from "./openReference";
+import {isPaidUser, needSubscribe} from "../../util/needSubscribe";
 
 let statusTimeout: number;
 const statusElement = document.querySelector("#status") as HTMLElement;
@@ -35,6 +46,19 @@ const dispatchMobileSidePanelConfigChange = () => {
 export const onMessage = (app: App, data: IWebSocketData) => {
     if (data) {
         switch (data.cmd) {
+            case "syncPending":
+                document.getElementById("toolbarSync").classList.toggle("fn__none", !(data.data === true &&
+                    ((0 !== window.siyuan.config.sync.provider && isPaidUser()) ||
+                        (0 === window.siyuan.config.sync.provider && !needSubscribe(""))) &&
+                    window.siyuan.config.repo.key && window.siyuan.config.sync.enabled));
+                break;
+            case "databaseIndexCommit":
+                processBacklinkIndexCommit(data.data);
+                window.siyuan.mobile.docks.tag?.update();
+                break;
+            case "setEntryVisibility":
+                applyEntryVisibility(data.data);
+                break;
             case "logoutAuth":
                 redirectToCheckAuth();
                 break;
@@ -53,6 +77,12 @@ export const onMessage = (app: App, data: IWebSocketData) => {
                 break;
             case "setAppearance":
                 appearanceConfigApi.apply(data.data);
+                break;
+            case "settingChanged":
+                void refreshSettingConfig(data.data.namespace, data.data.revision);
+                break;
+            case "refreshAppearance":
+                void refreshAppearance(data.data);
                 break;
             case "reloadInlineStyles":
                 void reloadInlineStyles();
@@ -101,6 +131,11 @@ export const onMessage = (app: App, data: IWebSocketData) => {
                 break;
             case "closeBox":
             case "removeBox": {
+                closeNotebookHistoryDialogs(data.data.box);
+                clearDocumentCreationPlans(data.data.box);
+                closeNotebookLivePhotos(data.data.box);
+                removeMobileBacklinkContent({notebookId: data.data.box});
+                removeMobileReferenceSheet({notebookId: data.data.box});
                 window.siyuan.mobile.tabs?.removeNotebook(data.data.box);
                 break;
             }
@@ -108,6 +143,8 @@ export const onMessage = (app: App, data: IWebSocketData) => {
                 void activateOnboarding(app, data.data);
                 break;
             case "removeDoc":
+                removeMobileBacklinkContent({rootIDs: data.data.ids});
+                removeMobileReferenceSheet({rootIDs: data.data.ids});
                 window.siyuan.mobile.tabs?.removeRoots(data.data.ids);
                 if (window.siyuan.config.onboarding?.newUser && !window.siyuan.config.onboarding.dismissed &&
                     data.data.ids.includes(window.siyuan.config.onboarding.documentID)) {
@@ -154,14 +191,17 @@ export const onMessage = (app: App, data: IWebSocketData) => {
                     dispatchMobileSidePanelConfigChange();
                 }
                 break;
+            case "downloadProgress":
+                downloadProgress(data.data);
+                break;
+            case "syncProgress":
+                syncCheckoutProgress(data);
+                break;
             case"progress":
                 progressLoading(data);
                 break;
             case"syncing":
                 processSync(data);
-                if (data.code === 1) {
-                    document.getElementById("toolbarSync").classList.add("fn__none");
-                }
                 break;
             case "openFileById":
                 openMobileFileById(app, data.data.id);

@@ -20,12 +20,16 @@ export const AV_RICH_TEXT_EDITOR_ALLOWED_ATTRIBUTES = [
     "data-marker", "data-node-id", "data-node-index", "data-position", "data-subtype", "data-type", "draggable",
     "spellcheck", "spin", "style", "updated", "xlink:href",
 ];
+const AV_RICH_TEXT_CUSTOM_PROTOCOL = /^(?!(?:javascript|vbscript|data|blob|file|filesystem|about|chrome|chrome-extension|devtools|view-source|resource|moz-extension):)[a-z][a-z0-9+.-]*:\/\//i;
 export const AV_RICH_TEXT_PREVIEW_SANITIZE_OPTIONS = {
     ALLOWED_TAGS: AV_RICH_TEXT_PREVIEW_ALLOWED_TAGS,
     ALLOWED_ATTR: AV_RICH_TEXT_PREVIEW_ALLOWED_ATTRIBUTES,
     ALLOW_ARIA_ATTR: false,
     ALLOW_DATA_ATTR: false,
-    ALLOWED_URI_REGEXP: /^(?:(?:https?|mailto|siyuan|tel|web\+siyuan):|[#/?]|\.\.?\/|[^a-z]|[a-z0-9._~-]+(?:[/?#]|$))/i,
+    // 公式源码是纯文本，不按链接地址过滤；链接属性仍使用独立的地址校验。
+    ADD_URI_SAFE_ATTR: ["data-content"],
+    ALLOWED_URI_REGEXP: new RegExp(AV_RICH_TEXT_CUSTOM_PROTOCOL.source +
+        "|" + /^(?:(?:https?|mailto|siyuan|tel|web\+siyuan):|[#/?]|\.\.?\/|[^a-z]|[a-z0-9._~-]+(?:[/?#]|$))/.source, "i"),
 };
 const BUILTIN_INLINE_COLOR_COUNT = 13;
 const MAX_INLINE_FONT_FAMILY_LENGTH = 256;
@@ -45,7 +49,6 @@ const EXECUTABLE_CODE_LANGUAGES = new Set([
     "graphviz",
     "infographic",
     "mermaid",
-    "mindmap",
     "plantuml",
 ]);
 
@@ -151,16 +154,17 @@ export const sanitizeAVRichTextInlineMemoContent = (value: string) => {
         return "";
     }
 
-    for (let start = decoded.indexOf("<"); start >= 0; start = decoded.indexOf("<", start + 1)) {
+    // 实体保持编码后只会显示为文字；仅拒绝可被渲染器解释为标签的原始内容。
+    for (let start = value.indexOf("<"); start >= 0; start = value.indexOf("<", start + 1)) {
         let index = start + 1;
-        if (decoded[index] === "/") {
+        if (value[index] === "/") {
             index++;
-            if (/[A-Za-z]/.test(decoded[index] || "")) {
+            if (/[A-Za-z]/.test(value[index] || "")) {
                 return "";
             }
             continue;
         }
-        if (/[A-Za-z!?]/.test(decoded[index] || "")) {
+        if (/[A-Za-z!?]/.test(value[index] || "")) {
             return "";
         }
     }
@@ -189,7 +193,7 @@ const isCleanAVRichTextAssetPath = (value: string) => {
     return cleanPath === path;
 };
 
-export const getAVRichTextSafeURL = (value?: string | null) => {
+export const getAVRichTextSafeURL = (value?: string | null, localLinks = false, customProtocols = false) => {
     const original = value || "";
     if (!original) {
         return "";
@@ -198,7 +202,7 @@ export const getAVRichTextSafeURL = (value?: string | null) => {
         return "";
     }
     const url = decodeAVRichTextHTMLEntities(original);
-    if (typeof url !== "string" || hasUnsafeAVRichTextURLCharacter(url)) {
+    if (typeof url !== "string" || Array.from(url).some(isAVRichTextControlOrFormatCharacter)) {
         return "";
     }
     let percentDecoded: string;
@@ -207,7 +211,27 @@ export const getAVRichTextSafeURL = (value?: string | null) => {
     } catch {
         return "";
     }
-    if (!hasValidAVRichTextUnicode(percentDecoded) || hasUnsafeAVRichTextURLCharacter(percentDecoded)) {
+    if (!hasValidAVRichTextUnicode(percentDecoded) ||
+        Array.from(percentDecoded).some(isAVRichTextControlOrFormatCharacter)) {
+        return "";
+    }
+    // 普通表格保留本地超链接，图片来源和数据库片段继续使用默认的地址规则。
+    if (localLinks) {
+        if (/^[a-z]:[\\/]/i.test(url) || /^\\\\[^\\/:?#@]+[\\/][^\\/]+/.test(url)) {
+            return url;
+        }
+        const normalized = url.replace(/\\/g, "/");
+        if (/^file:\/\/(?:[^/]+)?\//i.test(normalized) && !normalized.slice(7).split("/", 1)[0].includes(":")) {
+            try {
+                if (new URL(normalized).protocol === "file:") {
+                    return url;
+                }
+            } catch {
+                return "";
+            }
+        }
+    }
+    if (hasUnsafeAVRichTextURLCharacter(url) || hasUnsafeAVRichTextURLCharacter(percentDecoded)) {
         return "";
     }
     const scheme = url.match(/^([a-z][a-z0-9+.-]*):/i)?.[1].toLowerCase();
@@ -216,7 +240,8 @@ export const getAVRichTextSafeURL = (value?: string | null) => {
             const opaque = url.slice(scheme.length + 1);
             return opaque && !opaque.startsWith("/") ? url : "";
         }
-        if (scheme !== "http" && scheme !== "https" && scheme !== "siyuan" && scheme !== "web+siyuan") {
+        if (scheme !== "http" && scheme !== "https" && scheme !== "siyuan" && scheme !== "web+siyuan" &&
+            !(customProtocols && AV_RICH_TEXT_CUSTOM_PROTOCOL.test(url))) {
             return "";
         }
         if (!url.toLowerCase().startsWith(`${scheme}://`)) {
@@ -721,6 +746,10 @@ const normalizeAVRichTextInlineStyleValue = (property: AVRichTextStyleProperty, 
         return "";
     }
 
+    const themeStyle = value.match(/^var\(--b3-card-(error|warning|info|success)-(color|background)\)$/);
+    if (themeStyle) {
+        return themeStyle[2] === (property === "color" ? "color" : "background") ? value : "";
+    }
     const builtinStyle = value.match(
         /^var\(--b3-inline-builtin-(error|warning|info|success)-(color|background-color),\s*var\(--b3-card-(error|warning|info|success)-(color|background)\)\)$/
     );

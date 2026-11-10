@@ -1,26 +1,16 @@
-// SiYuan - From thought to insight, with agents
+// SiYuan - https://github.com/siyuan-note/siyuan
 // Copyright (c) 2020-present, b3log.org
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU Affero General Public License for more details.
-//
-// You should have received a copy of the GNU Affero General Public License
-// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+// SPDX-License-Identifier: AGPL-3.0-or-later
 
 package api
 
 import (
+	"github.com/siyuan-note/siyuan/kernel/apicontract"
 	"html"
 	"net/http"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 
 	"github.com/88250/gulu"
@@ -42,37 +32,12 @@ const maxSpinBlockDOMBytes = 1024 * 1024
 // maxHTML2BlockDOMRequestBytes 限制 html2BlockDOM 请求体的最大字节数。
 const maxHTML2BlockDOMRequestBytes int64 = 128 * 1024 * 1024
 
-func copyStdMarkdown(c *gin.Context) {
-	ret := gulu.Ret.NewResult()
-	defer c.JSON(http.StatusOK, ret)
+var copyStdMarkdown = contractHandler(apicontract.CopyStdMarkdown, func(c *gin.Context, request apicontract.CopyStdMarkdownRequest) apicontract.Response[string] {
 
-	arg, ok := util.JsonArg(c, ret)
-	if !ok {
-		return
-	}
-
-	id := arg["id"].(string)
-	assetsDestSpace2Underscore := false
-	if nil != arg["assetsDestSpace2Underscore"] {
-		assetsDestSpace2Underscore = arg["assetsDestSpace2Underscore"].(bool)
-	}
-
-	fillCSSVar := false
-	if nil != arg["fillCSSVar"] {
-		fillCSSVar = arg["fillCSSVar"].(bool)
-	}
-
-	adjustHeadingLevel := false
-	if nil != arg["adjustHeadingLevel"] {
-		adjustHeadingLevel = arg["adjustHeadingLevel"].(bool)
-	}
-
-	imgTag := false
-	if nil != arg["imgTag"] {
-		imgTag = arg["imgTag"].(bool)
-	}
-
+	id := request.ID
+	assetsDestSpace2Underscore, fillCSSVar, adjustHeadingLevel, imgTag := request.AssetsDestSpace2Underscore, request.FillCSSVar, request.AdjustHeadingLevel, request.ImgTag
 	isReadOnlyRole := model.IsReadOnlyRoleContext(c)
+	avPublishFilter := model.NewAVExportPublishFilter(c)
 	var publishAccess model.PublishAccess
 	var accessChecker model.EmbedBlockAccessChecker
 	if isReadOnlyRole {
@@ -81,65 +46,60 @@ func copyStdMarkdown(c *gin.Context) {
 			return model.CheckBlockIdAccessableByPublishAccess(c, publishAccess, blockID)
 		}
 	}
-	markdownContent := model.ExportStdMarkdown(id, assetsDestSpace2Underscore, fillCSSVar, adjustHeadingLevel, imgTag, accessChecker)
+	markdownContent := model.ExportStdMarkdown(id, &model.ExportOptions{
+		Render: model.ExportRenderOptions{
+			AssetsDestSpace2Underscore: assetsDestSpace2Underscore,
+			FillCSSVar:                 fillCSSVar,
+			AdjustHeadingLevel:         adjustHeadingLevel,
+			ImgTag:                     imgTag,
+			AVPublishFilter:            avPublishFilter,
+			AccessCheckers:             []model.EmbedBlockAccessChecker{accessChecker},
+		},
+	})
 	if isReadOnlyRole {
 		bt := treenode.GetBlockTree(id)
 		if bt != nil {
 			markdownContent = model.FilterContentByPublishAccess(c, publishAccess, bt.BoxID, bt.Path, markdownContent, true)
 		}
 	}
-	ret.Data = markdownContent
-}
+	return apicontract.Success(markdownContent)
+})
 
-func html2BlockDOM(c *gin.Context) {
-	ret := gulu.Ret.NewResult()
-	defer c.JSON(http.StatusOK, ret)
-	limitHTML2BlockDOMRequestBody(c, maxHTML2BlockDOMRequestBytes)
-
-	arg, ok := util.JsonArg(c, ret)
-	if !ok {
-		return
-	}
-
-	var dom string
-	if !util.ParseJsonArgs(arg, ret, util.BindJsonArg("dom", &dom, true, false)) {
-		return
-	}
+var html2BlockDOM = contractHandler(apicontract.HTML2BlockDOM, func(c *gin.Context, request apicontract.HTMLClipboardRequest) apicontract.Response[apicontract.HTMLClipboardData] {
+	dom := request.DOM
 	// 可选 notebook 参数：指定目标加密笔记本时资源写入 box 内并加密
 	boxID := ""
-	if notebook, ok := arg["notebook"].(string); ok && notebook != "" {
+	if notebook := request.Notebook; notebook != "" {
 		if model.IsEncryptedBox(notebook) {
 			boxID = notebook
 		}
 	}
 	if err := holdEncryptedBoxRequest(c, boxID); err != nil {
-		ret.Code = -1
-		ret.Msg = err.Error()
-		return
+		return apicontract.Failure[apicontract.HTMLClipboardData](-1, err.Error())
 	}
-	text, _ := arg["text"].(string)
-	mathML, _ := arg["mathML"].(string)
-	office, _ := arg["office"].(string)
-	officeMathHTML, _ := arg["officeMathHTML"].(string)
-	wps, _ := arg["wps"].(string)
-	skipLocalAssets, _ := arg["skipLocalAssets"].(bool)
-	skipBase64Assets, _ := arg["skipBase64Assets"].(bool)
-	skipInlineSVGAssets, _ := arg["skipInlineSVGAssets"].(bool)
-	preflight, _ := arg["preflight"].(bool)
-	preparedHTML, _ := arg["preparedHTML"].(bool)
-	preserveSourceFormat, _ := arg["preserveSourceFormat"].(bool)
+	text := request.Text
+	mathML := request.MathML
+	office := request.Office
+	officeMathHTML := request.OfficeMathHTML
+	wps := request.WPS
+	skipLocalAssets := request.SkipLocalAssets
+	skipBase64Assets := request.SkipBase64Assets
+	skipInlineSVGAssets := request.SkipInlineSVGAssets
+	preflight := request.Preflight
+	preparedHTML := request.PreparedHTML
+	preserveSourceFormat := request.PreserveSourceFormat
 	luteEngine := util.NewLute()
 	luteEngine.SetHTMLTag2TextMark(true)
 	luteEngine.SetHTML2MarkdownAttrs([]string{"alias", "memo", "bookmark", "custom-*"})
+	luteEngine.SetLatexMath(model.MathDelimiterCompatibilityEnabled())
 	dom, useHTML := prepareHTMLClipboardContent(luteEngine, dom, text, mathML, office, officeMathHTML, wps,
 		preserveSourceFormat, preparedHTML, convertClipboardMath, convertOfficeHTMLClipboardMath)
 	if !useHTML {
 		if preflight {
-			ret.Data = map[string]any{"converted": true, "dom": dom, "useHTML": false}
+			return apicontract.Success(apicontract.HTMLClipboardPrepared(apicontract.HTMLClipboardPreflight{Converted: true, DOM: &dom, UseHTML: false}))
 		} else {
-			ret.Data = dom
+			return apicontract.Success(apicontract.HTMLClipboardText(dom))
 		}
-		return
 	}
 	if preflight {
 		skipLocalAssets = true
@@ -153,11 +113,11 @@ func html2BlockDOM(c *gin.Context) {
 	})
 	if nil == tree {
 		if preflight {
-			ret.Data = map[string]any{"converted": false, "dom": "Failed to convert", "normalizedHTML": normalizedHTML, "useHTML": true}
+			failedDOM := "Failed to convert"
+			return apicontract.Success(apicontract.HTMLClipboardPrepared(apicontract.HTMLClipboardPreflight{DOM: &failedDOM, NormalizedHTML: &normalizedHTML, UseHTML: true}))
 		} else {
-			ret.Data = "Failed to convert"
+			return apicontract.Success(apicontract.HTMLClipboardText("Failed to convert"))
 		}
-		return
 	}
 
 	var unlinks []*ast.Node
@@ -206,7 +166,7 @@ func html2BlockDOM(c *gin.Context) {
 		}
 	}
 
-	if util.ContainerStd == model.Conf.System.Container && !skipLocalAssets {
+	if util.ContainerStd == model.Conf.System.Load().Container && !skipLocalAssets {
 		// 处理本地资源文件复制
 		ast.Walk(tree.Root, func(n *ast.Node, entering bool) ast.WalkStatus {
 			if !entering || ast.NodeLinkDest != n.Type {
@@ -269,18 +229,31 @@ func html2BlockDOM(c *gin.Context) {
 
 	parse.TextMarks2Inlines(tree) // 先将 TextMark 转换为 Inlines https://github.com/siyuan-note/siyuan/issues/13056
 	parse.NestedInlines2FlattedSpansHybrid(tree, false)
+	// 合并转义节点拆分出的同格式文本，避免重解析时将片段边缘空白重复移到标记外。
+	ast.Walk(tree.Root, func(n *ast.Node, entering bool) ast.WalkStatus {
+		if entering && n.Type == ast.NodeTextMark && n.Previous != nil && n.Previous.Type == ast.NodeTextMark &&
+			n.ContainTextMarkTypes("strong", "em", "s", "mark", "sup", "sub") &&
+			n.TextMarkATitle == n.Previous.TextMarkATitle && reflect.DeepEqual(n.KramdownIAL, n.Previous.KramdownIAL) {
+			luteEngine.MergeSameTextMark(n)
+		}
+		return ast.WalkContinue
+	})
 	removeWhitespaceTextMarkStyles(tree)
 
 	md, err := lute.FormatNodeSync(tree.Root, luteEngine.ParseOptions, luteEngine.RenderOptions)
 	if nil != err {
 		if preflight {
-			ret.Data = map[string]any{"converted": false, "dom": "Failed to convert", "normalizedHTML": normalizedHTML, "useHTML": true}
+			failedDOM := "Failed to convert"
+			return apicontract.Success(apicontract.HTMLClipboardPrepared(apicontract.HTMLClipboardPreflight{DOM: &failedDOM, NormalizedHTML: &normalizedHTML, UseHTML: true}))
 		} else {
-			ret.Data = "Failed to convert"
+			return apicontract.Success(apicontract.HTMLClipboardText("Failed to convert"))
 		}
-		return
 	}
 
+	// 中间格式已经对 HTML 文本编码，重解析时保留实体，避免将正文中的标签当作 DOM 渲染。
+	luteEngine.ParseOptions.KeepEscaped = true
+	// HTML 入口已完成公式归一化，避免再次解释链接等受保护区域中的替代分隔符。
+	luteEngine.SetLatexMath(false)
 	tree = parse.Parse("", []byte(md), luteEngine.ParseOptions)
 	ast.Walk(tree.Root, func(n *ast.Node, entering bool) ast.WalkStatus {
 		if entering && ast.NodeIFrame == n.Type {
@@ -291,11 +264,14 @@ func html2BlockDOM(c *gin.Context) {
 	renderer := render.NewProtyleRenderer(tree, luteEngine.RenderOptions, luteEngine.ParseOptions)
 	output := renderer.Render()
 	if preflight {
-		ret.Data = map[string]any{"converted": true, "normalizedHTML": normalizedHTML, "useHTML": true}
+		return apicontract.Success(apicontract.HTMLClipboardPrepared(apicontract.HTMLClipboardPreflight{Converted: true, NormalizedHTML: &normalizedHTML, UseHTML: true}))
 	} else {
-		ret.Data = gulu.Str.FromBytes(output)
+		return apicontract.Success(apicontract.HTMLClipboardText(gulu.Str.FromBytes(output)))
 	}
-}
+}, func(c *gin.Context) *apicontract.Response[apicontract.HTMLClipboardData] {
+	limitHTML2BlockDOMRequestBody(c, maxHTML2BlockDOMRequestBytes)
+	return nil
+})
 
 func removeWhitespaceTextMarkStyles(tree *parse.Tree) {
 	var unlinks []*ast.Node
@@ -338,7 +314,7 @@ func normalizeIFramePosition(node *ast.Node) {
 
 func isOutOfFlowPosition(style string) bool {
 	position := ""
-	for _, declaration := range strings.Split(style, ";") {
+	for declaration := range strings.SplitSeq(style, ";") {
 		property, value, ok := strings.Cut(declaration, ":")
 		if !ok || !strings.EqualFold(strings.TrimSpace(property), "position") {
 			continue
@@ -468,50 +444,23 @@ func msWordCommentID(anchor *goquery.Selection, style string) string {
 	return ""
 }
 
-func spinBlockDOM(c *gin.Context) {
-	ret := gulu.Ret.NewResult()
-	defer c.JSON(http.StatusOK, ret)
+var spinBlockDOM = contractHandler(apicontract.SpinBlockDOM, func(c *gin.Context, request apicontract.DOMTextRequest) apicontract.Response[apicontract.DOMData] {
 
-	arg, ok := util.JsonArg(c, ret)
-	if !ok {
-		return
-	}
-
-	var dom string
-	if !util.ParseJsonArgs(arg, ret, util.BindJsonArg("dom", &dom, true, false)) {
-		return
-	}
+	dom := request.DOM
 	if len(dom) > maxSpinBlockDOMBytes {
 		// 限制输入大小，避免解析超大 DOM 导致资源消耗
-		ret.Code = http.StatusRequestEntityTooLarge
-		ret.Msg = "dom input exceeds the maximum permitted size"
-		return
+		return apicontract.Failure[apicontract.DOMData](http.StatusRequestEntityTooLarge, "dom input exceeds the maximum permitted size")
 	}
 	luteEngine := model.NewLute()
 
 	dom = luteEngine.SpinBlockDOM(dom)
-	ret.Data = map[string]any{
-		"dom": dom,
-	}
-}
+	return apicontract.Success(apicontract.DOMData{DOM: dom})
+})
 
 // md2HTML 将 Markdown 转换为 HTML。
-func md2HTML(c *gin.Context) {
-	ret := gulu.Ret.NewResult()
-	defer c.JSON(http.StatusOK, ret)
+var md2HTML = contractHandler(apicontract.Md2HTML, func(c *gin.Context, request apicontract.MarkdownHTMLRequest) apicontract.Response[apicontract.HTMLData] {
 
-	arg, ok := util.JsonArg(c, ret)
-	if !ok {
-		return
-	}
-
-	var markdown, mode string
-	if !util.ParseJsonArgs(arg, ret,
-		util.BindJsonArg("markdown", &markdown, true, false),
-		util.BindJsonArg("mode", &mode, false, false),
-	) {
-		return
-	}
+	markdown, mode := request.Markdown, request.Mode
 
 	var html string
 	switch mode {
@@ -520,12 +469,8 @@ func md2HTML(c *gin.Context) {
 	case "":
 		html = model.MarkdownToMarkdownStrHTML(markdown)
 	default:
-		ret.Code = -1
-		ret.Msg = "unknown [mode]"
-		return
+		return apicontract.Failure[apicontract.HTMLData](-1, "unknown [mode]")
 	}
 
-	ret.Data = map[string]any{
-		"html": html,
-	}
-}
+	return apicontract.Success(apicontract.HTMLData{HTML: html})
+})

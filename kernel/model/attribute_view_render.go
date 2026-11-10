@@ -1,18 +1,6 @@
-// SiYuan - From thought to insight, with agents
+// SiYuan - https://github.com/siyuan-note/siyuan
 // Copyright (c) 2020-present, b3log.org
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU Affero General Public License for more details.
-//
-// You should have received a copy of the GNU Affero General Public License
-// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+// SPDX-License-Identifier: AGPL-3.0-or-later
 
 package model
 
@@ -265,6 +253,10 @@ func getAttributeViewBaseInstance(viewable av.Viewable) (ret *av.BaseInstance) {
 	switch instance := viewable.(type) {
 	case *av.Table:
 		ret = instance.BaseInstance
+	case *av.Calendar:
+		ret = instance.BaseInstance
+	case *av.List:
+		ret = instance.BaseInstance
 	case *av.Gallery:
 		ret = instance.BaseInstance
 	case *av.Kanban:
@@ -287,15 +279,15 @@ func GetAttributeViewPasteRows(blockID, avID, viewID, groupID, query, startItemI
 		return nil, nil, err
 	}
 
-	table, ok := viewable.(*av.Table)
-	if !ok {
+	table = av.TableFromViewable(viewable)
+	if nil == table {
 		return nil, nil, fmt.Errorf("attribute view [%s] is not a table", avID)
 	}
 	if "" != groupID {
 		var groupTable *av.Table
 		for _, group := range table.Groups {
 			if group.GetID() == groupID {
-				groupTable, _ = group.(*av.Table)
+				groupTable = av.TableFromViewable(group)
 				break
 			}
 		}
@@ -399,13 +391,47 @@ func getAttributeViewPasteRowsFromTable(table *av.Table, startItemID string, cou
 	return table.Rows[start:end], nil
 }
 
-func RenderAttributeViewWithTarget(blockID, avID, viewID, query string, page, pageSize int, groupPaging map[string]any, initialLayout av.LayoutType, createIfNotExist, ignoreRows bool, targetItemID, targetGroupID string) (viewable av.Viewable, attrView *av.AttributeView, target *AttributeViewRenderTarget, err error) {
+func RenderAttributeViewWithTarget(blockID, avID, viewID, query string, page, pageSize int, groupPaging map[string]any, initialLayout av.LayoutType, createIfNotExist, ignoreRows bool, targetItemID, targetGroupID string, calendarRanges ...*av.CalendarRange) (viewable av.Viewable, attrView *av.AttributeView, target *AttributeViewRenderTarget, err error) {
+	options := AttributeViewRenderOptions{}
+	if len(calendarRanges) > 0 {
+		options.CalendarRange = calendarRanges[0]
+	}
+	return RenderAttributeViewWithTargetOptions(blockID, avID, viewID, query, page, pageSize, groupPaging, initialLayout, createIfNotExist, ignoreRows, targetItemID, targetGroupID, options)
+}
+
+// RenderAttributeViewWithTargetReadOnly 仅在内存中渲染发布视图，不创建或保存数据库。
+func RenderAttributeViewWithTargetReadOnly(blockID, avID, viewID, query string, page, pageSize int, groupPaging map[string]any, initialLayout av.LayoutType, createIfNotExist, ignoreRows bool, targetItemID, targetGroupID string, calendarRanges ...*av.CalendarRange) (viewable av.Viewable, attrView *av.AttributeView, target *AttributeViewRenderTarget, err error) {
+	options := AttributeViewRenderOptions{ReadOnly: true}
+	if len(calendarRanges) > 0 {
+		options.CalendarRange = calendarRanges[0]
+	}
+	return RenderAttributeViewWithTargetOptions(blockID, avID, viewID, query, page, pageSize, groupPaging, initialLayout, false, ignoreRows, targetItemID, targetGroupID, options)
+}
+
+// AttributeViewRenderOptions 仅影响本次渲染，不参与数据库持久化。
+type AttributeViewRenderOptions struct {
+	ReadOnly      bool
+	CalendarRange *av.CalendarRange
+	TemporarySort *av.ViewSort
+}
+
+// RenderAttributeViewWithTargetOptions 在分页前应用临时排序；临时排序和只读请求均不创建或保存数据库。
+func RenderAttributeViewWithTargetOptions(blockID, avID, viewID, query string, page, pageSize int, groupPaging map[string]any, initialLayout av.LayoutType, createIfNotExist, ignoreRows bool, targetItemID, targetGroupID string, options AttributeViewRenderOptions) (viewable av.Viewable, attrView *av.AttributeView, target *AttributeViewRenderTarget, err error) {
+	timing := util.BeginPerformance("database.view")
+	defer timing.Finish()
+	writable := !options.ReadOnly && options.TemporarySort == nil
+	createIfNotExist = createIfNotExist && writable
 	if !ast.IsNodeIDPattern(avID) {
 		err = ErrInvalidID
 		return
 	}
+	if _, err = options.CalendarRange.Location(); nil != err {
+		return
+	}
 
+	timing.Stage("wait_sync")
 	waitForSyncingStorages()
+	timing.Stage("load")
 
 	avBoxID, exactBox, resolveErr := resolveAttributeViewCarrierBoxID(blockID)
 	if nil != resolveErr {
@@ -413,26 +439,9 @@ func RenderAttributeViewWithTarget(blockID, avID, viewID, query string, page, pa
 		return
 	}
 
-	// 已知载体时只在同一加密边界内查找；无载体的兼容调用保留全局回退。
-	var existPath string
-	if exactBox {
-		existPath, _ = av.FindAttributeViewPathInBox(avID, avBoxID)
-	} else {
-		existPath, _ = av.FindAttributeViewPath(avID)
-	}
-	if "" == existPath {
-		if exactBox {
-			if foreignPath, foreignBoxID := av.FindAttributeViewPath(avID); "" != foreignPath &&
-				foreignBoxID != avBoxID {
-				err = av.ErrAttributeViewNotFound
-				return
-			}
-		}
-		if avBoxID != "" {
-			existPath = filepath.Join(util.DataDir, avBoxID, "storage", "av", avID+".json")
-		} else {
-			existPath = av.GetAttributeViewDataPath(avID)
-		}
+	existPath, err := attributeViewRenderPath(avID, avBoxID, exactBox)
+	if nil != err {
+		return
 	}
 	if !filelock.IsExist(existPath) {
 		if !createIfNotExist {
@@ -440,22 +449,11 @@ func RenderAttributeViewWithTarget(blockID, avID, viewID, query string, page, pa
 			return
 		}
 
-		// 加密笔记本首次创建：仅设置 pending 用于 SaveAttributeView 路径路由，创建后立即清除
-		if avBoxID != "" {
-			av.SetAVBoxID(avID, avBoxID)
-			defer av.SetAVBoxID(avID, "") // 创建完成立即清除，避免污染后续路由
-		}
-		attrView = newAttributeViewWithLayout(avID, initialLayout)
-		if err = av.SaveAttributeView(attrView); err != nil {
-			logging.LogErrorf("save attribute view [%s] failed: %s", avID, err)
+		if attrView, err = initializeAttributeViewForRender(blockID, avID, avBoxID, exactBox, initialLayout); nil != err {
+			logging.LogErrorf("initialize attribute view [%s] failed: %s", avID, err)
 			return
 		}
-		if blockID != "" {
-			av.UpsertBlockRel(avID, blockID)
-		}
-	}
-
-	if exactBox {
+	} else if exactBox {
 		attrView, err = av.ParseAttributeViewInBox(avID, avBoxID)
 	} else {
 		attrView, err = av.ParseAttributeView(avID)
@@ -464,6 +462,22 @@ func RenderAttributeViewWithTarget(blockID, avID, viewID, query string, page, pa
 		logging.LogErrorf("parse attribute view [%s] failed: %s", avID, err)
 		return
 	}
+	if temporarySort := options.TemporarySort; temporarySort != nil {
+		if temporarySort.Order != av.SortOrderAsc && temporarySort.Order != av.SortOrderDesc {
+			err = fmt.Errorf("invalid temporary sort order [%s]", temporarySort.Order)
+			return
+		}
+		view, viewErr := getRenderAttributeViewView(attrView, viewID, "", blockID, false)
+		if viewErr != nil {
+			err = viewErr
+			return
+		}
+		// 字段删除或不再支持排序时恢复已保存规则，避免阅读状态阻断数据库显示。
+		if key, keyErr := attrView.GetKey(temporarySort.Column); keyErr == nil && av.GetKeyCapability(key.Type).Sortable {
+			sort := *temporarySort
+			view.Sorts = []*av.ViewSort{&sort}
+		}
+	}
 	if targetItemID != "" {
 		target = &AttributeViewRenderTarget{Status: "itemNotFound", ItemID: targetItemID}
 		if nil != attrView.GetBlockValue(targetItemID) {
@@ -471,20 +485,15 @@ func RenderAttributeViewWithTarget(blockID, avID, viewID, query string, page, pa
 		}
 	}
 
-	// 诊断：AV 解析后的数据量
-	blockKV := attrView.GetBlockKeyValues()
-	if nil != blockKV {
-	} else {
-	}
-
-	viewable, err = renderAttributeView(attrView, blockID, viewID, "", query, page, pageSize, groupPaging, ignoreRows, true, target, targetGroupID)
+	timing.Stage("render")
+	viewable, err = renderAttributeView(attrView, blockID, viewID, "", query, page, pageSize, groupPaging, ignoreRows, writable, target, targetGroupID, options.CalendarRange)
 	return
 }
 
 func newAttributeViewWithLayout(avID string, initialLayout av.LayoutType) (ret *av.AttributeView) {
 	ret = av.NewAttributeView(avID)
 	switch initialLayout {
-	case av.LayoutTypeGallery, av.LayoutTypeKanban:
+	case av.LayoutTypeList, av.LayoutTypeCalendar, av.LayoutTypeGallery, av.LayoutTypeKanban:
 	default:
 		return
 	}
@@ -504,7 +513,12 @@ const (
 	groupValueNext7Days, groupValueNext30Days                = "_@next7Days@_", "_@next30Days@_"
 )
 
-func renderAttributeView(attrView *av.AttributeView, nodeID, viewID, carrierViewID, query string, page, pageSize int, groupPaging map[string]any, ignoreRows, writable bool, target *AttributeViewRenderTarget, targetGroupID string) (viewable av.Viewable, err error) {
+func renderAttributeView(attrView *av.AttributeView, nodeID, viewID, carrierViewID, query string, page, pageSize int, groupPaging map[string]any, ignoreRows, writable bool, target *AttributeViewRenderTarget, targetGroupID string, calendarRanges ...*av.CalendarRange) (viewable av.Viewable, err error) {
+	timing := util.BeginPerformance("database.fields")
+	defer timing.Finish()
+	if err = attrView.ValidateLayouts(); nil != err {
+		return
+	}
 	// 获取待渲染的视图
 	view, err := getRenderAttributeViewView(attrView, viewID, carrierViewID, nodeID, writable)
 	if nil != err {
@@ -531,14 +545,32 @@ func renderAttributeView(attrView *av.AttributeView, nodeID, viewID, carrierView
 
 	// 渲染视图
 	renderContext := sql.NewAttributeViewRenderContext()
+	renderContext.ReadOnly = !writable
 	defer renderContext.PushTemplateErrors()
-	deferTemplateValues := shouldDeferAttributeViewTemplateValues(attrView, view, query, ignoreRows)
+	var orderReuse *attributeViewOrderReuse
+	if !ignoreRows && strings.TrimSpace(query) == "" && filterContext == nil && target == nil && targetGroupID == "" {
+		orderReuse = planAttributeViewOrderReuse(attrView, view, nodeID, writable)
+		if reused, found := orderReuse.renderPage(attrView, view, page, pageSize, renderContext); found {
+			timing.Count("order_cache_hit", 1)
+			return reused, nil
+		}
+	}
+	templatePlan := planAttributeViewTemplates(attrView, view, query, ignoreRows)
+	deferTemplateValues := templatePlan != nil
+	timing.Stage("fields")
 	if deferTemplateValues {
 		viewable = sql.RenderViewWithDeferredTemplatesContext(attrView, view, query, ignoreRows, renderContext)
+		timing.Count("required_templates", int64(len(templatePlan.required)))
+		timing.Count("deferred_templates", int64(len(templatePlan.deferred)))
+		sql.FillAttributeViewTemplateValuesForKeysWithContext(attrView, view, viewable.(av.Collection), templatePlan.required, renderContext)
 	} else {
 		viewable = sql.RenderViewWithContext(attrView, view, query, ignoreRows, renderContext)
 	}
+	if calendar, ok := viewable.(*av.Calendar); ok && len(calendarRanges) > 0 {
+		calendar.CalendarRange = calendarRanges[0]
+	}
 	var groupRenderSource *sql.GroupViewRenderSource
+	timing.Stage("rows_groups")
 	if !ignoreRows && view.IsGroupView() {
 		// 在父视图分页前保存完整条目索引，各分组复用已经生成的字段值。
 		groupRenderSource = sql.NewGroupViewRenderSource(viewable, query)
@@ -548,20 +580,21 @@ func renderAttributeView(attrView *av.AttributeView, nodeID, viewID, carrierView
 		renderTargetItemID = ""
 	}
 	var targetIndex, targetOffset int
-	targetIndex, targetOffset, err = renderViewableInstance(viewable, view, attrView, page, pageSize, ignoreRows,
-		renderTargetItemID, renderContext, filterContext)
+	targetIndex, targetOffset, err = renderViewableInstanceWithOrder(viewable, view, attrView, page, pageSize, ignoreRows,
+		renderTargetItemID, renderContext, orderReuse.capture, filterContext)
 	if nil != err {
 		return
 	}
 	if deferTemplateValues {
-		sql.FillAttributeViewTemplateValuesWithContext(attrView, view, viewable.(av.Collection), renderContext)
+		sql.FillAttributeViewTemplateValuesForKeysWithContext(attrView, view, viewable.(av.Collection), templatePlan.deferred, renderContext)
 	}
+	orderReuse.store(renderContext)
 	if nil != target && targetIndex >= 0 && !view.IsGroupView() && view.LayoutType != av.LayoutTypeKanban {
 		setAttributeViewRenderTarget(target, "", targetIndex, targetOffset, view.PageSize)
 	}
 
 	// 渲染分组视图。当 ignoreRows 时若有已生成的分组则渲染元数据供面板使用，无分组则跳过（生成分组需要行数据）
-	if !ignoreRows || len(view.Groups) > 0 {
+	if view.LayoutType != av.LayoutTypeCalendar && (!ignoreRows || len(view.Groups) > 0) {
 		err = renderAttributeViewGroups(viewable, attrView, view, query, page, pageSize, groupPaging, groupRenderSource,
 			ignoreRows, writable, target, targetGroupID, renderContext, filterContext)
 	}
@@ -715,8 +748,8 @@ func renderAttributeViewGroups(viewable av.Viewable, attrView *av.AttributeView,
 
 		// 将分组视图的分组字段清空，减少冗余（字段信息可以在总的视图 view 对象上获取到）
 		switch groupView.LayoutType {
-		case av.LayoutTypeTable:
-			groupView.Table.Columns = nil
+		case av.LayoutTypeTable, av.LayoutTypeList, av.LayoutTypeCalendar:
+			groupView.GetTableLayout().Columns = nil
 		case av.LayoutTypeGallery:
 			groupView.Gallery.CardFields = nil
 		case av.LayoutTypeKanban:
@@ -762,8 +795,8 @@ func hideEmptyGroupViews(view *av.View, viewable av.Viewable) {
 
 	itemCount := 0
 	switch viewable.GetType() {
-	case av.LayoutTypeTable:
-		itemCount = viewable.(*av.Table).RowCount
+	case av.LayoutTypeTable, av.LayoutTypeList, av.LayoutTypeCalendar:
+		itemCount = av.TableFromViewable(viewable).RowCount
 	case av.LayoutTypeGallery:
 		itemCount = viewable.(*av.Gallery).CardCount
 	case av.LayoutTypeKanban:
@@ -853,7 +886,7 @@ func sortGroupViews(attrView *av.AttributeView, view *av.View) {
 			startIdx = 0
 		}
 		for _, g := range lastNext30Days {
-			relativeDateGroups = util.InsertElem(relativeDateGroups, startIdx, g)
+			relativeDateGroups = slices.Insert(relativeDateGroups, startIdx, g)
 		}
 
 		if av.GroupOrderDesc == view.Group.Order {
@@ -969,7 +1002,18 @@ func shouldDeferAttributeViewTemplateValues(attrView *av.AttributeView, view *av
 	if 0 == len(templateKeyIDs) && 0 == len(renderTemplateKeyIDs) {
 		return false
 	}
+	// 日历日期模板参与区间筛选和定位，必须在筛选条目之前完成计算。
+	if view.LayoutType == av.LayoutTypeCalendar && view.Calendar != nil &&
+		renderTemplateKeyIDs[view.Calendar.Settings.DateKeyID] {
+		return false
+	}
 
+	for _, rule := range view.EffectiveConditionalColors() {
+		if nil != rule && nil != rule.Filter && (templateKeyIDs[rule.Filter.Column] ||
+			(renderTemplateKeyIDs[rule.Filter.Column] && rule.Filter.ValueSource == av.ValueSourceRendered)) {
+			return false
+		}
+	}
 	for keyID := range templateKeyIDs {
 		if attrViewFiltersContainColumn(view.Filters, keyID) {
 			return false
@@ -997,8 +1041,8 @@ func shouldDeferAttributeViewTemplateValues(attrView *av.AttributeView, view *av
 		return templateKeyIDs[fieldID] && nil != calc && av.CalcOperatorNone != calc.Operator
 	}
 	switch view.LayoutType {
-	case av.LayoutTypeTable:
-		for _, column := range view.Table.Columns {
+	case av.LayoutTypeTable, av.LayoutTypeList, av.LayoutTypeCalendar:
+		for _, column := range view.GetTableLayout().Columns {
 			if nil != column && nil != column.BaseField && checkField(column.ID, column.Calc) {
 				return false
 			}
@@ -1034,6 +1078,15 @@ func attrViewFiltersUseRenderedValues(filters []*av.ViewFilter, renderTemplateKe
 func renderViewableInstance(viewable av.Viewable, view *av.View, attrView *av.AttributeView, page, pageSize int,
 	ignoreRows bool, targetItemID string,
 	renderContext *sql.AttributeViewRenderContext, filterContexts ...*av.FilterContext) (targetIndex, targetOffset int, err error) {
+	return renderViewableInstanceWithOrder(viewable, view, attrView, page, pageSize, ignoreRows, targetItemID, renderContext, nil, filterContexts...)
+}
+
+func renderViewableInstanceWithOrder(viewable av.Viewable, view *av.View, attrView *av.AttributeView, page, pageSize int,
+	ignoreRows bool, targetItemID string, renderContext *sql.AttributeViewRenderContext, captureOrder func([]av.Item),
+	filterContexts ...*av.FilterContext) (targetIndex, targetOffset int, err error) {
+	timing := util.BeginPerformance("database.rows")
+	defer timing.Finish()
+	timing.Count("page_size", int64(pageSize))
 	targetIndex = -1
 	if nil == viewable {
 		err = av.ErrViewNotFound
@@ -1045,6 +1098,11 @@ func renderViewableInstance(viewable av.Viewable, view *av.View, attrView *av.At
 	if ignoreRows {
 		return
 	}
+	if timing != nil {
+		if collection, ok := viewable.(av.Collection); ok {
+			timing.Count("rows_before", int64(collection.CountItems()))
+		}
+	}
 
 	cachedAttrViews := map[string]*av.AttributeView{}
 	rollupFurtherCollections := sql.GetFurtherCollectionsWithContext(attrView, cachedAttrViews, renderContext)
@@ -1052,14 +1110,32 @@ func renderViewableInstance(viewable av.Viewable, view *av.View, attrView *av.At
 	if 0 < len(filterContexts) {
 		filterContext = filterContexts[0]
 	}
+	timing.Stage("filter")
 	av.FilterWithContext(viewable, attrView, rollupFurtherCollections, cachedAttrViews, filterContext)
+	if timing != nil {
+		if collection, ok := viewable.(av.Collection); ok {
+			timing.Count("rows_filtered", int64(collection.CountItems()))
+		}
+	}
+	timing.Stage("sort")
 	av.Sort(viewable, attrView)
+	timing.Stage("calculate")
 	av.Calc(viewable, attrView)
+	if captureOrder != nil {
+		captureOrder(viewable.(av.Collection).GetItems())
+	}
+	timing.Stage("paginate")
 
-	// 分页
+	// 日历按可见范围读取，不使用普通条目分页。
 	switch viewable.GetType() {
-	case av.LayoutTypeTable:
-		table := viewable.(*av.Table)
+	case av.LayoutTypeCalendar:
+		calendar := viewable.(*av.Calendar)
+		if err = av.FilterCalendarRows(calendar, calendar.CalendarRange, targetItemID); nil != err {
+			return
+		}
+		targetIndex = findAttributeViewTargetIndex(targetItemID, len(calendar.Rows), func(index int) string { return calendar.Rows[index].ID })
+	case av.LayoutTypeTable, av.LayoutTypeList:
+		table := av.TableFromViewable(viewable)
 		targetIndex = findAttributeViewTargetIndex(targetItemID, len(table.Rows), func(index int) string { return table.Rows[index].ID })
 		table.RowCount = len(table.Rows)
 		table.PageSize = view.PageSize
@@ -1098,6 +1174,13 @@ func renderViewableInstance(viewable av.Viewable, view *av.View, attrView *av.At
 		}
 		kanban.Cards = kanban.Cards[start:end]
 	}
+	timing.Stage("colors")
+	if timing != nil {
+		if collection, ok := viewable.(av.Collection); ok {
+			timing.Count("rows_page", int64(collection.CountItems()))
+		}
+	}
+	av.RenderConditionalColors(viewable, view, attrView, rollupFurtherCollections, cachedAttrViews)
 	return
 }
 
@@ -1112,7 +1195,7 @@ func findAttributeViewTargetIndex(targetItemID string, length int, getID func(in
 	if targetItemID == "" {
 		return -1
 	}
-	for i := 0; i < length; i++ {
+	for i := range length {
 		if getID(i) == targetItemID {
 			return i
 		}
@@ -1315,7 +1398,7 @@ func newHistoryAttributeViewCustomColorRenderContext(historyDir string) *av.Cust
 	return newAttributeViewCustomColorRenderContext(colors, order, found)
 }
 
-func RenderRepoSnapshotAttributeView(indexID, avID, viewID, carrierViewID string) (viewable av.Viewable, attrView *av.AttributeView, err error) {
+func RenderRepoSnapshotAttributeView(indexID, avID, viewID, carrierViewID string, calendarRanges ...*av.CalendarRange) (viewable av.Viewable, attrView *av.AttributeView, err error) {
 	if !ast.IsNodeIDPattern(avID) {
 		err = ErrInvalidID
 		return
@@ -1367,12 +1450,8 @@ func RenderRepoSnapshotAttributeView(indexID, avID, viewID, carrierViewID string
 		return
 	}
 
-	attrView = av.NewAttributeView(avID)
-	if err = gulu.JSON.UnmarshalJSON(data, attrView); err != nil {
-		logging.LogErrorf("unmarshal attribute view [%s] failed: %s", avID, err)
-		return
-	}
-	if err = av.CheckSpec(attrView); nil != err {
+	attrView, err = parseHistoricalAttributeViewData(avID, data)
+	if nil != err {
 		return
 	}
 	var snapshotColors []*av.AttributeViewCustomColor
@@ -1394,11 +1473,11 @@ func RenderRepoSnapshotAttributeView(indexID, avID, viewID, carrierViewID string
 		snapshotColors, snapshotOrder, snapshotPaletteFound)
 	attrView.ResolveDirectColors()
 
-	viewable, err = renderAttributeView(attrView, "", viewID, carrierViewID, "", 1, -1, nil, false, false, nil, "")
+	viewable, err = renderAttributeView(attrView, "", viewID, carrierViewID, "", 1, -1, nil, false, false, nil, "", calendarRanges...)
 	return
 }
 
-func RenderHistoryAttributeView(avID, viewID, carrierViewID, query string, page, pageSize int, groupPaging map[string]any, created string) (viewable av.Viewable, attrView *av.AttributeView, err error) {
+func RenderHistoryAttributeView(avID, viewID, carrierViewID, query string, page, pageSize int, groupPaging map[string]any, created string, calendarRanges ...*av.CalendarRange) (viewable av.Viewable, attrView *av.AttributeView, err error) {
 	if !ast.IsNodeIDPattern(avID) {
 		err = ErrInvalidID
 		return
@@ -1470,19 +1549,33 @@ func RenderHistoryAttributeView(avID, viewID, carrierViewID, query string, page,
 		return
 	}
 
-	attrView = av.NewAttributeView(avID)
-	if err = gulu.JSON.UnmarshalJSON(data, attrView); err != nil {
-		logging.LogErrorf("unmarshal attribute view [%s] failed: %s", avID, err)
-		return
-	}
-	if err = av.CheckSpec(attrView); nil != err {
+	attrView, err = parseHistoricalAttributeViewData(avID, data)
+	if nil != err {
 		return
 	}
 	attrView.CustomColorRenderContext = newHistoryAttributeViewCustomColorRenderContext(source.historyDir)
 	attrView.ResolveDirectColors()
 
-	viewable, err = renderAttributeView(attrView, "", viewID, carrierViewID, query, page, pageSize, groupPaging, false, false, nil, "")
+	viewable, err = renderAttributeView(attrView, "", viewID, carrierViewID, query, page, pageSize, groupPaging, false, false, nil, "", calendarRanges...)
 	return
+}
+
+// 历史和仓库快照完成认证后共用字段校验，不重写历史源数据。
+func parseHistoricalAttributeViewData(avID string, data []byte) (*av.AttributeView, error) {
+	view := av.NewAttributeView(avID)
+	if err := gulu.JSON.UnmarshalJSON(data, view); nil != err {
+		return nil, err
+	}
+	if err := av.CheckSpec(view); nil != err {
+		return nil, err
+	}
+	if err := view.ValidateLayouts(); nil != err {
+		return nil, err
+	}
+	if err := view.NormalizeLocations(); nil != err {
+		return nil, err
+	}
+	return view, nil
 }
 
 func decryptHistoricalAttributeView(boxID, avID string, data []byte) ([]byte, error) {

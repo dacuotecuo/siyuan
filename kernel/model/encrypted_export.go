@@ -1,18 +1,6 @@
-// SiYuan - From thought to insight, with agents
+// SiYuan - https://github.com/siyuan-note/siyuan
 // Copyright (c) 2020-present, b3log.org
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-// GNU Affero General Public License for more details.
-//
-// You should have received a copy of the GNU Affero General Public License
-// along with this program. If not, see <https://www.gnu.org/licenses/>.
+// SPDX-License-Identifier: AGPL-3.0-or-later
 
 package model
 
@@ -238,6 +226,27 @@ func AcquireExportArtifactLease(exportPath string) (lease *ExportArtifactLease, 
 		}
 		return registerMobileExportLease("", artifact, filepath.Base(artifact), "")
 	}
+	return prepareEncryptedAssetExport(relativePath, boxID, false)
+}
+
+// PrepareEncryptedAssetForExternalOpen 生成保留原始名称的受管明文副本，供外部程序打开或定位。
+// 副本随笔记本锁定清理，外部程序的修改不会写回加密资源。
+func PrepareEncryptedAssetForExternalOpen(assetPath string) (string, error) {
+	relativePath, boxID, err := assetPathAndBox(assetPath, "")
+	if err != nil {
+		return "", err
+	}
+	if boxID == "" || !IsEncryptedBox(boxID) {
+		return "", errors.New("source is not an encrypted asset")
+	}
+	artifact, err := prepareEncryptedAssetExport(relativePath, boxID, true)
+	if err != nil {
+		return "", err
+	}
+	return artifact.Path, nil
+}
+
+func prepareEncryptedAssetExport(relativePath, boxID string, external bool) (lease *ExportArtifactLease, err error) {
 	if !IsBoxUnlocked(boxID) {
 		return nil, errors.New(Conf.Language(314))
 	}
@@ -269,7 +278,11 @@ func AcquireExportArtifactLease(exportPath string) (lease *ExportArtifactLease, 
 	if idErr != nil {
 		return nil, idErr
 	}
-	cleanupDir := filepath.Join(util.TempDir, "export", boxID, "mobile", leaseID)
+	kind := "mobile"
+	if external {
+		kind = "external"
+	}
+	cleanupDir := filepath.Join(util.TempDir, "export", boxID, kind, leaseID)
 	if mkErr := os.MkdirAll(cleanupDir, 0700); mkErr != nil {
 		return nil, mkErr
 	}
@@ -310,6 +323,16 @@ func AcquireExportArtifactLease(exportPath string) (lease *ExportArtifactLease, 
 	originalName = util.FilterFileName(filepath.Base(originalName))
 	if originalName == "" || originalName == "." {
 		originalName = diskName
+	}
+	if external {
+		namedPath := filepath.Join(cleanupDir, originalName)
+		if plainPath != namedPath {
+			if err = os.Rename(plainPath, namedPath); err != nil {
+				return nil, err
+			}
+		}
+		cleanup = false
+		return &ExportArtifactLease{Path: namedPath, Name: originalName}, nil
 	}
 	lease, err = registerMobileExportLeaseWithID(leaseID, boxID, plainPath, originalName, cleanupDir)
 	if err != nil {

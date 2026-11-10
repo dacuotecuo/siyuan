@@ -1,18 +1,6 @@
-// SiYuan - From thought to insight, with agents
+// SiYuan - https://github.com/siyuan-note/siyuan
 // Copyright (c) 2020-present, b3log.org
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU Affero General Public License for more details.
-//
-// You should have received a copy of the GNU Affero General Public License
-// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+// SPDX-License-Identifier: AGPL-3.0-or-later
 
 package util
 
@@ -54,6 +42,21 @@ func TestLocalizedFontNamesAndAliases(t *testing.T) {
 	for _, expected := range []string{"LXGW WenKai", "霞鹜文楷", "LXGW WenKai Regular", "霞鹜文楷 常规体"} {
 		if !slices.Contains(aliases, expected) {
 			t.Fatalf("font alias %q is missing from %v", expected, aliases)
+		}
+	}
+}
+
+func TestAddFontPrefersUprightStyle(t *testing.T) {
+	for _, italicFirst := range []bool{true, false} {
+		upright := &Font{Family: "Cascadia Code", Weight: 400, DisplayName: "Cascadia Code"}
+		italic := &Font{Family: "Cascadia Code", Weight: 400, DisplayName: "Cascadia Code Italic", nonNormalStyle: true}
+		first, second := upright, italic
+		if italicFirst {
+			first, second = italic, upright
+		}
+		fonts := addFont(addFont(nil, first), second)
+		if len(fonts) != 1 || fonts[0].DisplayName != "Cascadia Code" || fonts[0].nonNormalStyle {
+			t.Fatalf("unexpected merged font: %+v", fonts)
 		}
 	}
 }
@@ -103,8 +106,8 @@ func TestParseBundledFontLocalizedName(t *testing.T) {
 		Lang = oldLang
 	})
 
-	fontPath := filepath.Join("..", "..", "app", "appearance", "fonts", "LxgwWenKai-Lite-1.501",
-		"LXGWWenKaiLite-Regular.ttf")
+	fontPath := filepath.Join("..", "..", "app", "appearance", "fonts", "LxgwWenKaiGB-Lite-1.521",
+		"LXGWWenKaiGBLite-Regular.ttf")
 	fontFile, err := os.Open(fontPath)
 	if err != nil {
 		t.Fatal(err)

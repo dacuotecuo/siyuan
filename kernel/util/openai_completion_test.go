@@ -1,10 +1,6 @@
-// SiYuan - From thought to insight, with agents
+// SiYuan - https://github.com/siyuan-note/siyuan
 // Copyright (c) 2020-present, b3log.org
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
+// SPDX-License-Identifier: AGPL-3.0-or-later
 
 package util
 
@@ -57,7 +53,7 @@ func TestOpenAIResponsesStreamPreservesOutput(t *testing.T) {
 
 	config := openai.DefaultConfig("test")
 	config.BaseURL = server.URL + "/v1"
-	client := openai.NewClientWithConfig(config)
+	client := &AIClient{Client: openai.NewClientWithConfig(config)}
 	request := openai.ChatCompletionRequest{
 		Model:               "gpt-test",
 		Messages:            []openai.ChatCompletionMessage{{Role: openai.ChatMessageRoleUser, Content: "hello"}},
@@ -190,7 +186,7 @@ func TestOpenAIResponsesStreamRequiresTerminalEvent(t *testing.T) {
 
 	config := openai.DefaultConfig("test")
 	config.BaseURL = server.URL + "/v1"
-	stream, err := CreateOpenAICompletionStream(context.Background(), openai.NewClientWithConfig(config),
+	stream, err := CreateOpenAICompletionStream(context.Background(), &AIClient{Client: openai.NewClientWithConfig(config)},
 		OpenAIProtocolResponses, openai.ChatCompletionRequest{Model: "gpt-test"}, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -216,7 +212,7 @@ func TestOpenAIResponsesStreamReturnsTypedError(t *testing.T) {
 
 	config := openai.DefaultConfig("test")
 	config.BaseURL = server.URL + "/v1"
-	stream, err := CreateOpenAICompletionStream(context.Background(), openai.NewClientWithConfig(config),
+	stream, err := CreateOpenAICompletionStream(context.Background(), &AIClient{Client: openai.NewClientWithConfig(config)},
 		OpenAIProtocolResponses, openai.ChatCompletionRequest{Model: "gpt-test"}, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -250,13 +246,13 @@ func TestOpenAIResponsesStreamRejectsIncompleteFunctionCall(t *testing.T) {
 
 	config := openai.DefaultConfig("test")
 	config.BaseURL = server.URL + "/v1"
-	stream, err := CreateOpenAICompletionStream(context.Background(), openai.NewClientWithConfig(config),
+	stream, err := CreateOpenAICompletionStream(context.Background(), &AIClient{Client: openai.NewClientWithConfig(config)},
 		OpenAIProtocolResponses, openai.ChatCompletionRequest{Model: "gpt-test"}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer stream.Close()
-	for i := 0; i < 2; i++ {
+	for i := range 2 {
 		if _, err = stream.Recv(); err != nil {
 			t.Fatalf("receive partial function event %d: %v", i, err)
 		}
@@ -304,7 +300,7 @@ func TestOpenAIResponsesNonStreamFailure(t *testing.T) {
 
 	config := openai.DefaultConfig("test")
 	config.BaseURL = server.URL + "/v1"
-	_, err := CreateOpenAICompletion(context.Background(), openai.NewClientWithConfig(config),
+	_, err := CreateOpenAICompletion(context.Background(), &AIClient{Client: openai.NewClientWithConfig(config)},
 		OpenAIProtocolResponses, openai.ChatCompletionRequest{Model: "gpt-test"}, nil)
 	if err == nil || !strings.Contains(err.Error(), "generation failed") {
 		t.Fatalf("unexpected failed response error: %v", err)

@@ -68,7 +68,7 @@ export interface IDockOrderDefaultEntry {
 type TDockOrdersByPosition = Partial<Record<TPluginDockPosition, readonly string[]>>;
 
 const createEmptySnapshot = (): TDockOrderSnapshot => Object.fromEntries(
-    DOCK_ORDER_SCOPES.map((scope) => [scope, []]),
+    DOCK_ORDER_SCOPES.map((scope): [TDockOrderScope, string[]] => [scope, []]),
 ) as TDockOrderSnapshot;
 
 const normalizeDockEntryOrderSnapshot = (
@@ -136,17 +136,17 @@ export const getDockOrderContainer = (
 ) => {
     switch (getDockOrderScopePosition(scope)) {
         case "LeftTop":
-            return layout.leftDock?.elements[0];
+            return layout?.leftDock?.elements[0];
         case "LeftBottom":
-            return layout.leftDock?.elements[1];
+            return layout?.leftDock?.elements[1];
         case "RightTop":
-            return layout.rightDock?.elements[0];
+            return layout?.rightDock?.elements[0];
         case "RightBottom":
-            return layout.rightDock?.elements[1];
+            return layout?.rightDock?.elements[1];
         case "BottomLeft":
-            return layout.bottomDock?.elements[0];
+            return layout?.bottomDock?.elements[0];
         case "BottomRight":
-            return layout.bottomDock?.elements[1];
+            return layout?.bottomDock?.elements[1];
     }
 };
 
@@ -301,6 +301,14 @@ export const getDockEntryOrderSnapshot = (
         snapshot[DOCK_ORDER_SCOPE_BY_POSITION[item.position]].push(item.key);
     });
     return snapshot;
+};
+
+// 保留停靠栏入口的位置，在各槽位内使用目录顺序作为未自定义排序的默认值。
+export const getDefaultDockEntryOrderSnapshot = (current = getDockEntryOrderSnapshot()) => {
+    const order = (getEntryCatalogChildren("dock") || []).map(item => item.key);
+    return Object.fromEntries(DOCK_ORDER_SCOPES.map(scope => [
+        scope, reorderEntrySlots(current[scope], order, key => key),
+    ])) as TDockOrderSnapshot;
 };
 
 export const applyDockEntryOrderSnapshot = (

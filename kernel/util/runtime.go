@@ -1,30 +1,19 @@
-// SiYuan - From thought to insight, with agents
+// SiYuan - https://github.com/siyuan-note/siyuan
 // Copyright (c) 2020-present, b3log.org
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU Affero General Public License for more details.
-//
-// You should have received a copy of the GNU Affero General Public License
-// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+// SPDX-License-Identifier: AGPL-3.0-or-later
 
 package util
 
 import (
 	"bytes"
-	"crypto/rand"
+	"context"
 	"fmt"
 	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
 	"runtime/debug"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -50,21 +39,29 @@ func DisableFeature(feature string) {
 	DisabledFeatures = gulu.Str.RemoveDuplicatedElem(DisabledFeatures)
 }
 
+// IsDisabledFeature 查询原生端启动时禁用的功能，不修改用户配置。
+func IsDisabledFeature(feature string) bool {
+	return slices.Contains(DisabledFeatures, feature)
+}
+
+const DefaultUseSingleLineSave = true
+const DefaultLargeFileWarningSize = 8
+
 var (
-	UseSingleLineSave    = true // UseSingleLineSave 是否使用单行保存 .sy 和数据库 .json 文件。
-	LargeFileWarningSize = 8    // LargeFileWarningSize 大文件警告大小，单位：MB
+	UseSingleLineSave    = NewAtomicValue(DefaultUseSingleLineSave)    // UseSingleLineSave 是否使用单行保存 .sy 和数据库 .json 文件。
+	LargeFileWarningSize = NewAtomicValue(DefaultLargeFileWarningSize) // LargeFileWarningSize 大文件警告大小，单位：MB
 )
 
 func ExceedLargeFileWarningSize(fileSize int) bool {
-	return fileSize > LargeFileWarningSize*1024*1024
+	return fileSize > LargeFileWarningSize.Load()*1024*1024
 }
 
 // IsUILoaded 是否已经加载了 UI。
-var IsUILoaded = false
+var IsUILoaded atomic.Bool
 
 func WaitForUILoaded() {
 	start := time.Now()
-	for !IsUILoaded {
+	for !IsUILoaded.Load() {
 		time.Sleep(200 * time.Millisecond)
 		if time.Since(start) > 30*time.Second {
 			logging.LogErrorf("wait for ui loaded timeout: %s", logging.ShortStack())
@@ -74,9 +71,9 @@ func WaitForUILoaded() {
 }
 
 func HookUILoaded() {
-	for !IsUILoaded {
+	for !IsUILoaded.Load() {
 		if 0 < len(SessionsByType("main")) {
-			IsUILoaded = true
+			IsUILoaded.Store(true)
 			return
 		}
 		time.Sleep(200 * time.Millisecond)
@@ -124,7 +121,7 @@ func logBootInfo() {
 				WaitForUILoaded()
 				time.Sleep(3 * time.Second)
 			}
-			if nil == NotificationsCfg || NotificationsCfg.WorkspaceNotSSD {
+			if nil == NotificationsCfg.Load() || NotificationsCfg.Load().WorkspaceNotSSD {
 				PushErrMsg(Langs[Lang][278], 15000)
 			}
 		}
@@ -139,7 +136,11 @@ func getWorkspaceDriveType() string {
 	if IsMobileContainer() {
 		return ghw.DriveTypeSSD.String()
 	}
+	return workspaceDrive.get(context.Background(), detectWorkspaceDriveType)
+}
 
+// detectWorkspaceDriveType 仅返回实际检测到的磁盘类型，不根据平台推断。
+func detectWorkspaceDriveType() string {
 	block, err := ghw.Block()
 	if err != nil {
 		logging.LogWarnf("get block storage info failed: %s", err)
@@ -149,7 +150,7 @@ func getWorkspaceDriveType() string {
 	var maxMountPathLen int
 	var matchedDriveType string
 	parentRelPrefix := ".." + string(filepath.Separator)
-	workspacePath := filepath.Clean(WorkspaceDir)
+	workspacePath := ResolveLongestExistingParent(WorkspaceDir)
 
 	if gulu.OS.IsWindows() {
 		vol := strings.ToLower(filepath.VolumeName(workspacePath))
@@ -160,7 +161,7 @@ func getWorkspaceDriveType() string {
 				}
 			}
 		}
-	} else if gulu.OS.IsLinux() {
+	} else {
 		for _, disk := range block.Disks {
 			for _, partition := range disk.Partitions {
 				if partition.MountPoint == "" {
@@ -361,8 +362,7 @@ func checkFileSysStatus() {
 
 	for range 7 {
 		tmp := filepath.Join(dir, "check_consistency")
-		data := make([]byte, 1024*4)
-		_, err := rand.Read(data)
+		data, err := newFileSysStatusCheckData()
 		if err != nil {
 			ReportFileSysFatalError(err)
 			return
@@ -378,7 +378,7 @@ func checkFileSysStatus() {
 		for range 32 {
 			renamed := tmp + "_renamed"
 			if err = os.Rename(tmp, renamed); err != nil {
-				ReportFileSysFatalError(err)
+				ReportFileSysFatalError(fileSysStatusCheckError(err))
 				break
 			}
 
@@ -386,7 +386,7 @@ func checkFileSysStatus() {
 
 			f, err := os.Open(renamed)
 			if err != nil {
-				ReportFileSysFatalError(err)
+				ReportFileSysFatalError(fileSysStatusCheckError(err))
 				return
 			}
 
@@ -396,7 +396,7 @@ func checkFileSysStatus() {
 			}
 
 			if err = os.Rename(renamed, tmp); err != nil {
-				ReportFileSysFatalError(err)
+				ReportFileSysFatalError(fileSysStatusCheckError(err))
 				return
 			}
 
@@ -475,12 +475,17 @@ func isICloudPath(workspaceAbsPath string) bool {
 	}
 
 	// macOS 端对工作空间放置在 iCloud 路径下做检查 https://github.com/siyuan-note/siyuan/issues/7747
-	iCloudRoot := filepath.Join(HomeDir, "Library", "Mobile Documents")
-	if resolvedRoot, matched := matchICloudRoot(HomeDir, iCloudRoot, workspacePath); matched {
+	if resolvedRoot, matched := matchSystemICloudRoot(workspacePath); matched {
 		logging.LogWarnf("workspace [%s] is in iCloud path [%s]", workspaceAbsPath, resolvedRoot)
 		return true
 	}
 	return false
+}
+
+// matchSystemICloudRoot 使用系统用户主目录，避免配置目录覆盖改变真实 iCloud 的检测位置。
+func matchSystemICloudRoot(workspacePath string) (resolvedRoot string, matched bool) {
+	iCloudRoot := filepath.Join(systemHomeDir, "Library", "Mobile Documents")
+	return matchICloudRoot(systemHomeDir, iCloudRoot, workspacePath)
 }
 
 func longestExistingPath(path string) string {
@@ -611,7 +616,7 @@ const (
 	EvtSQLAssetContentRebuild = "sql.assetContent.rebuild"
 )
 
-var SearchCaseSensitive bool
+var SearchCaseSensitive = NewAtomicValue(false)
 
 // SearchHanSensitive 是否区分繁简，由 sql.SetHanSensitive 维护；默认 true 与既往行为一致
-var SearchHanSensitive = true
+var SearchHanSensitive = NewAtomicValue(true)

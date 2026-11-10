@@ -1,3 +1,6 @@
+import {toggleMenu} from "../../menus/menuToggle";
+import type {FileTreeGetDocRequestInput} from "../../types/api";
+import type {BlockBreadcrumbRequestInput, BlockQueryRequestInput, TreeStatRequestInput} from "../../types/api";
 import {getIconByType} from "../../editor/getIcon";
 import {fetchPost, fetchSyncPost} from "../../util/fetch";
 import {Constants} from "../../constants";
@@ -12,7 +15,8 @@ import {hasClosestBlock, hasTopClosestByClassName} from "../util/hasClosest";
 import {needSubscribe} from "../../util/needSubscribe";
 import {isMobile} from "../../util/functions";
 import {zoomOut} from "../../menus/protyle";
-import {focusByRange, getEditorRange} from "../util/selection";
+import {getEditorRange} from "../util/selection";
+import {focusByRange} from "../util/selectionOffsets";
 /// #if !MOBILE
 import {openFileById} from "../../editor/util";
 import {saveLayout} from "../../layout/util";
@@ -29,7 +33,7 @@ import {Menu} from "../../plugin/Menu";
 import {getNoContainerElement} from "../wysiwyg/getBlock";
 import {openTitleMenu} from "../header/openTitleMenu";
 import {emitOpenMenu} from "../../plugin/EventBus";
-import {isInAndroid, isInHarmony, isIPad, isMac, updateHotkeyTip} from "../util/compatibility";
+import {isInAndroid, isInHarmony, isIPad, isMac, isPhablet, updateHotkeyTip} from "../util/compatibility";
 import {isEncryptedBox} from "../../util/pathName";
 import {listIndent, listOutdent} from "../wysiwyg/list";
 import {improveBreadcrumbAppearance} from "../wysiwyg/renderBacklink";
@@ -41,6 +45,12 @@ import {genEmbedStatTip, type IBlockStat, type IEmbedStat} from "../../layout/st
 import {mountBreadcrumbButtons} from "../../plugin/breadcrumbButton";
 import {getHostCapabilities} from "../../util/hostCapabilities";
 import {waitForPendingTransactions} from "../util/transactionQueue";
+import {bindMobileMenuKeyboard} from "../../mobile/util/keyboardToolbar";
+/// #if MOBILE
+import {commandPanel} from "../../boot/globalEvent/command/panel";
+import {getEditorFocusRange} from "../util/editorFocus";
+import {DocumentHistory} from "./history";
+/// #endif
 
 const genDocumentStatLabel = (stat: IBlockStat, statWithEmbed?: IBlockStat, embedStat?: IEmbedStat) => {
     const runeEmbedAttrs = statWithEmbed ? ` class="ariaLabel" data-position="north" aria-label="${escapeAriaLabel(genEmbedStatTip(window.siyuan.languages.runeCountWithEmbed, statWithEmbed.runeCount, embedStat))}"` : "";
@@ -58,11 +68,25 @@ export class Breadcrumb {
     private uploadingRecordFiles = new Set<File>();
     private startingRecord = false;
     private stoppingRecord = false;
-    private mobileMenuLoading = false;
     private renderRequestID = 0;
     private menuRequestID = 0;
     private previousFocusElement: HTMLElement;
     private previousRange: Range;
+    /// #if MOBILE
+    private history: DocumentHistory;
+    /// #endif
+
+    public refreshHistory(rootID: string) {
+        /// #if MOBILE
+        this.history?.refresh(rootID);
+        /// #endif
+    }
+
+    public destroy() {
+        /// #if MOBILE
+        this.history?.destroy();
+        /// #endif
+    }
 
     constructor(protyle: IProtyle) {
         const element = document.createElement("div");
@@ -83,13 +107,29 @@ export class Breadcrumb {
 <div class="protyle-breadcrumb__plugin"></div>
 <button class="protyle-breadcrumb__icon fn__none ariaLabel" aria-label="${updateHotkeyTip(window.siyuan.config.keymap.editor.general.exitFocus.custom)}" data-type="exit-focus">${window.siyuan.languages.exitFocus}</button>
 ${padHTML}
+${isMobile() ? `<button class="block__icon fn__flex-center ariaLabel" data-type="command-panel" aria-label="${escapeAttr(window.siyuan.languages.commandPanel)}"><svg><use xlink:href="#iconTerminal"></use></svg></button>` : ""}
 <button class="block__icon fn__flex-center ariaLabel${window.siyuan.config.readonly ? " fn__none" : ""}" aria-label="${window.siyuan.languages.lockEdit}" data-type="readonly" data-subtype="unlock"><svg><use xlink:href="#iconUnlock"></use></svg></button>
 <button class="block__icon fn__flex-center ariaLabel" data-type="doc" aria-label="${isMac() ? window.siyuan.languages.gutterTip2 : window.siyuan.languages.gutterTip2.replace("⇧", "Shift+")}"><svg><use xlink:href="#iconFile"></use></svg></button>
 <button class="block__icon fn__flex-center ariaLabel" data-type="more" aria-label="${window.siyuan.languages.more}"><svg><use xlink:href="#iconMore"></use></svg></button>
 <button class="block__icon fn__flex-center fn__none ariaLabel" data-type="context" aria-label="${window.siyuan.languages.context}"><svg><use xlink:href="#iconAlignCenter"></use></svg></button>`;
         this.element = element.firstElementChild as HTMLElement;
+        /// #if MOBILE
+        this.history = new DocumentHistory(protyle);
+        element.querySelector('[data-type="command-panel"]').before(this.history.element);
+        /// #endif
         mountBreadcrumbButtons(protyle, element.querySelector(".protyle-breadcrumb__plugin"));
+        const takeMenuKeyboard = bindMobileMenuKeyboard(element,
+            'button[data-type="mobile-menu"], button[data-type="doc"], button[data-type="more"], button[data-type="command-panel"]',
+            () => protyle);
+        /// #if MOBILE
+        element.addEventListener("pointerdown", event => {
+            if ((event.target as Element).closest('button[data-type="command-panel"]')) {
+                event.preventDefault();
+            }
+        });
+        /// #endif
         element.addEventListener("click", async (event) => {
+            const restoreMenuKeyboard = takeMenuKeyboard();
             let target = event.target as HTMLElement;
             if (event.composedPath().some(item => item instanceof HTMLElement && item.hasAttribute("data-plugin-name"))) {
                 return;
@@ -99,9 +139,10 @@ ${padHTML}
                 const itemElement = arrowElement.previousElementSibling as HTMLElement;
                 if (itemElement?.classList.contains("protyle-breadcrumb__item")) {
                     const targetRect = arrowElement.getBoundingClientRect();
-                    this.openChildrenMenu(protyle, itemElement.getAttribute("data-node-id"), {
+                    this.openChildrenMenu(protyle, itemElement.getAttribute("data-node-id"), {target: arrowElement as HTMLElement,
                         x: targetRect.left,
                         y: targetRect.bottom,
+                        h: targetRect.height,
                         isLeft: false,
                     });
                     event.preventDefault();
@@ -118,7 +159,7 @@ ${padHTML}
                         openFileById({
                             app: protyle.app,
                             id,
-                            action: id === protyle.block.rootID ? [Constants.CB_GET_FOCUS] : [Constants.CB_GET_FOCUS, Constants.CB_GET_ALL]
+                            action: id === protyle.block.rootID ? [isPhablet() ? Constants.CB_GET_HL : Constants.CB_GET_FOCUS] : [isPhablet() ? Constants.CB_GET_HL : Constants.CB_GET_FOCUS, Constants.CB_GET_ALL]
                         });
                     } else {
                         zoomOut({protyle, id});
@@ -127,14 +168,24 @@ ${padHTML}
                     event.preventDefault();
                     break;
                 } else if (type === "mobile-menu") {
-                    this.genMobileMenu(protyle);
+                    this.genMobileMenu(protyle, restoreMenuKeyboard);
                     event.preventDefault();
                     event.stopPropagation();
                     break;
+                /// #if MOBILE
+                } else if (type === "command-panel") {
+                    const selection = document.getSelection();
+                    const range = getEditorFocusRange(protyle.wysiwyg.element,
+                        selection?.rangeCount ? selection.getRangeAt(0) : undefined, protyle.toolbar.range);
+                    commandPanel(protyle.app, {protyle, range, restoreKeyboard: restoreMenuKeyboard});
+                    event.preventDefault();
+                    event.stopPropagation();
+                    break;
+                /// #endif
                 } else if (type === "doc") {
                     // 不使用 window.siyuan.shiftIsPressed ，否则窗口未激活时按 Shift 点击块标无法打开属性面板 https://github.com/siyuan-note/siyuan/issues/15075
                     if (event.shiftKey) {
-                        const docInfoParam: IObject = {
+                        const docInfoParam: BlockQueryRequestInput = {
                             id: protyle.block.rootID
                         };
                         if (isEncryptedBox(protyle.notebookId)) {
@@ -145,18 +196,20 @@ ${padHTML}
                         });
                     } else {
                         const targetRect = target.getBoundingClientRect();
-                        openTitleMenu(protyle, {x: targetRect.right, y: targetRect.bottom, isLeft: true}, Constants.MENU_FROM_TITLE_BREADCRUMB);
+                        openTitleMenu(protyle, {target: target, x: targetRect.right, y: targetRect.bottom, h: targetRect.height, isLeft: true},
+                            Constants.MENU_FROM_TITLE_BREADCRUMB, restoreMenuKeyboard);
                     }
                     event.stopPropagation();
                     event.preventDefault();
                     break;
                 } else if (type === "more") {
                     const targetRect = target.getBoundingClientRect();
-                    this.showMenu(protyle, {
+                    this.showMenu(protyle, {target: target,
                         x: targetRect.right,
                         y: targetRect.bottom,
+                        h: targetRect.height,
                         isLeft: true,
-                    });
+                    }, restoreMenuKeyboard);
                     event.stopPropagation();
                     event.preventDefault();
                     break;
@@ -170,6 +223,7 @@ ${padHTML}
                         protyle,
                         id: protyle.block.rootID,
                         focusId: protyle.block.id,
+                        suppressFocus: isPhablet(),
                         dataDocType: "NodeDocument",
                         callback: () => {
                             element.querySelector('[data-type="context"]').classList.add("block__icon--active");
@@ -184,7 +238,7 @@ ${padHTML}
                     if (target.classList.contains("block__icon--active")) {
                         zoomOut({protyle, id: protyle.options.blockId});
                     } else {
-                        const getDocParam: IObject = {
+                        const getDocParam: FileTreeGetDocRequestInput = {
                             id: protyle.options.blockId,
                             mode: 3,
                             size: window.siyuan.config.editor.dynamicLoadBlocks,
@@ -240,6 +294,15 @@ ${padHTML}
             }
         });
         /// #if !MOBILE
+        element.querySelector("[data-type='doc']").addEventListener("contextmenu", (event: MouseEvent) => {
+            if (event.shiftKey) {
+                return;
+            }
+            event.preventDefault();
+            event.stopPropagation();
+            const rect = (event.currentTarget as HTMLElement).getBoundingClientRect();
+            openTitleMenu(protyle, {x: rect.right, y: rect.bottom, h: rect.height, isLeft: true}, Constants.MENU_FROM_TITLE_BREADCRUMB);
+        });
         this.element.addEventListener("contextmenu", (event) => {
             const itemElement = (event.target as HTMLElement).closest(".protyle-breadcrumb__item");
             if (!itemElement || !this.element.contains(itemElement)) {
@@ -247,9 +310,11 @@ ${padHTML}
             }
             event.preventDefault();
             event.stopPropagation();
+            const itemRect = itemElement.getBoundingClientRect();
             this.openChildrenMenu(protyle, itemElement.getAttribute("data-node-id"), {
-                x: event.clientX,
-                y: event.clientY,
+                x: itemRect.left,
+                y: itemRect.bottom,
+                h: itemRect.height,
                 isLeft: false,
             });
         });
@@ -276,6 +341,7 @@ ${padHTML}
                 this.openChildrenMenu(protyle, itemElement.getAttribute("data-node-id"), {
                     x: itemRect.left,
                     y: itemRect.bottom,
+                    h: itemRect.height,
                     isLeft: false,
                 }, true);
                 event.preventDefault();
@@ -298,73 +364,86 @@ ${padHTML}
     }
 
     private async openChildrenMenu(protyle: IProtyle, id: string, position: IPosition, keyboard = false) {
-        if (!id) {
-            return;
-        }
+        await toggleMenu({
+            target: position.target,
+            toggle: !keyboard,
+            build: async (_menu, session) => {
+                if (!id) {
+                    return;
+                }
 
-        const keyboardItemElement = keyboard ? document.activeElement : undefined;
-        const menuName = `${Constants.MENU_BREADCRUMB_CHILDREN}-${id}`;
-        const menu = new Menu(menuName);
-        if (menu.isOpen) {
-            return;
-        }
+                const keyboardItemElement = keyboard ? document.activeElement : undefined;
+                const menuName = `${Constants.MENU_BREADCRUMB_CHILDREN}-${id}`;
+                const menu = new Menu(menuName);
+                if (menu.isOpen) {
+                    return;
+                }
 
-        const currentPathIDs = new Set<string>();
-        this.element.querySelectorAll(".protyle-breadcrumb__item").forEach((item) => {
-            const itemID = item.getAttribute("data-node-id");
-            if (itemID) {
-                currentPathIDs.add(itemID);
-            }
+                const currentPathIDs = new Set<string>();
+                this.element.querySelectorAll(".protyle-breadcrumb__item").forEach((item) => {
+                    const itemID = item.getAttribute("data-node-id");
+                    if (itemID) {
+                        currentPathIDs.add(itemID);
+                    }
+                });
+                let currentBlockElement = this.id ?
+                    protyle.wysiwyg.element.querySelector(`[data-node-id="${this.id}"]`) as HTMLElement : undefined;
+                while (currentBlockElement) {
+                    const currentBlockID = currentBlockElement.getAttribute("data-node-id");
+                    if (currentBlockID) {
+                        currentPathIDs.add(currentBlockID);
+                    }
+                    const parentBlockElement = hasClosestBlock(currentBlockElement.parentElement) as HTMLElement;
+                    if (!parentBlockElement || !protyle.wysiwyg.element.contains(parentBlockElement)) {
+                        break;
+                    }
+                    currentBlockElement = parentBlockElement;
+                }
+                const excludeTypes: string[] = [];
+                if (this.element.parentElement?.parentElement?.classList.contains("card__block")) {
+                    excludeTypes.push("NodeTextMark-mark");
+                }
+
+                let items: IMenu[];
+                try {
+                    items = await this.genChildrenMenuItems(protyle, id, currentPathIDs, excludeTypes);
+                    if (!session.isCurrent()) {
+                        return;
+                    }
+                } catch (e) {
+                    if (!session.isCurrent()) {
+                        return;
+                    }
+                    console.warn("get breadcrumb children failed", e);
+                    if (window.siyuan.menus.menu.element.getAttribute("data-name") === menuName) {
+                        window.siyuan.menus.menu.remove();
+                    }
+                    return;
+                }
+                if (keyboard && document.activeElement !== keyboardItemElement) {
+                    if (window.siyuan.menus.menu.element.getAttribute("data-name") === menuName) {
+                        window.siyuan.menus.menu.remove();
+                    }
+                    return;
+                }
+                if (window.siyuan.menus.menu.element.getAttribute("data-name") !== menuName) {
+                    return;
+                }
+                if (items.length === 0) {
+                    window.siyuan.menus.menu.remove();
+                    return;
+                }
+
+                items.forEach((item) => {
+                    menu.addItem(item);
+                });
+                session.show(() => menu.open(position));
+                if (keyboard) {
+                    menu.element.querySelector(".b3-menu__item:not([disabled])")?.classList.add("b3-menu__item--current");
+                }
+
+            },
         });
-        let currentBlockElement = this.id ?
-            protyle.wysiwyg.element.querySelector(`[data-node-id="${this.id}"]`) as HTMLElement : undefined;
-        while (currentBlockElement) {
-            const currentBlockID = currentBlockElement.getAttribute("data-node-id");
-            if (currentBlockID) {
-                currentPathIDs.add(currentBlockID);
-            }
-            const parentBlockElement = hasClosestBlock(currentBlockElement.parentElement) as HTMLElement;
-            if (!parentBlockElement || !protyle.wysiwyg.element.contains(parentBlockElement)) {
-                break;
-            }
-            currentBlockElement = parentBlockElement;
-        }
-        const excludeTypes: string[] = [];
-        if (this.element.parentElement?.parentElement?.classList.contains("card__block")) {
-            excludeTypes.push("NodeTextMark-mark");
-        }
-
-        let items: IMenu[];
-        try {
-            items = await this.genChildrenMenuItems(protyle, id, currentPathIDs, excludeTypes);
-        } catch (e) {
-            console.warn("get breadcrumb children failed", e);
-            if (window.siyuan.menus.menu.element.getAttribute("data-name") === menuName) {
-                window.siyuan.menus.menu.remove();
-            }
-            return;
-        }
-        if (keyboard && document.activeElement !== keyboardItemElement) {
-            if (window.siyuan.menus.menu.element.getAttribute("data-name") === menuName) {
-                window.siyuan.menus.menu.remove();
-            }
-            return;
-        }
-        if (window.siyuan.menus.menu.element.getAttribute("data-name") !== menuName) {
-            return;
-        }
-        if (items.length === 0) {
-            window.siyuan.menus.menu.remove();
-            return;
-        }
-
-        items.forEach((item) => {
-            menu.addItem(item);
-        });
-        menu.open(position);
-        if (keyboard) {
-            menu.element.querySelector(".b3-menu__item:not([disabled])")?.classList.add("b3-menu__item--current");
-        }
     }
 
     private getSiblingItem(itemElement: HTMLElement, forward: boolean) {
@@ -414,7 +493,7 @@ ${padHTML}
 
     private async genChildrenMenuItems(protyle: IProtyle, id: string, currentPathIDs: Set<string>,
                                        excludeTypes: string[], offset = 0): Promise<IMenu[]> {
-        const request: Record<string, any> = {
+        const request = {
             id,
             offset,
             limit: 64,
@@ -430,10 +509,10 @@ ${padHTML}
         if (rootID !== protyle.block.rootID) {
             return [];
         }
-        const data = response.data as {
-            items: IBreadcrumb[],
-            hasMore: boolean,
-        };
+        if (response.code !== 0) {
+            return [];
+        }
+        const data = response.data;
         if (!data?.items) {
             return [];
         }
@@ -601,61 +680,74 @@ ${padHTML}
         });
     }
 
-    private async genMobileMenu(protyle: IProtyle) {
-        if (protyle.lite || protyle.toolbar.isMultiSelectMode() || this.mobileMenuLoading) {
-            return;
-        }
-        const menu = new Menu(Constants.MENU_BREADCRUMB_MOBILE_PATH);
-        if (menu.isOpen) {
-            return;
-        }
-        let blockElement: Element;
-        if (getSelection().rangeCount > 0) {
-            const range = getSelection().getRangeAt(0);
-            if (!protyle.wysiwyg.element.isEqualNode(range.startContainer) && !protyle.wysiwyg.element.contains(range.startContainer)) {
-                blockElement = getNoContainerElement(protyle.wysiwyg.element.firstElementChild) || protyle.wysiwyg.element.firstElementChild;
-            } else {
-                blockElement = hasClosestBlock(range.startContainer) as Element;
-            }
-        }
-        if (!blockElement) {
-            blockElement = getNoContainerElement(protyle.wysiwyg.element.firstElementChild) || protyle.wysiwyg.element.firstElementChild;
-        }
-        if (!blockElement) {
-            return;
-        }
-        const id = blockElement.getAttribute("data-node-id");
-        const breadcrumbParam: Record<string, any> = {id, excludeTypes: [], notebook: protyle.notebookId};
-        this.mobileMenuLoading = true;
-        const rootID = protyle.block.rootID;
-        await waitForPendingTransactions(protyle);
-        if (!blockElement.isConnected || rootID !== protyle.block.rootID) {
-            this.mobileMenuLoading = false;
-            return;
-        }
-        fetchPost("/api/block/getBlockBreadcrumb", breadcrumbParam, (response) => {
-            if (!blockElement.isConnected || rootID !== protyle.block.rootID) {
-                return;
-            }
-            response.data.forEach((item: IBreadcrumb) => {
-                let isCurrent = false;
-                if (!protyle.block.showAll && item.id === protyle.block.parentID) {
-                    isCurrent = true;
-                } else if (protyle.block.showAll && item.id === protyle.block.id) {
-                    isCurrent = true;
+    private async genMobileMenu(protyle: IProtyle, restoreKeyboard?: () => void) {
+        await toggleMenu({
+            target: this.element.querySelector("[data-type=mobile-menu]"),
+            build: async (_menu, session) => {
+                if (protyle.lite || protyle.toolbar.isMultiSelectMode()) {
+                    return;
                 }
-                menu.addItem({
-                    current: isCurrent,
-                    icon: getIconByType(item.type, item.subType),
-                    label: item.name,
-                    click() {
-                        zoomOut({protyle, id: item.id});
+                if (window.siyuan.menus.menu.element.getAttribute("data-name") === Constants.MENU_BREADCRUMB_MOBILE_PATH) {
+                    window.siyuan.menus.menu.closeSheet();
+                    return;
+                }
+                const menu = new Menu(Constants.MENU_BREADCRUMB_MOBILE_PATH);
+                if (menu.isOpen) {
+                    return;
+                }
+                let blockElement: Element;
+                if (getSelection().rangeCount > 0) {
+                    const range = getSelection().getRangeAt(0);
+                    if (!protyle.wysiwyg.element.isEqualNode(range.startContainer) && !protyle.wysiwyg.element.contains(range.startContainer)) {
+                        blockElement = getNoContainerElement(protyle.wysiwyg.element.firstElementChild) || protyle.wysiwyg.element.firstElementChild;
+                    } else {
+                        blockElement = hasClosestBlock(range.startContainer) as Element;
                     }
+                }
+                if (!blockElement) {
+                    blockElement = getNoContainerElement(protyle.wysiwyg.element.firstElementChild) || protyle.wysiwyg.element.firstElementChild;
+                }
+                if (!blockElement) {
+                    return;
+                }
+                const id = blockElement.getAttribute("data-node-id");
+                const breadcrumbParam: BlockBreadcrumbRequestInput = {id, excludeTypes: [], notebook: protyle.notebookId};
+                const rootID = protyle.block.rootID;
+                await waitForPendingTransactions(protyle);
+                if (!session.isCurrent()) {
+                    return;
+                }
+                if (!blockElement.isConnected || rootID !== protyle.block.rootID) {
+                    return;
+                }
+                fetchPost("/api/block/getBlockBreadcrumb", breadcrumbParam, (response) => {
+                    if (!session.isCurrent()) {
+                        return;
+                    }
+
+                    if (!blockElement.isConnected || rootID !== protyle.block.rootID) {
+                        return;
+                    }
+                    response.data.forEach((item: IBreadcrumb) => {
+                        let isCurrent = false;
+                        if (!protyle.block.showAll && item.id === protyle.block.parentID) {
+                            isCurrent = true;
+                        } else if (protyle.block.showAll && item.id === protyle.block.id) {
+                            isCurrent = true;
+                        }
+                        menu.addItem({
+                            current: isCurrent,
+                            icon: getIconByType(item.type, item.subType),
+                            label: item.name,
+                            click() {
+                                zoomOut({protyle, id: item.id});
+                            }
+                        });
+                    });
+                    session.show(() => window.siyuan.menus.menu.fullscreen("all", restoreKeyboard));
                 });
-            });
-            menu.fullscreen();
-        }).finally(() => {
-            this.mobileMenuLoading = false;
+
+            },
         });
     }
 
@@ -668,439 +760,448 @@ ${padHTML}
         }
     }
 
-    public async showMenu(protyle: IProtyle, position: IPosition) {
-        const requestID = ++this.menuRequestID;
-        if (!window.siyuan.menus.menu.element.classList.contains("fn__none") &&
-            window.siyuan.menus.menu.element.getAttribute("data-name") === Constants.MENU_BREADCRUMB_MORE) {
-            window.siyuan.menus.menu.remove();
-            return;
-        }
-        let id;
-        const cursorNodeElement = hasClosestBlock(getEditorRange(protyle.element).startContainer);
-        if (cursorNodeElement) {
-            id = cursorNodeElement.getAttribute("data-node-id");
-        }
-        const statRequest: IObject = {
-            id: id || (protyle.block.showAll ? protyle.block.id : protyle.block.rootID)
-        };
-        if (isEncryptedBox(protyle.notebookId)) {
-            statRequest.notebook = protyle.notebookId;
-        }
-        const rootID = protyle.block.rootID;
-        const isCurrent = () => requestID === this.menuRequestID && rootID === protyle.block.rootID &&
-            protyle.element.isConnected && (!cursorNodeElement || cursorNodeElement.isConnected);
-        await waitForPendingTransactions(protyle);
-        if (!isCurrent()) {
-            return;
-        }
-        fetchPost("/api/block/getTreeStat", statRequest, (response) => {
-            if (!isCurrent()) {
-                return;
-            }
-            window.siyuan.menus.menu.remove();
-            window.siyuan.menus.menu.element.setAttribute("data-name", Constants.MENU_BREADCRUMB_MORE);
-            if (!protyle.contentElement.classList.contains("fn__none") && !protyle.disabled) {
-                let uploadHTML = "";
-                uploadHTML = '<input class="b3-form__upload" type="file" multiple="multiple"';
-                if (protyle.options.upload.accept) {
-                    uploadHTML += ` accept="${protyle.options.upload.accept}">`;
-                } else {
-                    uploadHTML += ">";
+    public async showMenu(protyle: IProtyle, position: IPosition, restoreKeyboard?: () => void) {
+        await toggleMenu({
+            target: position.target,
+            build: async (_menu, session) => {
+                const requestID = ++this.menuRequestID;
+
+                let id;
+                const cursorNodeElement = hasClosestBlock(getEditorRange(protyle.element).startContainer);
+                if (cursorNodeElement) {
+                    id = cursorNodeElement.getAttribute("data-node-id");
                 }
-                if (isInAndroid()) {
-                    const imageUploadMenu = new MenuItem({
-                        id: "insertImage",
-                        icon: "iconImage",
-                        label: `${window.siyuan.languages.insertImage}<input class="b3-form__upload" type="file" multiple="multiple" accept="image/*,application/x-siyuan-image-picker">`,
-                    }).element;
-                    imageUploadMenu.querySelector("input").addEventListener("change", (event: InputEvent & {
-                        target: HTMLInputElement
-                    }) => {
-                        if (event.target.files.length === 0) {
-                            return;
-                        }
-                        uploadFiles(protyle, event.target.files, event.target, undefined, undefined, {
-                            source: "file-picker",
-                            target: "editor",
-                        });
-                        window.siyuan.menus.menu.remove();
-                    });
-                    window.siyuan.menus.menu.append(imageUploadMenu);
+                const statRequest: TreeStatRequestInput = {
+                    id: id || (protyle.block.showAll ? protyle.block.id : protyle.block.rootID)
+                };
+                if (isEncryptedBox(protyle.notebookId)) {
+                    statRequest.notebook = protyle.notebookId;
                 }
-                const uploadMenu = new MenuItem({
-                    id: "insertAsset",
-                    icon: "iconDownload",
-                    label: `${window.siyuan.languages.insertAsset}${uploadHTML}`,
-                }).element;
-                uploadMenu.querySelector("input").addEventListener("change", (event: InputEvent & {
-                    target: HTMLInputElement
-                }) => {
-                    if (event.target.files.length === 0) {
+                const rootID = protyle.block.rootID;
+                const isCurrent = () => requestID === this.menuRequestID && rootID === protyle.block.rootID &&
+                    protyle.element.isConnected && (!cursorNodeElement || cursorNodeElement.isConnected);
+                await waitForPendingTransactions(protyle);
+                if (!session.isCurrent()) {
+                    return;
+                }
+                if (!isCurrent()) {
+                    return;
+                }
+                fetchPost("/api/block/getTreeStat", statRequest, (response) => {
+                    if (!session.isCurrent()) {
                         return;
                     }
-                    uploadFiles(protyle, event.target.files, event.target, undefined, undefined, {
-                        source: "file-picker",
-                        target: "editor",
-                    });
+
+                    if (!isCurrent()) {
+                        return;
+                    }
                     window.siyuan.menus.menu.remove();
-                });
-                window.siyuan.menus.menu.append(uploadMenu);
-                if (getHostCapabilities().localFileSystem) {
-                    const htmlUploadMenu = new MenuItem({
-                        id: "insertHTMLFile",
-                        icon: "iconHTML5",
-                        label: `${window.siyuan.languages.insertHTMLFile}<input class="b3-form__upload" type="file" multiple="multiple" accept=".html,.htm">`,
-                    }).element;
-                    htmlUploadMenu.querySelector("input").addEventListener("change", (event: InputEvent & {
-                        target: HTMLInputElement
-                    }) => {
-                        if (event.target.files.length === 0) {
-                            return;
+                    window.siyuan.menus.menu.element.setAttribute("data-name", Constants.MENU_BREADCRUMB_MORE);
+                    if (!protyle.contentElement.classList.contains("fn__none") && !protyle.disabled) {
+                        let uploadHTML = "";
+                        uploadHTML = '<input class="b3-form__upload" type="file" multiple="multiple"';
+                        if (protyle.options.upload.accept) {
+                            uploadHTML += ` accept="${protyle.options.upload.accept}">`;
+                        } else {
+                            uploadHTML += ">";
                         }
-                        uploadFiles(protyle, event.target.files, event.target, undefined, undefined, {
-                            htmlAsIframe: true,
-                            source: "file-picker",
-                            target: "editor",
-                        });
-                        window.siyuan.menus.menu.remove();
-                    });
-                    window.siyuan.menus.menu.append(htmlUploadMenu);
-                }
-                window.siyuan.menus.menu.append(new MenuItem({
-                    id: this.mediaRecorder?.isRecording ? "endRecord" : "startRecord",
-                    current: this.mediaRecorder && this.mediaRecorder.isRecording,
-                    icon: "iconRecord",
-                    label: this.mediaRecorder?.isRecording ? window.siyuan.languages.endRecord : window.siyuan.languages.startRecord,
-                    click: async () => {
-                        if (this.startingRecord || this.stoppingRecord) {
-                            return;
-                        }
-                        if (this.mediaRecorder?.isRecording) {
-                            this.stopRecord(protyle);
-                            return;
-                        }
-
-                        this.startingRecord = true;
-                        let mediaStream: MediaStream;
-                        try {
-                            /// #if !BROWSER
-                            if (window.siyuan.config.system.os === "darwin") {
-                                const status = await ipcRenderer.invoke(Constants.SIYUAN_GET, {cmd: "getMicrophone"});
-                                if (["denied", "restricted", "unknown"].includes(status)) {
-                                    showMessage(window.siyuan.languages.microphoneDenied);
+                        if (isInAndroid()) {
+                            const imageUploadMenu = new MenuItem({
+                                id: "insertImage",
+                                icon: "iconImage",
+                                label: `${window.siyuan.languages.insertImage}<input class="b3-form__upload" type="file" multiple="multiple" accept="image/*,application/x-siyuan-image-picker">`,
+                            }).element;
+                            imageUploadMenu.querySelector("input").addEventListener("change", (event: InputEvent & {
+                                target: HTMLInputElement
+                            }) => {
+                                if (event.target.files.length === 0) {
                                     return;
-                                } else if (status === "not-determined") {
-                                    const isAccess = await ipcRenderer.invoke(Constants.SIYUAN_GET, {cmd: "askMicrophone"});
-                                    if (!isAccess) {
-                                        showMessage(window.siyuan.languages.microphoneNotAccess);
-                                        return;
-                                    }
                                 }
-                            }
-                            /// #endif
-
-                            mediaStream = await navigator.mediaDevices.getUserMedia({
-                                audio: isInAndroid() || isInHarmony() ? {
-                                    autoGainControl: false,
-                                    echoCancellation: false,
-                                    noiseSuppression: false,
-                                } : true,
+                                uploadFiles(protyle, event.target.files, event.target, undefined, undefined, {
+                                    source: "file-picker",
+                                    target: "editor",
+                                });
+                                window.siyuan.menus.menu.remove();
                             });
-                            await this.startRecord(protyle, mediaStream);
-                        } catch (error) {
-                            mediaStream?.getTracks().forEach((track) => track.stop());
-                            if (error instanceof RecordMediaInputEndedError) {
-                                showMessage(window.siyuan.languages.recordInterrupted);
-                            } else if ((!isInAndroid() && !isInHarmony()) ||
-                                !(error instanceof DOMException && error.name === "NotAllowedError")) {
-                                showMessage(window.siyuan.languages["record-tip"]);
-                            }
-                        } finally {
-                            this.startingRecord = false;
+                            window.siyuan.menus.menu.append(imageUploadMenu);
                         }
-                    }
-                }).element);
-            }
-            if (!protyle.disabled) {
-                window.siyuan.menus.menu.append(new MenuItem({
-                    id: "netImg2LocalAsset",
-                    label: window.siyuan.languages.netImg2LocalAsset,
-                    icon: "iconImgDown",
-                    accelerator: window.siyuan.config.keymap.editor.general.netImg2LocalAsset.custom,
-                    click() {
-                        net2LocalAssets(protyle, "Img");
-                    }
-                }).element);
-                window.siyuan.menus.menu.append(new MenuItem({
-                    id: "netAssets2LocalAssets",
-                    label: window.siyuan.languages.netAssets2LocalAssets,
-                    icon: "iconDownloadAssets",
-                    accelerator: window.siyuan.config.keymap.editor.general.netAssets2LocalAssets.custom,
-                    click() {
-                        net2LocalAssets(protyle, "Assets");
-                    }
-                }).element);
-                window.siyuan.menus.menu.append(new MenuItem({
-                    id: "uploadAssets2CDN",
-                    label: window.siyuan.languages.uploadAssets2CDN,
-                    icon: "iconUploadAssets",
-                    click() {
-                        if (!needSubscribe()) {
-                            confirmDialog("📦 " + window.siyuan.languages.uploadAssets2CDN, window.siyuan.languages.uploadAssets2CDNConfirmTip, () => {
-                                fetchPost("/api/asset/uploadCloud", {id: protyle.block.id});
-                            });
-                        }
-                    }
-                }).element);
-                if (window.siyuan.user && getHostCapabilities().importExport) { // 登录链滴账号后即可使用 `分享到链滴` https://github.com/siyuan-note/siyuan/issues/7392
-                    window.siyuan.menus.menu.append(new MenuItem({
-                        id: "share2Liandi",
-                        label: window.siyuan.languages.share2Liandi,
-                        icon: "iconLiandi",
-                        click() {
-                            if (!getHostCapabilities().importExport) {
+                        const uploadMenu = new MenuItem({
+                            id: "insertAsset",
+                            icon: "iconUpload",
+                            label: `${window.siyuan.languages.insertAsset}${uploadHTML}`,
+                        }).element;
+                        uploadMenu.querySelector("input").addEventListener("change", (event: InputEvent & {
+                            target: HTMLInputElement
+                        }) => {
+                            if (event.target.files.length === 0) {
                                 return;
                             }
-                            confirmDialog("🤩 " + window.siyuan.languages.share2Liandi,
-                                window.siyuan.languages.share2LiandiConfirmTip.replace("${accountServer}", getCloudURL("")), () => {
-                                    fetchPost("/api/export/export2Liandi", {id: protyle.block.parentID});
+                            uploadFiles(protyle, event.target.files, event.target, undefined, undefined, {
+                                source: "file-picker",
+                                target: "editor",
+                            });
+                            window.siyuan.menus.menu.remove();
+                        });
+                        window.siyuan.menus.menu.append(uploadMenu);
+                        if (getHostCapabilities().localFileSystem) {
+                            const htmlUploadMenu = new MenuItem({
+                                id: "insertHTMLFile",
+                                icon: "iconHTML5",
+                                label: `${window.siyuan.languages.insertHTMLFile}<input class="b3-form__upload" type="file" multiple="multiple" accept=".html,.htm">`,
+                            }).element;
+                            htmlUploadMenu.querySelector("input").addEventListener("change", (event: InputEvent & {
+                                target: HTMLInputElement
+                            }) => {
+                                if (event.target.files.length === 0) {
+                                    return;
+                                }
+                                uploadFiles(protyle, event.target.files, event.target, undefined, undefined, {
+                                    htmlAsIframe: true,
+                                    source: "file-picker",
+                                    target: "editor",
                                 });
+                                window.siyuan.menus.menu.remove();
+                            });
+                            window.siyuan.menus.menu.append(htmlUploadMenu);
                         }
-                    }).element);
-                }
-            }
-            if (!protyle.scroll?.element.classList.contains("fn__none")) {
-                if (hasUnloadedDocumentBlocks(protyle.wysiwyg.element, true)) {
-                    window.siyuan.menus.menu.append(new MenuItem({
-                        id: "loadAllContent",
-                        icon: "iconSelectAll",
-                        label: window.siyuan.languages.loadAllContent,
-                        click: () => {
-                            void protyle.scroll.loadAll(protyle);
-                        }
-                    }).element);
-                }
-                window.siyuan.menus.menu.append(new MenuItem({
-                    id: "keepLazyLoad",
-                    icon: "iconKeepContent",
-                    current: protyle.scroll.keepLoadedContent,
-                    label: window.siyuan.languages.keepLazyLoad,
-                    click: () => {
-                        protyle.scroll.keepLoadedContent = !protyle.scroll.keepLoadedContent;
+                        window.siyuan.menus.menu.append(new MenuItem({
+                            id: this.mediaRecorder?.isRecording ? "endRecord" : "startRecord",
+                            current: this.mediaRecorder && this.mediaRecorder.isRecording,
+                            icon: "iconRecord",
+                            label: this.mediaRecorder?.isRecording ? window.siyuan.languages.endRecord : window.siyuan.languages.startRecord,
+                            click: async () => {
+                                if (this.startingRecord || this.stoppingRecord) {
+                                    return;
+                                }
+                                if (this.mediaRecorder?.isRecording) {
+                                    this.stopRecord(protyle);
+                                    return;
+                                }
+
+                                this.startingRecord = true;
+                                let mediaStream: MediaStream;
+                                try {
+                                    /// #if !BROWSER
+                                    if (window.siyuan.config.system.os === "darwin") {
+                                        const status = await ipcRenderer.invoke(Constants.SIYUAN_GET, {cmd: "getMicrophone"});
+                                        if (["denied", "restricted", "unknown"].includes(status)) {
+                                            showMessage(window.siyuan.languages.microphoneDenied);
+                                            return;
+                                        } else if (status === "not-determined") {
+                                            const isAccess = await ipcRenderer.invoke(Constants.SIYUAN_GET, {cmd: "askMicrophone"});
+                                            if (!isAccess) {
+                                                showMessage(window.siyuan.languages.microphoneNotAccess);
+                                                return;
+                                            }
+                                        }
+                                    }
+                                    /// #endif
+
+                                    mediaStream = await navigator.mediaDevices.getUserMedia({
+                                        audio: isInAndroid() || isInHarmony() ? {
+                                            autoGainControl: false,
+                                            echoCancellation: false,
+                                            noiseSuppression: false,
+                                        } : true,
+                                    });
+                                    await this.startRecord(protyle, mediaStream);
+                                } catch (error) {
+                                    mediaStream?.getTracks().forEach((track) => track.stop());
+                                    if (error instanceof RecordMediaInputEndedError) {
+                                        showMessage(window.siyuan.languages.recordInterrupted);
+                                    } else if ((!isInAndroid() && !isInHarmony()) ||
+                                        !(error instanceof DOMException && error.name === "NotAllowedError")) {
+                                        showMessage(window.siyuan.languages["record-tip"]);
+                                    }
+                                } finally {
+                                    this.startingRecord = false;
+                                }
+                            }
+                        }).element);
                     }
-                }).element);
-            }
-            if (window.siyuan.menus.menu.element.lastElementChild.childElementCount > 0) {
-                window.siyuan.menus.menu.append(new MenuItem({id: "separator_1", type: "separator"}).element);
-            }
-            window.siyuan.menus.menu.append(new MenuItem({
-                id: "refresh",
-                icon: "iconRefresh",
-                accelerator: window.siyuan.config.keymap.editor.general.refresh.custom,
-                label: window.siyuan.languages.refresh,
-                click: () => {
-                    reloadProtyle(protyle, !isMobile());
-                }
-            }).element);
-            if (!protyle.disabled) {
-                window.siyuan.menus.menu.append(new MenuItem({
-                    id: "optimizeTypography",
-                    label: window.siyuan.languages.optimizeTypography,
-                    accelerator: window.siyuan.config.keymap.editor.general.optimizeTypography.custom,
-                    icon: "iconFormat",
-                    click: () => {
-                        hideElements(["toolbar"], protyle);
-                        fetchPost("/api/format/autoSpace", {
-                            id: protyle.block.rootID
+                    if (!protyle.disabled) {
+                        window.siyuan.menus.menu.append(new MenuItem({
+                            id: "netImg2LocalAsset",
+                            label: window.siyuan.languages.netImg2LocalAsset,
+                            icon: "iconImgDown",
+                            accelerator: window.siyuan.config.keymap.editor.general.netImg2LocalAsset.custom,
+                            click() {
+                                net2LocalAssets(protyle, "Img");
+                            }
+                        }).element);
+                        window.siyuan.menus.menu.append(new MenuItem({
+                            id: "netAssets2LocalAssets",
+                            label: window.siyuan.languages.netAssets2LocalAssets,
+                            icon: "iconDownloadAssets",
+                            accelerator: window.siyuan.config.keymap.editor.general.netAssets2LocalAssets.custom,
+                            click() {
+                                net2LocalAssets(protyle, "Assets");
+                            }
+                        }).element);
+                        window.siyuan.menus.menu.append(new MenuItem({
+                            id: "uploadAssets2CDN",
+                            label: window.siyuan.languages.uploadAssets2CDN,
+                            icon: "iconUploadAssets",
+                            click() {
+                                if (!needSubscribe()) {
+                                    confirmDialog("📦 " + window.siyuan.languages.uploadAssets2CDN, window.siyuan.languages.uploadAssets2CDNConfirmTip, () => {
+                                        fetchPost("/api/asset/uploadCloud", {id: protyle.block.id});
+                                    });
+                                }
+                            }
+                        }).element);
+                        if (window.siyuan.user && getHostCapabilities().importExport) { // 登录链滴账号后即可使用 `分享到链滴` https://github.com/siyuan-note/siyuan/issues/7392
+                            window.siyuan.menus.menu.append(new MenuItem({
+                                id: "share2Liandi",
+                                label: window.siyuan.languages.share2Liandi,
+                                icon: "iconLiandi",
+                                click() {
+                                    if (!getHostCapabilities().importExport) {
+                                        return;
+                                    }
+                                    confirmDialog("🤩 " + window.siyuan.languages.share2Liandi,
+                                        window.siyuan.languages.share2LiandiConfirmTip.replace("${accountServer}", getCloudURL("")), () => {
+                                            fetchPost("/api/export/export2Liandi", {id: protyle.block.parentID});
+                                        });
+                                }
+                            }).element);
+                        }
+                    }
+                    if (!protyle.scroll?.element.classList.contains("fn__none")) {
+                        if (hasUnloadedDocumentBlocks(protyle.wysiwyg.element, true)) {
+                            window.siyuan.menus.menu.append(new MenuItem({
+                                id: "loadAllContent",
+                                icon: "iconSelectAll",
+                                label: window.siyuan.languages.loadAllContent,
+                                click: () => {
+                                    void protyle.scroll.loadAll(protyle);
+                                }
+                            }).element);
+                        }
+                        window.siyuan.menus.menu.append(new MenuItem({
+                            id: "keepLazyLoad",
+                            icon: "iconKeepContent",
+                            current: protyle.scroll.keepLoadedContent,
+                            label: window.siyuan.languages.keepLazyLoad,
+                            click: () => {
+                                protyle.scroll.keepLoadedContent = !protyle.scroll.keepLoadedContent;
+                            }
+                        }).element);
+                    }
+                    if (window.siyuan.menus.menu.element.lastElementChild.childElementCount > 0) {
+                        window.siyuan.menus.menu.append(new MenuItem({id: "separator_1", type: "separator"}).element);
+                    }
+                    window.siyuan.menus.menu.append(new MenuItem({
+                        id: "refresh",
+                        icon: "iconRefresh",
+                        accelerator: window.siyuan.config.keymap.editor.general.refresh.custom,
+                        label: window.siyuan.languages.refresh,
+                        click: () => {
+                            reloadProtyle(protyle, !isMobile());
+                        }
+                    }).element);
+                    if (!protyle.disabled) {
+                        window.siyuan.menus.menu.append(new MenuItem({
+                            id: "optimizeTypography",
+                            label: window.siyuan.languages.optimizeTypography,
+                            accelerator: window.siyuan.config.keymap.editor.general.optimizeTypography.custom,
+                            icon: "iconFormat",
+                            click: () => {
+                                hideElements(["toolbar"], protyle);
+                                fetchPost("/api/format/autoSpace", {
+                                    id: protyle.block.rootID
+                                });
+                            }
+                        }).element);
+                    }
+                    /// #if !MOBILE
+                    window.siyuan.menus.menu.append(new MenuItem({
+                        id: "fullscreen",
+                        icon: protyle.getInstance().isFullscreen() ? "iconFullscreenExit" : "iconFullscreen",
+                        accelerator: window.siyuan.config.keymap.editor.general.fullscreen.custom,
+                        label: window.siyuan.languages.fullscreen,
+                        click: () => {
+                            const editor = protyle.getInstance();
+                            editor.setFullscreen(!editor.isFullscreen());
+                        }
+                    }).element);
+                    /// #endif
+                    window.siyuan.menus.menu.append(new MenuItem({
+                        id: "editMode",
+                        icon: "iconEdit",
+                        label: protyle.preview.element.classList.contains("fn__none") ?
+                            window.siyuan.languages.switchToPreview : window.siyuan.languages.switchToWYSIWYG,
+                        accelerator: window.siyuan.config.keymap.editor.general.editMode.custom,
+                        click: () => {
+                            toggleEditMode(protyle);
+                            window.siyuan.menus.menu.remove();
+                            /// #if !MOBILE
+                            saveLayout();
+                            /// #endif
+                        }
+                    }).element);
+                    if (!window.siyuan.config.editor.readOnly && !window.siyuan.config.readonly) {
+                        const isCustomReadonly = protyle.wysiwyg.element.getAttribute(Constants.CUSTOM_SY_READONLY);
+                        window.siyuan.menus.menu.append(new MenuItem({
+                            id: "editReadonly",
+                            label: window.siyuan.languages.editReadonly,
+                            icon: "iconLock",
+                            type: "submenu",
+                            submenu: [{
+                                id: "enable",
+                                iconHTML: "",
+                                current: isCustomReadonly === "true",
+                                label: window.siyuan.languages.enable,
+                                click() {
+                                    fetchPost("/api/attr/setBlockAttrs", {
+                                        id: protyle.block.rootID,
+                                        attrs: {[Constants.CUSTOM_SY_READONLY]: "true"}
+                                    });
+                                }
+                            }, {
+                                id: "disable",
+                                iconHTML: "",
+                                current: !isCustomReadonly || isCustomReadonly === "false",
+                                label: window.siyuan.languages.disable,
+                                click() {
+                                    fetchPost("/api/attr/setBlockAttrs", {
+                                        id: protyle.block.rootID,
+                                        attrs: {[Constants.CUSTOM_SY_READONLY]: "false"}
+                                    });
+                                }
+                            }]
+                        }).element);
+                    }
+                    /// #if !MOBILE
+                    if (!protyle.disabled) {
+                        const isCustomFullWidth = protyle.wysiwyg.element.getAttribute(Constants.CUSTOM_SY_FULLWIDTH);
+                        window.siyuan.menus.menu.append(new MenuItem({
+                            id: "fullWidth",
+                            label: window.siyuan.languages.fullWidth,
+                            icon: "iconFullWidth",
+                            type: "submenu",
+                            submenu: [{
+                                id: "enable",
+                                iconHTML: "",
+                                current: isCustomFullWidth === "true",
+                                label: window.siyuan.languages.enable,
+                                click() {
+                                    fetchPost("/api/attr/setBlockAttrs", {
+                                        id: protyle.block.rootID,
+                                        attrs: {[Constants.CUSTOM_SY_FULLWIDTH]: "true"}
+                                    });
+                                }
+                            }, {
+                                id: "disable",
+                                iconHTML: "",
+                                current: isCustomFullWidth === "false",
+                                label: window.siyuan.languages.disable,
+                                click() {
+                                    fetchPost("/api/attr/setBlockAttrs", {
+                                        id: protyle.block.rootID,
+                                        attrs: {[Constants.CUSTOM_SY_FULLWIDTH]: "false"}
+                                    });
+                                }
+                            }, {
+                                id: "default",
+                                iconHTML: "",
+                                current: !isCustomFullWidth,
+                                label: window.siyuan.languages.default,
+                                click() {
+                                    fetchPost("/api/attr/setBlockAttrs", {
+                                        id: protyle.block.rootID,
+                                        attrs: {[Constants.CUSTOM_SY_FULLWIDTH]: ""}
+                                    });
+                                }
+                            }]
+                        }).element);
+                        const isCustomHeadingNumber = protyle.wysiwyg.element.getAttribute(
+                            Constants.CUSTOM_SY_HEADING_NUMBER
+                        );
+                        window.siyuan.menus.menu.append(new MenuItem({
+                            id: "headingNumber",
+                            label: window.siyuan.languages.headingNumber,
+                            icon: "iconHeadings",
+                            type: "submenu",
+                            submenu: [{
+                                id: "enable",
+                                iconHTML: "",
+                                current: isCustomHeadingNumber === "true",
+                                label: window.siyuan.languages.enable,
+                                click() {
+                                    fetchPost("/api/attr/setBlockAttrs", {
+                                        id: protyle.block.rootID,
+                                        attrs: {[Constants.CUSTOM_SY_HEADING_NUMBER]: "true"}
+                                    });
+                                }
+                            }, {
+                                id: "disable",
+                                iconHTML: "",
+                                current: isCustomHeadingNumber === "false",
+                                label: window.siyuan.languages.disable,
+                                click() {
+                                    fetchPost("/api/attr/setBlockAttrs", {
+                                        id: protyle.block.rootID,
+                                        attrs: {[Constants.CUSTOM_SY_HEADING_NUMBER]: "false"}
+                                    });
+                                }
+                            }, {
+                                id: "default",
+                                iconHTML: "",
+                                current: !isCustomHeadingNumber,
+                                label: window.siyuan.languages.default,
+                                click() {
+                                    fetchPost("/api/attr/setBlockAttrs", {
+                                        id: protyle.block.rootID,
+                                        attrs: {[Constants.CUSTOM_SY_HEADING_NUMBER]: ""}
+                                    });
+                                }
+                            }]
+                        }).element);
+                    }
+                    /// #endif
+                    if (protyle) {
+                        emitOpenMenu({
+                            type: "open-menu-breadcrumbmore",
+                            detail: {
+                                protyle,
+                                data: response.data.stat,
+                            },
+                            separatorPosition: "top",
                         });
                     }
-                }).element);
-            }
-            /// #if !MOBILE
-            window.siyuan.menus.menu.append(new MenuItem({
-                id: "fullscreen",
-                icon: protyle.getInstance().isFullscreen() ? "iconFullscreenExit" : "iconFullscreen",
-                accelerator: window.siyuan.config.keymap.editor.general.fullscreen.custom,
-                label: window.siyuan.languages.fullscreen,
-                click: () => {
-                    const editor = protyle.getInstance();
-                    editor.setFullscreen(!editor.isFullscreen());
-                }
-            }).element);
-            /// #endif
-            window.siyuan.menus.menu.append(new MenuItem({
-                id: "editMode",
-                icon: "iconEdit",
-                label: protyle.preview.element.classList.contains("fn__none") ?
-                    window.siyuan.languages.switchToPreview : window.siyuan.languages.switchToWYSIWYG,
-                accelerator: window.siyuan.config.keymap.editor.general.editMode.custom,
-                click: () => {
-                    toggleEditMode(protyle);
-                    window.siyuan.menus.menu.remove();
-                    /// #if !MOBILE
-                    saveLayout();
-                    /// #endif
-                }
-            }).element);
-            if (!window.siyuan.config.editor.readOnly && !window.siyuan.config.readonly) {
-                const isCustomReadonly = protyle.wysiwyg.element.getAttribute(Constants.CUSTOM_SY_READONLY);
-                window.siyuan.menus.menu.append(new MenuItem({
-                    id: "editReadonly",
-                    label: window.siyuan.languages.editReadonly,
-                    icon: "iconLock",
-                    type: "submenu",
-                    submenu: [{
-                        id: "enable",
+                    window.siyuan.menus.menu.append(new MenuItem({id: "separator_2", type: "separator"}).element);
+                    const docInfoElement = new MenuItem({
+                        id: "docInfo",
                         iconHTML: "",
-                        current: isCustomReadonly === "true",
-                        label: window.siyuan.languages.enable,
-                        click() {
-                            fetchPost("/api/attr/setBlockAttrs", {
-                                id: protyle.block.rootID,
-                                attrs: {[Constants.CUSTOM_SY_READONLY]: "true"}
-                            });
-                        }
-                    }, {
-                        id: "disable",
-                        iconHTML: "",
-                        current: !isCustomReadonly || isCustomReadonly === "false",
-                        label: window.siyuan.languages.disable,
-                        click() {
-                            fetchPost("/api/attr/setBlockAttrs", {
-                                id: protyle.block.rootID,
-                                attrs: {[Constants.CUSTOM_SY_READONLY]: "false"}
-                            });
-                        }
-                    }]
-                }).element);
-            }
-            /// #if !MOBILE
-            if (!protyle.disabled) {
-                const isCustomFullWidth = protyle.wysiwyg.element.getAttribute(Constants.CUSTOM_SY_FULLWIDTH);
-                window.siyuan.menus.menu.append(new MenuItem({
-                    id: "fullWidth",
-                    label: window.siyuan.languages.fullWidth,
-                    icon: "iconFullWidth",
-                    type: "submenu",
-                    submenu: [{
-                        id: "enable",
-                        iconHTML: "",
-                        current: isCustomFullWidth === "true",
-                        label: window.siyuan.languages.enable,
-                        click() {
-                            fetchPost("/api/attr/setBlockAttrs", {
-                                id: protyle.block.rootID,
-                                attrs: {[Constants.CUSTOM_SY_FULLWIDTH]: "true"}
-                            });
-                        }
-                    }, {
-                        id: "disable",
-                        iconHTML: "",
-                        current: isCustomFullWidth === "false",
-                        label: window.siyuan.languages.disable,
-                        click() {
-                            fetchPost("/api/attr/setBlockAttrs", {
-                                id: protyle.block.rootID,
-                                attrs: {[Constants.CUSTOM_SY_FULLWIDTH]: "false"}
-                            });
-                        }
-                    }, {
-                        id: "default",
-                        iconHTML: "",
-                        current: !isCustomFullWidth,
-                        label: window.siyuan.languages.default,
-                        click() {
-                            fetchPost("/api/attr/setBlockAttrs", {
-                                id: protyle.block.rootID,
-                                attrs: {[Constants.CUSTOM_SY_FULLWIDTH]: ""}
-                            });
-                        }
-                    }]
-                }).element);
-                const isCustomHeadingNumber = protyle.wysiwyg.element.getAttribute(
-                    Constants.CUSTOM_SY_HEADING_NUMBER
-                );
-                window.siyuan.menus.menu.append(new MenuItem({
-                    id: "headingNumber",
-                    label: window.siyuan.languages.headingNumber,
-                    icon: "iconHeadings",
-                    type: "submenu",
-                    submenu: [{
-                        id: "enable",
-                        iconHTML: "",
-                        current: isCustomHeadingNumber === "true",
-                        label: window.siyuan.languages.enable,
-                        click() {
-                            fetchPost("/api/attr/setBlockAttrs", {
-                                id: protyle.block.rootID,
-                                attrs: {[Constants.CUSTOM_SY_HEADING_NUMBER]: "true"}
-                            });
-                        }
-                    }, {
-                        id: "disable",
-                        iconHTML: "",
-                        current: isCustomHeadingNumber === "false",
-                        label: window.siyuan.languages.disable,
-                        click() {
-                            fetchPost("/api/attr/setBlockAttrs", {
-                                id: protyle.block.rootID,
-                                attrs: {[Constants.CUSTOM_SY_HEADING_NUMBER]: "false"}
-                            });
-                        }
-                    }, {
-                        id: "default",
-                        iconHTML: "",
-                        current: !isCustomHeadingNumber,
-                        label: window.siyuan.languages.default,
-                        click() {
-                            fetchPost("/api/attr/setBlockAttrs", {
-                                id: protyle.block.rootID,
-                                attrs: {[Constants.CUSTOM_SY_HEADING_NUMBER]: ""}
-                            });
-                        }
-                    }]
-                }).element);
-            }
-            /// #endif
-            if (protyle) {
-                emitOpenMenu({
-                    type: "open-menu-breadcrumbmore",
-                    detail: {
-                        protyle,
-                        data: response.data.stat,
-                    },
-                    separatorPosition: "top",
-                });
-            }
-            window.siyuan.menus.menu.append(new MenuItem({id: "separator_2", type: "separator"}).element);
-            const docInfoElement = new MenuItem({
-                id: "docInfo",
-                iconHTML: "",
-                type: "readonly",
-                // 不能换行，否则移动端间距过大
-                label: genDocumentStatLabel(response.data.stat),
-            }).element;
-            window.siyuan.menus.menu.append(docInfoElement);
-            if (response.data.containsEmbed) {
-                fetchPost("/api/block/getTreeStat", {...statRequest, includeEmbed: true}, (embedResponse) => {
-                    if (!docInfoElement.isConnected ||
-                        window.siyuan.menus.menu.element.getAttribute("data-name") !== Constants.MENU_BREADCRUMB_MORE) {
-                        return;
+                        type: "readonly",
+                        // 不能换行，否则移动端间距过大
+                        label: genDocumentStatLabel(response.data.stat),
+                    }).element;
+                    window.siyuan.menus.menu.append(docInfoElement);
+                    if (response.data.containsEmbed) {
+                        fetchPost("/api/block/getTreeStat", {...statRequest, includeEmbed: true}, (embedResponse) => {
+                            if (!docInfoElement.isConnected ||
+                                window.siyuan.menus.menu.element.getAttribute("data-name") !== Constants.MENU_BREADCRUMB_MORE) {
+                                return;
+                            }
+                            docInfoElement.querySelector(".b3-menu__label").innerHTML = genDocumentStatLabel(
+                                embedResponse.data.stat,
+                                embedResponse.data.statWithEmbed,
+                                embedResponse.data.embedStat
+                            );
+                        });
                     }
-                    docInfoElement.querySelector(".b3-menu__label").innerHTML = genDocumentStatLabel(
-                        embedResponse.data.stat,
-                        embedResponse.data.statWithEmbed,
-                        embedResponse.data.embedStat
-                    );
+                    /// #if MOBILE
+                    session.show(() => window.siyuan.menus.menu.fullscreen("all", restoreKeyboard));
+                    /// #else
+                    session.show(() => window.siyuan.menus.menu.popup(position));
+                    /// #endif
+                    const popoverElement = hasTopClosestByClassName(protyle.element, "block__popover", true);
+                    window.siyuan.menus.menu.element.setAttribute("data-from", popoverElement ? popoverElement.dataset.level + "popover" : "app");
                 });
-            }
-            /// #if MOBILE
-            window.siyuan.menus.menu.fullscreen();
-            /// #else
-            window.siyuan.menus.menu.popup(position);
-            /// #endif
-            const popoverElement = hasTopClosestByClassName(protyle.element, "block__popover", true);
-            window.siyuan.menus.menu.element.setAttribute("data-from", popoverElement ? popoverElement.dataset.level + "popover" : "app");
+
+            },
         });
     }
 
@@ -1155,7 +1256,7 @@ ${padHTML}
             // 闪卡面包屑不能显示答案
             excludeTypes.push("NodeTextMark-mark");
         }
-        const breadcrumbParam: Record<string, any> = {id, excludeTypes, notebook: protyle.notebookId};
+        const breadcrumbParam = {id, excludeTypes, notebook: protyle.notebookId};
         // 等待当前块的创建事务完成，并丢弃切换文档或选择位置后过期的读取。
         const isCurrent = () => requestID === this.renderRequestID && rootID === protyle.block.rootID &&
             blockElement.isConnected;

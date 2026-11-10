@@ -1,18 +1,6 @@
-// SiYuan - From thought to insight, with agents
+// SiYuan - https://github.com/siyuan-note/siyuan
 // Copyright (c) 2020-present, b3log.org
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU Affero General Public License for more details.
-//
-// You should have received a copy of the GNU Affero General Public License
-// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+// SPDX-License-Identifier: AGPL-3.0-or-later
 
 package tools
 
@@ -34,7 +22,7 @@ var AttrTool = &Tool{
 			"action": {Type: "string", Description: "Operation", Enum: []string{"get", "set", "batch-get"}},
 			"id":     {Type: "string", Description: "Block ID"},
 			"ids":    {Type: "string", Description: "Comma-separated block IDs (for batch-get)"},
-			"attrs":  {Type: "object", Description: "Attribute key-value pairs (for set).\nCommon attributes:\n- icon: emoji hex codepoint like \"1f4ca\", emoji character like \"📊\", custom image path like \"1/b3log.png\", network image URL like \"https://example.com/icon.png\", or dynamic icon URL like \"api/icon/getDynamicIcon?type=8&color=%23d23f31&content=SiYuan&id=xxx\"\n- title-img: CSS format like 'background-image:url(\"assets/example.jpg\")', NOT a bare asset path\n- tags: comma-separated tag names"},
+			"attrs":  {Type: "object", Description: "Attribute key-value pairs (for set). Values must be strings or null; null and empty strings delete attributes.\nCommon attributes:\n- icon: emoji hex codepoint like \"1f4ca\", emoji character like \"📊\", custom image path like \"1/b3log.png\", network image URL like \"https://example.com/icon.png\", or dynamic icon URL like \"api/icon/getDynamicIcon?type=8&color=%23d23f31&content=SiYuan&id=xxx\"\n- title-img: CSS format like 'background-image:url(\"assets/example.jpg\")', NOT a bare asset path\n- tags: comma-separated tag names"},
 		},
 		Required: []string{"action"},
 	},
@@ -73,9 +61,9 @@ func attrGet(args map[string]any) (CallToolResult, error) {
 	}
 
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("Attributes for %s:\n\n", id))
+	fmt.Fprintf(&sb, "Attributes for %s:\n\n", id)
 	for k, v := range attrs {
-		sb.WriteString(fmt.Sprintf("- %s: %s\n", k, v))
+		fmt.Fprintf(&sb, "- %s: %s\n", k, v)
 	}
 	return CallToolResult{Content: []ContentItem{{Type: "text", Text: sb.String()}}}, nil
 }
@@ -91,9 +79,9 @@ func attrSet(args map[string]any) (CallToolResult, error) {
 		return CallToolResult{Content: []ContentItem{{Type: "text", Text: "attrs (key-value object) is required"}}, IsError: true}, nil
 	}
 
-	nameValues := make(map[string]string, len(attrsArg))
-	for k, v := range attrsArg {
-		nameValues[k] = fmt.Sprintf("%v", v)
+	nameValues, err := parseAttrValues(attrsArg)
+	if err != nil {
+		return CallToolResult{Content: []ContentItem{{Type: "text", Text: err.Error()}}, IsError: true}, nil
 	}
 
 	if err := model.SetBlockAttrs(id, nameValues); err != nil {
@@ -102,6 +90,21 @@ func attrSet(args map[string]any) (CallToolResult, error) {
 
 	util.PushReloadFiletree()
 	return CallToolResult{Content: []ContentItem{{Type: "text", Text: "attributes set for: " + id}}}, nil
+}
+
+func parseAttrValues(attrs map[string]any) (map[string]string, error) {
+	nameValues := make(map[string]string, len(attrs))
+	for name, value := range attrs {
+		switch typed := value.(type) {
+		case nil:
+			nameValues[name] = ""
+		case string:
+			nameValues[name] = typed
+		default:
+			return nil, fmt.Errorf("attr %q must be a string or null (got %T)", name, value)
+		}
+	}
+	return nameValues, nil
 }
 
 func attrBatchGet(args map[string]any) (CallToolResult, error) {
@@ -120,11 +123,11 @@ func attrBatchGet(args map[string]any) (CallToolResult, error) {
 	}
 
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("Batch attributes (%d blocks):\n\n", len(attrs)))
+	fmt.Fprintf(&sb, "Batch attributes (%d blocks):\n\n", len(attrs))
 	for id, kv := range attrs {
-		sb.WriteString(fmt.Sprintf("--- %s ---\n", id))
+		fmt.Fprintf(&sb, "--- %s ---\n", id)
 		for k, v := range kv {
-			sb.WriteString(fmt.Sprintf("- %s: %s\n", k, v))
+			fmt.Fprintf(&sb, "- %s: %s\n", k, v)
 		}
 	}
 	return CallToolResult{Content: []ContentItem{{Type: "text", Text: sb.String()}}}, nil

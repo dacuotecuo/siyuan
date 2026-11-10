@@ -1,18 +1,6 @@
-// SiYuan - From thought to insight, with agents
+// SiYuan - https://github.com/siyuan-note/siyuan
 // Copyright (c) 2020-present, b3log.org
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU Affero General Public License for more details.
-//
-// You should have received a copy of the GNU Affero General Public License
-// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+// SPDX-License-Identifier: AGPL-3.0-or-later
 
 package model
 
@@ -39,6 +27,51 @@ import (
 	"github.com/siyuan-note/siyuan/kernel/util"
 )
 
+func TestRemoveAssetThumbnail(t *testing.T) {
+	originalDataDir, originalTempDir := util.DataDir, util.TempDir
+	t.Cleanup(func() { util.DataDir, util.TempDir = originalDataDir, originalTempDir })
+	root := filepath.Join(t.TempDir(), "assets", "workspace")
+	util.DataDir = filepath.Join(root, "data")
+	util.TempDir = filepath.Join(root, "temp")
+	for _, test := range []struct {
+		name      string
+		source    string
+		thumbnail string
+		remove    bool
+	}{
+		{"global", "assets/photo.png", "assets/photo.png", true},
+		{"uppercase", "assets/Photo.JPG", "assets/Photo.JPG", true},
+		{"nested", "assets/nested/assets/photo.jpeg", "assets/nested/assets/photo.jpeg", true},
+		{"notebook", "20260101120000-abc1234/assets/photo.png", "assets/photo.png", true},
+		{"document", "20260101120000-abc1234/20260101120001-def5678/assets/photo.png", "assets/photo.png", true},
+		{"unsupported", "assets/photo.txt", "assets/photo.txt", false},
+		{"outside", "../assets/photo.png", "assets/photo.png", false},
+		{"nonasset", "storage/assets/photo.png", "assets/photo.png", false},
+		{"similar directory", "otherassets/photo.png", "assets/photo.png", false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			thumbnailPath := filepath.Join(util.TempDir, "thumbnails", filepath.FromSlash(test.thumbnail))
+			if err := os.MkdirAll(filepath.Dir(thumbnailPath), 0755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(thumbnailPath, []byte("cached image"), 0644); err != nil {
+				t.Fatal(err)
+			}
+			assetAbsPath := filepath.Join(util.DataDir, filepath.FromSlash(test.source))
+			removeAssetThumbnail(assetAbsPath)
+			_, err := os.Stat(thumbnailPath)
+			if test.remove {
+				if !os.IsNotExist(err) {
+					t.Fatalf("thumbnail should be removed: %v", err)
+				}
+				removeAssetThumbnail(assetAbsPath)
+			} else if err != nil {
+				t.Fatalf("unrelated thumbnail should be preserved: %v", err)
+			}
+		})
+	}
+}
+
 func TestGenerateImageDoesNotRequireDocument(t *testing.T) {
 	var source bytes.Buffer
 	if err := png.Encode(&source, image.NewRGBA(image.Rect(0, 0, 2, 2))); err != nil {
@@ -60,7 +93,7 @@ func TestGenerateImageDoesNotRequireDocument(t *testing.T) {
 	}}
 	ai.ImageGeneration.ModelID = modelID
 	Conf = NewAppConf()
-	Conf.AI = ai
+	Conf.AI.Store(ai)
 
 	result, err := GenerateImage(context.Background(), GenerateImageRequest{Prompt: "draw", OutputFormat: "png"})
 	if err != nil {
@@ -87,7 +120,7 @@ func TestImageGenerationProviderErrorsPreventAutomaticRetry(t *testing.T) {
 	}}
 	ai.ImageGeneration.ModelID = generationModelID
 	Conf = NewAppConf()
-	Conf.AI = ai
+	Conf.AI.Store(ai)
 
 	if _, err := GenerateImage(context.Background(), GenerateImageRequest{Prompt: "draw", OutputFormat: "png"}); !IsImageExecutionUnknown(err) {
 		t.Fatalf("image provider error should prevent automatic retry: %v", err)
@@ -111,7 +144,7 @@ func TestClearWorkspaceTempRemovesImageOperations(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	clearWorkspaceTemp(false)
+	clearWorkspaceTemp("")
 	if _, err := os.Stat(operationDir); !os.IsNotExist(err) {
 		t.Fatalf("image operation directory was not removed: %v", err)
 	}
@@ -126,7 +159,7 @@ func TestClearWorkspaceTempPreservesInstallPackages(t *testing.T) {
 	util.DataDir = filepath.Join(root, "data")
 	util.TempDir = filepath.Join(root, "temp")
 	util.WorkspaceDir = root
-	installPkgPath := filepath.Join(util.TempDir, "install", "siyuan-test-win.exe")
+	installPkgPath := filepath.Join(util.TempDir, "install", "siyuan-0.0.1-win.exe")
 	if err := os.MkdirAll(filepath.Dir(installPkgPath), 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -138,11 +171,11 @@ func TestClearWorkspaceTempPreservesInstallPackages(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	clearWorkspaceTemp(true)
+	clearWorkspaceTemp(installPkgPath)
 	if _, err := os.Stat(installPkgPath); err != nil {
 		t.Fatalf("install package should be preserved during update: %v", err)
 	}
-	clearWorkspaceTemp(false)
+	clearWorkspaceTemp("")
 	if _, err := os.Stat(installPkgPath); !os.IsNotExist(err) {
 		t.Fatalf("old install package should be removed during normal exit: %v", err)
 	}
@@ -208,7 +241,7 @@ func TestUnusedAssetsExcludesAgentSessionImages(t *testing.T) {
 	util.WorkspaceDir = workspaceDir
 	util.DataDir = filepath.Join(workspaceDir, "data")
 	Conf = NewAppConf()
-	Conf.FileTree = conf.NewFileTree()
+	Conf.FileTree.Store(conf.NewFileTree())
 	assetsDir := filepath.Join(util.DataDir, "assets")
 	if err := os.MkdirAll(assetsDir, 0755); err != nil {
 		t.Fatal(err)
@@ -231,7 +264,10 @@ func TestUnusedAssetsExcludesAgentSessionImages(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	items := UnusedAssets(false)
+	items, err := UnusedAssets(false)
+	if err != nil {
+		t.Fatal(err)
+	}
 	unused := map[string]bool{}
 	for _, item := range items {
 		unused[item.Item] = true
@@ -612,7 +648,7 @@ func TestAllAssetAbsPathsWithAssetsInWorkspacePath(t *testing.T) {
 
 	util.DataDir = filepath.Join(t.TempDir(), "assets", "workspace", "data")
 	Conf = NewAppConf()
-	Conf.FileTree = conf.NewFileTree()
+	Conf.FileTree.Store(conf.NewFileTree())
 	globalAssetPath := filepath.Join(util.DataDir, "assets", "nested", "assets", "image.png")
 	if err := os.MkdirAll(filepath.Dir(globalAssetPath), 0755); err != nil {
 		t.Fatal(err)

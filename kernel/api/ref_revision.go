@@ -1,18 +1,6 @@
-// SiYuan - From thought to insight, with agents
+// SiYuan - https://github.com/siyuan-note/siyuan
 // Copyright (c) 2020-present, b3log.org
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU Affero General Public License for more details.
-//
-// You should have received a copy of the GNU Affero General Public License
-// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+// SPDX-License-Identifier: AGPL-3.0-or-later
 
 package api
 
@@ -31,6 +19,8 @@ type backlinkPathResponse struct {
 }
 
 type backlinkContextResponse struct {
+	Type                 string                               `json:"type,omitempty"`
+	ReferenceBlockID     string                               `json:"referenceBlockID,omitempty"`
 	AttributeViewTargets []*model.BacklinkAttributeViewTarget `json:"attributeViewTargets,omitempty"`
 	ID                   string                               `json:"id"`
 	DOM                  string                               `json:"dom"`
@@ -117,6 +107,8 @@ func newBacklinkContextResponses(backlinks []*model.Backlink) (ret []*backlinkCo
 	ret = make([]*backlinkContextResponse, 0, len(backlinks))
 	for _, item := range backlinks {
 		response := &backlinkContextResponse{
+			Type:                 item.Type,
+			ReferenceBlockID:     item.ReferenceBlockID,
 			AttributeViewTargets: item.AttributeViewTargets,
 			ID:                   item.ID,
 			DOM:                  item.DOM,
@@ -124,12 +116,14 @@ func newBacklinkContextResponses(backlinks []*model.Backlink) (ret []*backlinkCo
 			Expand:               item.Expand,
 		}
 		response.Revision = hashBacklinkRevision("bci1:", struct {
+			Type                 string
+			ReferenceBlockID     string
 			AttributeViewTargets []*model.BacklinkAttributeViewTarget
 			ID                   string
 			DOM                  string
 			BlockPaths           []*model.BlockPath
 			Expand               bool
-		}{response.AttributeViewTargets, response.ID, response.DOM, response.BlockPaths, response.Expand})
+		}{response.Type, response.ReferenceBlockID, response.AttributeViewTargets, response.ID, response.DOM, response.BlockPaths, response.Expand})
 		ret = append(ret, response)
 	}
 	return

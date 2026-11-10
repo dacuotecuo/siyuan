@@ -1,18 +1,6 @@
-// SiYuan - From thought to insight, with agents
+// SiYuan - https://github.com/siyuan-note/siyuan
 // Copyright (c) 2020-present, b3log.org
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU Affero General Public License for more details.
-//
-// You should have received a copy of the GNU Affero General Public License
-// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+// SPDX-License-Identifier: AGPL-3.0-or-later
 
 package api
 
@@ -92,5 +80,29 @@ func TestNewBacklinkResponses(t *testing.T) {
 	contextResponses := newBacklinkContextResponses(contexts)
 	if len(contextResponses) != 1 || contextResponses[0].ID != contexts[0].ID || contextResponses[0].Revision == "" {
 		t.Fatalf("expected context ID and revision, got %#v", contextResponses)
+	}
+}
+
+func TestBacklinkContextRevisionIncludesReferenceBlock(t *testing.T) {
+	context := &model.Backlink{ID: "parent", DOM: "unchanged"}
+	before := newBacklinkContextResponses([]*model.Backlink{context})[0].Revision
+	context.ReferenceBlockID = "reference"
+	response := newBacklinkContextResponses([]*model.Backlink{context})[0]
+	if response.ReferenceBlockID != context.ReferenceBlockID || response.Revision == before {
+		t.Fatal("reference metadata must be returned and invalidate the context revision")
+	}
+	context.ReferenceBlockID = ""
+	if newBacklinkContextResponses([]*model.Backlink{context})[0].Revision != before {
+		t.Fatal("removing the hidden reference must restore the original revision")
+	}
+}
+
+func TestBacklinkContextRevisionIncludesBlockType(t *testing.T) {
+	context := &model.Backlink{ID: "source", DOM: "unchanged", Type: "NodeParagraph"}
+	before := newBacklinkContextResponses([]*model.Backlink{context})[0].Revision
+	context.Type = "NodeAttributeView"
+	response := newBacklinkContextResponses([]*model.Backlink{context})[0]
+	if response.Type != context.Type || response.Revision == before {
+		t.Fatal("block type must be returned and invalidate the context revision")
 	}
 }

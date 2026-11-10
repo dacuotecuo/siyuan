@@ -1,18 +1,6 @@
-// SiYuan - From thought to insight, with agents
+// SiYuan - https://github.com/siyuan-note/siyuan
 // Copyright (c) 2020-present, b3log.org
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU Affero General Public License for more details.
-//
-// You should have received a copy of the GNU Affero General Public License
-// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+// SPDX-License-Identifier: AGPL-3.0-or-later
 
 package util
 
@@ -28,6 +16,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/88250/gulu"
@@ -110,16 +99,25 @@ func GetMimeTypeByPath(filePath string) (m *mimetype.MIME, ok bool) {
 	return
 }
 
+// IsSymlinkPath 判断现有路径是否为符号链接或目录联接。
 func IsSymlinkPath(absPath string) bool {
 	fi, err := os.Lstat(absPath)
 	if err != nil {
 		return false
 	}
-	return 0 != fi.Mode()&os.ModeSymlink
+	return isLinkFileInfo(fi)
 }
 
+// IsSystemMetadataFile 判断是否为操作系统自动生成的元数据文件（如 macOS 的 .DS_Store），
+// 这类文件不属于业务数据，判空与清理时应忽略
+func IsSystemMetadataFile(name string) bool {
+	return name == ".DS_Store"
+}
+
+// IsEmptyDir 判断目录是否为空，忽略系统元数据文件（如 .DS_Store）
 func IsEmptyDir(p string) bool {
-	if !gulu.File.IsDir(p) {
+	info, err := os.Lstat(p)
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
 		return false
 	}
 
@@ -127,11 +125,59 @@ func IsEmptyDir(p string) bool {
 	if err != nil {
 		return false
 	}
-	return 1 > len(files)
+	for _, file := range files {
+		if !file.Type().IsRegular() || !IsSystemMetadataFile(file.Name()) {
+			return false
+		}
+	}
+	return true
 }
 
+// RemoveEmptyDir 删除仅含系统元数据文件（如 .DS_Store）的目录；若目录仍含业务文件则保留不动
+func RemoveEmptyDir(p string) (err error) {
+	info, err := os.Lstat(p)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return nil
+	}
+	entries, err := os.ReadDir(p)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return
+	}
+	for _, entry := range entries {
+		if !entry.Type().IsRegular() || !IsSystemMetadataFile(entry.Name()) {
+			return nil
+		}
+	}
+	for _, entry := range entries {
+		if err = os.Remove(filepath.Join(p, entry.Name())); err != nil && !os.IsNotExist(err) {
+			return
+		}
+	}
+	if err = os.Remove(p); os.IsNotExist(err) {
+		return nil
+	}
+	return
+}
+
+// IsSymlink 判断目录条目是否为符号链接或目录联接。
 func IsSymlink(dir fs.DirEntry) bool {
-	return dir.Type() == fs.ModeSymlink
+	if dir.Type()&fs.ModeSymlink != 0 {
+		return true
+	}
+	if dir.Type()&fs.ModeIrregular == 0 {
+		return false
+	}
+	info, err := dir.Info()
+	return err == nil && isLinkFileInfo(info)
 }
 
 func IsDirRegularOrSymlink(dir fs.DirEntry) bool {
@@ -215,6 +261,33 @@ func LastID(p string) (name, id string) {
 
 func IsValidUploadFileName(name string) bool {
 	return name == FilterUploadFileName(name)
+}
+
+// IsValidExistingEmojiFileName 保留已有表情名中的合法替换字符，新上传文件仍按命名规则清洗。
+func IsValidExistingEmojiFileName(name string) bool {
+	return utf8.ValidString(name) && strings.ReplaceAll(name, "\ufffd", "_") == FilterUploadFileName(name)
+}
+
+// RenameEmojiFile 在源和目标文件锁内迁移表情，目标已存在时保留两者，不覆盖文件或合并目录。
+func RenameEmojiFile(oldPath, newPath string) error {
+	oldPath, newPath = filepath.Clean(oldPath), filepath.Clean(newPath)
+	if oldPath == newPath {
+		return nil
+	}
+	first, second := oldPath, newPath
+	if first > second {
+		first, second = second, first
+	}
+	filelock.Lock(first)
+	defer filelock.Unlock(first)
+	filelock.Lock(second)
+	defer filelock.Unlock(second)
+	if _, err := os.Lstat(newPath); err == nil {
+		return &os.LinkError{Op: "rename", Old: oldPath, New: newPath, Err: os.ErrExist}
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	return os.Rename(oldPath, newPath)
 }
 
 func IsNetworkIconURL(icon string) bool {
@@ -340,6 +413,8 @@ func FilterUploadFileName(name string) string {
 	return ret
 }
 
+var pdfAnnoPngPattern = regexp.MustCompile(`-{0,1}P{0,1}[0-9]{0,4}-{0,1}[0-9]{1,3}-[0-9]{14}-[0-9a-zA-Z]{7}\.png$`)
+
 func TruncateLenFileName(name string) (ret string) {
 	// 插入资源文件时文件名长度最大限制 189 字节 https://github.com/siyuan-note/siyuan/issues/7099
 	ext := filepath.Ext(name)
@@ -353,9 +428,7 @@ func TruncateLenFileName(name string) (ret string) {
 		// PNG 图片可能是 PDF 标注的截图，包含页面和旋转角度（name--P1--270-id.png），所以允许的长度更短一些
 		// https://github.com/siyuan-note/siyuan/pull/16714#issuecomment-3737987302
 
-		pdfAnnoPngPattern := "-{0,1}P{0,1}[0-9]{0,4}-{0,1}[0-9]{1,3}-[0-9]{14}-[0-9a-zA-Z]{7}\\.png$"
-		regx := regexp.MustCompile(pdfAnnoPngPattern)
-		pdfAnnoPngPart = regx.FindString(name)
+		pdfAnnoPngPart = pdfAnnoPngPattern.FindString(name)
 		if "" != pdfAnnoPngPart {
 			maxLen -= len(pdfAnnoPngPart) + len(".png")
 			name = strings.TrimSuffix(name, pdfAnnoPngPart)
@@ -408,7 +481,17 @@ func FilterFileName(name string) string {
 	name = strings.ReplaceAll(name, "<", "_")
 	name = strings.ReplaceAll(name, ">", "_")
 	name = strings.ReplaceAll(name, "|", "_")
-	name = RemoveInvalid(name) // Remove invisible characters from file names when uploading assets https://github.com/siyuan-note/siyuan/issues/11683
+	// 文件名保留私用区字符，移除不可打印字符，并替换损坏编码。
+	name = gulu.Str.RemoveZeroWidthCharacters(strings.ReplaceAll(name, "\u00a0", " "))
+	name = strings.Map(func(r rune) rune {
+		if r == utf8.RuneError {
+			return '_'
+		}
+		if unicode.IsPrint(r) || unicode.Is(unicode.Co, r) {
+			return r
+		}
+		return -1
+	}, name)
 	name = strings.TrimSpace(name)
 	name = strings.TrimSuffix(name, ".")
 	return name

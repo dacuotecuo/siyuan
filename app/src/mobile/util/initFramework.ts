@@ -1,14 +1,18 @@
 import {Constants} from "../../constants";
+import {setTitleAutoDirection} from "../../protyle/render/autoDirection";
+import {openStandaloneDatabaseItemByURI} from "../../protyle/render/av/openStandaloneDatabaseItem";
 import {closeModel, closePanel} from "./closePanel";
 import {getCurrentEditor, openMobileFileById} from "../editor";
 import {openMobileOnboarding} from "../../onboarding";
-import {validateName} from "../../editor/rename";
+import {truncateDocumentTitle, validateName} from "../../editor/rename";
 import {getEventName, isDisabledFeature, isInMobileApp} from "../../protyle/util/compatibility";
 import {fetchPost} from "../../util/fetch";
 import {setInlineStyle} from "../../util/assets";
 import {renderSnippet} from "../../config/util/snippets";
 import {setEmpty} from "./setEmpty";
-import {getOpenNotebookCount, parseUriInfo} from "../../util/pathName";
+import {finishMobileStartup} from "./startup";
+import {getOpenNotebookCount, parseSiYuanUriInfo, parseUriInfo} from "../../util/pathName";
+import {processMobileSystemUri} from "./systemUri";
 import {popMenu} from "../menu";
 import {MobileFiles} from "../dock/MobileFiles";
 import {MobileOutline} from "../dock/MobileOutline";
@@ -25,6 +29,7 @@ import {setTitle} from "../../util/processTitle";
 import {activateQueuedAVLocate, queueAVLocateRequest} from "../../protyle/render/av/locate";
 import {MobileTabs} from "../tabs/MobileTabs";
 import {initMobileBottomBar} from "./mobileBottomBar";
+import {initSidebarButtons, updateSidebarButtons} from "./sidebarButtons";
 import {initMobileBars} from "./mobileBars";
 import {openDock} from "../dock/util";
 import {
@@ -47,6 +52,9 @@ import {
 import {exitSiYuan} from "../../dialog/processSystem";
 import {enterDocumentFromTitle} from "../../protyle/header/titleEnter";
 
+// 侧栏首次使用前随布局选择默认功能，使用后保留当前页签。
+const activatedSidePanels = new WeakSet<HTMLElement>();
+
 const getDockTabElement = (type: string) => {
     return document.querySelector(`[data-type="${CSS.escape(`sidebar-${type}-tab`)}"]`) as HTMLElement;
 };
@@ -61,6 +69,9 @@ const getDockIdFromTabElement = (element: HTMLElement) => {
 };
 
 const getActiveDockId = (sidePanelElement: HTMLElement) => {
+    if (!activatedSidePanels.has(sidePanelElement)) {
+        return;
+    }
     const activeElement = sidePanelElement.firstElementChild.querySelector<HTMLElement>(
         "[data-type$='-tab'].toolbar__icon--active");
     return activeElement ? getDockIdFromTabElement(activeElement) : undefined;
@@ -132,8 +143,6 @@ export const renderMobileSidePanelLayout = (
     const pluginDockLayouts = getMobilePluginDockLayouts(pluginDockEntries);
     const resolvedConfig = normalizeMobileSidePanelConfig(
         config || getMobileSidePanelConfig(pluginDockLayouts), pluginDockLayouts);
-    getDockTabElement("agent").classList.toggle("fn__none",
-        window.siyuan.config.readonly || window.siyuan.isPublish || isDisabledFeature("ai"));
     const sidePanelElements = {
         left: document.getElementById("sidebar"),
         right: document.getElementById("sidebarRight"),
@@ -163,6 +172,8 @@ export const renderMobileSidePanelLayout = (
             if (!tabElement || !dockContentElement) {
                 return;
             }
+            tabElement.classList.toggle("fn__none", resolvedConfig.hidden.includes(type) ||
+                (type === "agent" && (window.siyuan.config.readonly || window.siyuan.isPublish || isDisabledFeature("ai"))));
             toolbarScrollElement.append(tabElement);
             contentElement.append(dockContentElement);
             sideDockIds[side].push(type);
@@ -180,6 +191,9 @@ export const renderMobileSidePanelLayout = (
             getDockContentElement(type).classList.toggle("fn__none", type !== activeDockId);
         });
         if (!activeDockId) {
+            if (sidePanelElement.style.transform === "translateX(0px)") {
+                closePanel();
+            }
             sidePanelElement.style.transform = "";
         }
     });
@@ -260,7 +274,7 @@ const initSidePanelTabs = (app: App, sidePanelElement: HTMLElement) => {
         } else {
             svgElement = hasTopClosestByTag(target, "svg") as HTMLElement;
         }
-        if (!svgElement) {
+        if (!svgElement || svgElement.classList.contains("fn__none")) {
             return;
         }
         const tabType = svgElement.getAttribute("data-type");
@@ -272,6 +286,7 @@ const initSidePanelTabs = (app: App, sidePanelElement: HTMLElement) => {
         if (!type) {
             return;
         }
+        activatedSidePanels.add(sidePanelElement);
         if (svgElement.classList.contains("toolbar__icon--active")) {
             if (isProgrammatic) {
                 updateDock(app, type, getDockContentElement(type));
@@ -302,6 +317,7 @@ export const initFramework = async (app: App, isStart: boolean) => {
     renderMobileSidePanelLayout(app);
     initSidePanelTabs(app, sidebarElement);
     initSidePanelTabs(app, sidebarRightElement);
+    initSidebarButtons();
     const sidebarRightExitElement = document.getElementById("sidebarRightExit");
     if (isInMobileApp() && sidebarRightExitElement) {
         sidebarRightExitElement.classList.remove("fn__none");
@@ -314,10 +330,12 @@ export const initFramework = async (app: App, isStart: boolean) => {
     window.addEventListener(MOBILE_SIDE_PANEL_CONFIG_CHANGE_EVENT, () => {
         renderMobileSidePanelLayout(app);
         updateOpenSidePanelDocks(app, [sidebarElement, sidebarRightElement]);
+        updateSidebarButtons();
     });
     window.addEventListener(MOBILE_PLUGIN_DOCKS_CHANGE_EVENT, () => {
         renderMobileSidePanelLayout(app);
         updateOpenSidePanelDocks(app, [sidebarElement, sidebarRightElement]);
+        updateSidebarButtons();
     });
     await Promise.all([inlineStyleReady, snippetReady]);
     window.siyuan.mobile.docks.file = new MobileFiles(app, getDockContentElement("file"));
@@ -354,12 +372,18 @@ export const initFramework = async (app: App, isStart: boolean) => {
     } else {
         await window.siyuan.mobile.tabs.removeMissingTabs();
     }
+    const systemURL = window.JSAndroid?.getBlockURL() || new URLSearchParams(window.location.search).get("url");
+    processMobileSystemUri(app, systemURL);
     if (getOpenNotebookCount() > 0) {
-        if (window.JSAndroid && window.openFileByURL(window.JSAndroid.getBlockURL())) {
+        if (window.JSAndroid && parseSiYuanUriInfo(systemURL) && window.openFileByURL(systemURL)) {
             return;
         }
         const info = parseUriInfo();
         if (info.id) {
+            if (openStandaloneDatabaseItemByURI(app, info)) {
+                finishMobileStartup();
+                return;
+            }
             if (info.avItemID) {
                 queueAVLocateRequest(info.id, {
                     itemID: info.avItemID,
@@ -369,7 +393,7 @@ export const initFramework = async (app: App, isStart: boolean) => {
             }
             openMobileFileById(app, info.id, info.avItemID ? [Constants.CB_GET_CONTEXT, Constants.CB_GET_ROOTSCROLL] :
                 (info.focus ? [Constants.CB_GET_ALL] : [Constants.CB_GET_HL, Constants.CB_GET_CONTEXT, Constants.CB_GET_ROOTSCROLL]),
-            undefined, undefined, info.avItemID ? (protyle) => activateQueuedAVLocate(protyle, info.id) : undefined);
+            info.avItemID ? undefined : "start", undefined, info.avItemID ? (protyle) => activateQueuedAVLocate(protyle, info.id) : undefined);
             return;
         }
         if (openMobileOnboarding(app)) {
@@ -382,17 +406,31 @@ export const initFramework = async (app: App, isStart: boolean) => {
         if (isStart && window.siyuan.config.fileTree.tabStartupMode === 2) {
             return;
         }
-        if (await window.siyuan.mobile.tabs.restore()) {
+        const tabs = window.siyuan.mobile.tabs;
+        if (await tabs.restore()) {
+            return;
+        }
+        const canRestoreLegacy = () => window.siyuan.mobile.tabs === tabs && tabs.canRestoreLegacyDocument();
+        if (!canRestoreLegacy()) {
             return;
         }
         const localDoc = window.siyuan.storage[Constants.LOCAL_DOCINFO];
         fetchPost("/api/block/checkBlockExist", {id: localDoc?.id}, existResponse => {
+            if (!canRestoreLegacy()) {
+                return;
+            }
             if (existResponse.data) {
                 openMobileFileById(app, localDoc.id, [Constants.CB_GET_SCROLL]);
             } else {
                 fetchPost("/api/block/getRecentUpdatedBlocks", {}, (response) => {
+                    if (!canRestoreLegacy()) {
+                        return;
+                    }
                     if (response.data.length !== 0) {
                         checkFold(response.data[0].id, (zoomIn) => {
+                            if (!canRestoreLegacy()) {
+                                return;
+                            }
                             openMobileFileById(app, response.data[0].id, zoomIn ? [Constants.CB_GET_ALL] : [Constants.CB_GET_CONTEXT, Constants.CB_GET_ROOTSCROLL]);
                         });
                     } else {
@@ -412,14 +450,21 @@ export const initFramework = async (app: App, isStart: boolean) => {
 
 const initEditorName = () => {
     const inputElement = document.getElementById("toolbarName") as HTMLInputElement;
+    setTitleAutoDirection(inputElement, window.siyuan.config.editor.autoDirection);
     let titleSavePromise: Promise<unknown> = Promise.resolve();
+    let titleSavedOnEnter: {rootID: string, value: string} | undefined;
+    let enteringDocument = false;
     const saveTitle = () => {
         if (inputElement.getAttribute("readonly") === "readonly") {
             return titleSavePromise;
         }
-        if (!validateName(inputElement.value)) {
-            inputElement.value = inputElement.value.substring(0, Constants.SIZE_TITLE);
-            return titleSavePromise;
+        if (!validateName(inputElement.value, undefined, true)) {
+            const original = inputElement.value;
+            inputElement.value = truncateDocumentTitle(inputElement.value);
+            if (inputElement.value === original ||
+                !validateName(inputElement.value, undefined, true)) {
+                return titleSavePromise;
+            }
         }
 
         titleSavePromise = fetchPost("/api/filetree/renameDoc", {
@@ -432,6 +477,12 @@ const initEditorName = () => {
     };
     inputElement.setAttribute("placeholder", window.siyuan.languages._kernel[16]);
     inputElement.addEventListener("blur", () => {
+        const skipSave = titleSavedOnEnter?.rootID === window.siyuan.mobile.editor?.protyle.block.rootID &&
+            titleSavedOnEnter.value === inputElement.value;
+        titleSavedOnEnter = undefined;
+        if (skipSave) {
+            return;
+        }
         void saveTitle();
     });
     inputElement.addEventListener("keydown", (event: KeyboardEvent) => {
@@ -445,10 +496,17 @@ const initEditorName = () => {
         const rootID = protyle.block.rootID;
         event.preventDefault();
         event.stopPropagation();
-        inputElement.blur();
-        enterDocumentFromTitle(protyle, {
-            beforeLoad: titleSavePromise,
+        if (enteringDocument) {
+            return;
+        }
+        enteringDocument = true;
+        const beforeLoad = saveTitle();
+        titleSavedOnEnter = {rootID, value: inputElement.value};
+        void enterDocumentFromTitle(protyle, {
+            beforeLoad,
             isValid: () => window.siyuan.mobile.editor?.protyle === protyle && protyle.block.rootID === rootID,
+        }).finally(() => {
+            enteringDocument = false;
         });
     });
 };

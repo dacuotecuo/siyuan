@@ -8,8 +8,10 @@ import {
     getMissingDragIds,
     getSameSuperBlockEdgeTarget,
     getSuperBlockResizeDropTarget,
+    getTabsContentDropTarget,
     getTopListDragTarget,
     isAttributeViewTitleTarget,
+    isCopyBlockDrag,
     isDragTargetInSource,
     isSameDragEditor,
     isSameSiblingMove,
@@ -19,6 +21,38 @@ import {
     stringifyBlockDragData,
     uniqueDragIds
 } from "./dragDocument";
+
+describe("lightweight editor block dragging", () => {
+    const editor = {closest: (): Element => null} as unknown as Element;
+    const otherEditor = {closest: (): Element => null} as unknown as Element;
+    const fragment = {closest: (selector: string) =>
+        selector === ".protyle-lite-fragment" ? {} : null} as unknown as Element;
+
+    it("copies temporary cell blocks into the outer document", () => {
+        assert.equal(isCopyBlockDrag(false, false, editor, fragment), true);
+        assert.equal(isCopyBlockDrag(false, true, editor, fragment), true);
+    });
+
+    it("moves within a cell and copies between fragments", () => {
+        assert.equal(isCopyBlockDrag(true, false, fragment, fragment), false);
+        assert.equal(isCopyBlockDrag(true, false, editor, fragment), true);
+    });
+
+    it("moves local blocks and preserves explicit copies", () => {
+        assert.equal(isCopyBlockDrag(true, false, editor, editor), false);
+        assert.equal(isCopyBlockDrag(true, true, editor, editor), true);
+    });
+
+    it("copies external and unavailable sources into lightweight editors", () => {
+        assert.equal(isCopyBlockDrag(true, false, editor, otherEditor), true);
+        assert.equal(isCopyBlockDrag(true, false, editor), true);
+    });
+
+    it("preserves normal editor move semantics", () => {
+        assert.equal(isCopyBlockDrag(false, false, editor, otherEditor), false);
+        assert.equal(isCopyBlockDrag(false, true, editor, otherEditor), true);
+    });
+});
 
 const createClassElement = (classNames: string[], parentElement: Element = null, dataID = "") => ({
     nodeType: 1,
@@ -73,6 +107,44 @@ const createSuperBlock = (layout = "col") => {
     children.push({hasAttribute: () => false, parentElement: superBlock} as unknown as Element);
     return {blocks, superBlock};
 };
+
+describe("getTabsContentDropTarget", () => {
+    const first = {} as HTMLElement;
+    const last = {} as HTMLElement;
+    const content = {querySelectorAll: () => [first, last]} as unknown as HTMLElement;
+    const item = {
+        getAttribute: (name: string) => name === "data-type" ? "NodeTabItem" : null,
+        querySelector: () => content,
+    } as unknown as HTMLElement;
+    const tabs = {
+        getAttribute: (name: string) => name === "data-type" ? "NodeTabs" : null,
+        querySelector: () => item,
+    } as unknown as HTMLElement;
+    const header = {parentElement: tabs} as HTMLElement;
+    const headerHit = {closest: () => header} as unknown as HTMLElement;
+    const bodyHit = {closest: (): null => null} as unknown as HTMLElement;
+
+    it("inserts at the start of the active tab when hovering over its header", () => {
+        assert.equal(getTabsContentDropTarget(tabs, headerHit), first);
+    });
+
+    it("uses the last body block when hovering over a tab item", () => {
+        assert.equal(getTabsContentDropTarget(item, bodyHit), last);
+    });
+
+    it("keeps the tab container as an outer drop target outside the header", () => {
+        assert.equal(getTabsContentDropTarget(tabs, bodyHit), tabs);
+    });
+
+    it("uses an empty tab body as the drop target", () => {
+        const emptyContent = {querySelectorAll: (): HTMLElement[] => []} as unknown as HTMLElement;
+        const emptyItem = {
+            getAttribute: item.getAttribute.bind(item),
+            querySelector: () => emptyContent,
+        } as unknown as HTMLElement;
+        assert.equal(getTabsContentDropTarget(emptyItem, bodyHit), emptyContent);
+    });
+});
 
 describe("isSameDragEditor", () => {
     it("does not treat a nested Protyle as the target editor", () => {
@@ -368,15 +440,31 @@ describe("getTopListDragTarget", () => {
 
 describe("shouldKeepListBlockDragTarget", () => {
     it("keeps both complete lists when forming a horizontal super block", () => {
-        assert.equal(shouldKeepListBlockDragTarget("nodelist", true, false), true);
+        for (const side of ["left", "right"]) {
+            assert.equal(shouldKeepListBlockDragTarget("nodelist", [`dragover__${side}`], false), true);
+        }
     });
 
     it("allows a list block to expand into list items for a regular list drop", () => {
-        assert.equal(shouldKeepListBlockDragTarget("nodelist", false, false), false);
+        for (const position of ["top--sibling", "bottom--sibling", "bottom--child"]) {
+            assert.equal(shouldKeepListBlockDragTarget("nodelist", [`dragover__${position}`], false), false);
+        }
     });
 
     it("keeps a list block when reordering columns", () => {
-        assert.equal(shouldKeepListBlockDragTarget("nodelist", false, true), true);
+        assert.equal(shouldKeepListBlockDragTarget("nodelist", [], true), true);
+    });
+
+    it("keeps complete lists at upper and lower block boundaries", () => {
+        for (const side of ["top", "bottom"]) {
+            assert.equal(shouldKeepListBlockDragTarget("nodelist", ["list", `dragover__${side}`], false), true);
+        }
+    });
+
+    it("preserves list item source semantics at list boundaries", () => {
+        for (const side of ["top", "bottom", "left", "right"]) {
+            assert.equal(shouldKeepListBlockDragTarget("nodelistitem", [`dragover__${side}`], false), false);
+        }
     });
 });
 

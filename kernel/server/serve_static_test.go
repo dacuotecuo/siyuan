@@ -1,18 +1,6 @@
-// SiYuan - From thought to insight, with agents
+// SiYuan - https://github.com/siyuan-note/siyuan
 // Copyright (c) 2020-present, b3log.org
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU Affero General Public License for more details.
-//
-// You should have received a copy of the GNU Affero General Public License
-// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+// SPDX-License-Identifier: AGPL-3.0-or-later
 
 package server
 
@@ -30,6 +18,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/siyuan-note/siyuan/kernel/conf"
+	"github.com/siyuan-note/siyuan/kernel/internal/testutil"
 	"github.com/siyuan-note/siyuan/kernel/model"
 	"github.com/siyuan-note/siyuan/kernel/util"
 )
@@ -48,7 +37,7 @@ func TestCleanStaticRelativePath(t *testing.T) {
 
 func TestRegisterStaticFileHandlers(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-	root := t.TempDir()
+	root := testutil.PublicDataDir(t)
 	if err := os.MkdirAll(filepath.Join(root, "package"), 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -139,9 +128,34 @@ func TestGzipMiddlewareServesPrecompressedStaticFile(t *testing.T) {
 	}
 }
 
+func TestGzipMiddlewareImages(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	for _, extension := range []string{"png", "gif", "jpeg", "jpg", "webp", "avif", "HEIC", "heif", "svg"} {
+		t.Run(extension, func(t *testing.T) {
+			engine := gin.New()
+			engine.Use(gzipMiddleware())
+			content := strings.Repeat("image data", 1024)
+			engine.GET("/image."+extension, func(c *gin.Context) {
+				c.String(http.StatusOK, "%s", content)
+			})
+			request := httptest.NewRequest(http.MethodGet, "/image."+extension+"?style=thumb", nil)
+			request.Header.Set("Accept-Encoding", "gzip")
+			recorder := httptest.NewRecorder()
+			engine.ServeHTTP(recorder, request)
+			if extension == "svg" {
+				if recorder.Header().Get("Content-Encoding") != "gzip" {
+					t.Fatal("SVG should remain compressible")
+				}
+			} else if recorder.Header().Get("Content-Encoding") != "" || recorder.Body.String() != content {
+				t.Fatal("precompressed image should be served unchanged")
+			}
+		})
+	}
+}
+
 func TestStaticFileNestedSymlinkEscape(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-	root, outside := t.TempDir(), t.TempDir()
+	root, outside := testutil.PublicDataDir(t), testutil.PublicDataDir(t)
 	packagePath := filepath.Join(root, "package")
 	if err := os.MkdirAll(packagePath, 0755); err != nil {
 		t.Fatal(err)
@@ -238,7 +252,7 @@ func TestStaticFileSymlinkWorkspace(t *testing.T) {
 func TestWidgetResponseCacheControl(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	originalDataDir, originalConf := util.DataDir, model.Conf
-	util.DataDir = t.TempDir()
+	util.DataDir = testutil.PublicDataDir(t)
 	model.Conf = model.NewAppConf()
 	t.Cleanup(func() {
 		util.DataDir = originalDataDir
@@ -329,12 +343,15 @@ func TestLanguageResponseDisablesCache(t *testing.T) {
 func TestThemeResponseDisablesCache(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	originalAppearancePath, originalMode := util.AppearancePath, util.Mode
+	originalThemesPath := util.ThemesPath
 	util.AppearancePath, util.Mode = t.TempDir(), "prod"
+	util.ThemesPath = filepath.Join(t.TempDir(), "themes")
 	t.Cleanup(func() {
 		util.AppearancePath, util.Mode = originalAppearancePath, originalMode
+		util.ThemesPath = originalThemesPath
 	})
 
-	themeDir := filepath.Join(util.AppearancePath, "themes", "example", "style", "module")
+	themeDir := filepath.Join(util.ThemesPath, "example", "style", "module")
 	if err := os.MkdirAll(themeDir, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -362,7 +379,7 @@ func TestThemeResponseDisablesCache(t *testing.T) {
 func TestTemplatesAndExportRequireAdministrator(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	originalDataDir, originalTempDir := util.DataDir, util.TempDir
-	util.DataDir, util.TempDir = t.TempDir(), t.TempDir()
+	util.DataDir, util.TempDir = testutil.PublicDataDir(t), testutil.PublicDataDir(t)
 	t.Cleanup(func() {
 		util.DataDir, util.TempDir = originalDataDir, originalTempDir
 	})
@@ -411,7 +428,7 @@ func TestTemplatesAndExportRequireAdministrator(t *testing.T) {
 func TestSnippetPublishAccess(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	originalSnippetsPath := util.SnippetsPath
-	util.SnippetsPath = t.TempDir()
+	util.SnippetsPath = testutil.PublicDataDir(t)
 	t.Cleanup(func() {
 		util.SnippetsPath = originalSnippetsPath
 	})
@@ -457,9 +474,10 @@ func TestPluginPublishAccess(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	originalDataDir := util.DataDir
 	originalConf := model.Conf
-	util.DataDir = t.TempDir()
+	util.DataDir = testutil.PublicDataDir(t)
 	model.Conf = model.NewAppConf()
-	model.Conf.Bazaar = &conf.Bazaar{Trust: true}
+	model.Conf.Bazaar.Store(&conf.Bazaar{Trust: true})
+	model.Conf.Sync.Store(conf.NewSync())
 	t.Cleanup(func() {
 		util.DataDir = originalDataDir
 		model.Conf = originalConf

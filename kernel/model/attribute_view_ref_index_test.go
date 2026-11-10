@@ -1,18 +1,6 @@
-// SiYuan - From thought to insight, with agents
+// SiYuan - https://github.com/siyuan-note/siyuan
 // Copyright (c) 2020-present, b3log.org
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU Affero General Public License for more details.
-//
-// You should have received a copy of the GNU Affero General Public License
-// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+// SPDX-License-Identifier: AGPL-3.0-or-later
 
 package model
 
@@ -78,6 +66,14 @@ func TestAttributeViewRefCarrierTreesRequirePhysicalCarrier(t *testing.T) {
 	if trees := attributeViewRefCarrierTrees(attributeView, ""); 0 != len(trees) {
 		t.Fatalf("attribute view without a carrier produced index trees: %+v", trees)
 	}
+	originalPalette := av.LoadWorkspacePalette
+	av.LoadWorkspacePalette = func() ([]*av.AttributeViewCustomColor, []string) {
+		t.Fatal("reference index scheduling must not load the workspace palette")
+		return nil, nil
+	}
+	t.Cleanup(func() { av.LoadWorkspacePalette = originalPalette })
+	queueAttributeViewRefIndex(attributeView, "")
+	queueExternalAttributeViewRefIndexByRepoPath("/storage/av/" + attributeView + ".json")
 }
 
 func TestAttributeViewRichTextRefDefIDs(t *testing.T) {

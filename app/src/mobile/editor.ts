@@ -1,3 +1,4 @@
+import type {FileTreeGetDocRequestInput} from "../types/api";
 import {Protyle} from "../protyle";
 import {setEditor} from "./util/setEmpty";
 import {closePanel} from "./util/closePanel";
@@ -6,6 +7,7 @@ import {fetchPost} from "../util/fetch";
 import {onGet} from "../protyle/util/onGet";
 import {addLoading} from "../protyle/ui/initUI";
 import {highlightById, scrollCenter} from "../util/highlightById";
+import {resolveVisibleListMindmapBlock} from "../protyle/render/listMindmap/render";
 import {isInEmbedBlock} from "../protyle/util/hasClosest";
 import {setEditMode} from "../protyle/util/setEditMode";
 import {hideElements} from "../protyle/ui/hideElements";
@@ -17,12 +19,20 @@ import {getDocByScroll, saveScroll} from "../protyle/scroll/saveScroll";
 import {isEncryptedBox} from "../util/pathName";
 import {bindMobileBarsScroll, pauseMobileBarsScroll} from "./util/mobileBars";
 import {forEachPluginSubscriber} from "../plugin/EventBusCore";
-import {restoreMobileTopBarLayout, updateMobileTopBarLayout} from "./util/mobileTopBar";
+import {restoreMobileTopBarLayout} from "./util/mobileTopBar";
 import {stickyRow} from "../protyle/render/av/row";
 import {invalidateTrackedRanges} from "../protyle/util/trackedRange";
+import {getActiveMobileSecondaryEditor} from "./util/secondaryEditors";
+import {closeMobileEditorSheets} from "./util/MobileEditorDialog";
+import {invalidateMobileReferenceOpen} from "./util/openReference";
+import {clearMobileSearchHighlight} from "./menu/searchHighlight";
+import {closeAVCellEditor} from "../protyle/render/av/cellEditor";
+import {clearDatabaseRowNavigation} from "../protyle/render/av/databaseRowNavigation";
+import {prepareDatabaseAttributePanel} from "../protyle/render/av/attributePanel";
+import {closeMobileBottomBacklinkPanel, updateMobileBottomBacklinkPanel} from "./util/bottomBacklink";
 
 export const getCurrentEditor = () => {
-    return window.siyuan.mobile.popEditor || window.siyuan.mobile.editor;
+    return getActiveMobileSecondaryEditor() || window.siyuan.mobile.popEditor || window.siyuan.mobile.editor;
 };
 
 // 串行更新时间，避免快速切换文档时较早的关闭请求覆盖较新的打开状态。
@@ -64,14 +74,35 @@ export const loadMobileFileById = (app: App, id: string, action: TProtyleAction[
                                    afterOpen?: (protyle: IProtyle) => void, forceReload = false,
                                    isValid: () => boolean = () => true, signal?: AbortSignal,
                                    scrollAttr?: IScrollAttr, updateRecent = true,
-                                   onFailure?: (invalid?: boolean) => void) => {
+                                   onFailure?: (invalid?: boolean, editorUnchanged?: boolean) => void, keepPanels = false,
+                                   waitForDatabaseAttributes = false) => {
+    invalidateMobileReferenceOpen();
+    clearMobileSearchHighlight();
+    const closing = closeMobileEditorSheets() || closeMobileBottomBacklinkPanel();
+    if (closing) {
+        void closing.then(() => {
+            if (isValid() && !signal?.aborted) {
+                loadMobileFileById(app, id, action, scrollPosition, notebookId, afterOpen, forceReload,
+                    isValid, signal, scrollAttr, updateRecent, onFailure, keepPanels, waitForDatabaseAttributes);
+            } else {
+                onFailure?.(undefined, true);
+            }
+        }).catch(error => {
+            console.error(error);
+            onFailure?.(undefined, true);
+        });
+        return;
+    }
     let completed = false;
+    let titleHidden = false;
     const complete = (protyle: IProtyle) => {
         if (completed) {
             return;
         }
         completed = true;
-        updateMobileTopBarLayout();
+        clearDatabaseRowNavigation(protyle.element);
+        setEditor();
+        void updateMobileBottomBacklinkPanel(protyle).catch(error => console.error(error));
         bindMobileBarsScroll(protyle.contentElement, () => {
             // 面包屑位移后同步数据库吸顶位置，避免数据库使用上一帧的面包屑位置
             protyle.wysiwyg.element.querySelectorAll(".av[data-render='true']").forEach((item: HTMLElement) => {
@@ -82,18 +113,33 @@ export const loadMobileFileById = (app: App, id: string, action: TProtyleAction[
             void window.siyuan.mobile.docks.file?.selectOpenedFile(protyle.notebookId, protyle.path);
         }
         afterOpen?.(protyle);
+        const titleElement = document.getElementById("toolbarName") as HTMLInputElement;
+        if (isValid() && action.includes(Constants.CB_GET_OPENNEW) && !protyle.disabled &&
+            titleElement && !titleElement.readOnly && !titleElement.disabled) {
+            // 新建文档加载完成后聚焦标题，通过移动端焦点桥接唤起键盘。
+            protyle.contentElement.scrollTop = 0;
+            titleElement.focus({preventScroll: true});
+            titleElement.setSelectionRange(titleElement.value.length, titleElement.value.length);
+        }
     };
     const fail = (invalid = false) => {
         if (completed) {
             return;
         }
         completed = true;
-        onFailure?.(invalid);
+        if (titleHidden && isValid() && window.siyuan.mobile.editor?.protyle.wysiwyg.element.childElementCount > 0) {
+            setEditor();
+        }
+        if (isValid()) {
+            void updateMobileBottomBacklinkPanel().catch(error => console.error(error));
+        }
+        onFailure?.(invalid, !titleHidden);
     };
     if (!isValid()) {
         fail();
         return;
     }
+    closeAVCellEditor();
     const avPanelElement = document.querySelector(".av__panel");
     if (avPanelElement && !avPanelElement.classList.contains("fn__none")) {
         avPanelElement.dispatchEvent(new CustomEvent("click", {detail: "close"}));
@@ -112,9 +158,11 @@ export const loadMobileFileById = (app: App, id: string, action: TProtyleAction[
             }
         });
         const protyle = window.siyuan.mobile.editor.protyle;
+        const visibleMindmap = blockElement && resolveVisibleListMindmapBlock(blockElement);
         const shouldReload = forceReload ||
             (action.includes(Constants.CB_GET_ALL) && (!protyle.block.showAll || protyle.block.id !== id)) ||
-            blockElement?.clientHeight === 0;
+            (visibleMindmap === undefined ? blockElement?.clientHeight === 0 :
+                visibleMindmap ? visibleMindmap.scrollElement.clientHeight === 0 : false);
         if (blockElement && !shouldReload) {
             if (action.includes(Constants.CB_GET_HL)) {
                 highlightById(protyle, id, scrollPosition);
@@ -125,7 +173,9 @@ export const loadMobileFileById = (app: App, id: string, action: TProtyleAction[
                 protyle.block.id = protyle.block.rootID;
                 protyle.wysiwyg.element.setAttribute("data-doc-type", "NodeDocument");
             }
-            closePanel();
+            if (!keepPanels) {
+                closePanel();
+            }
             // 更新文档浏览时间
             const rootID = protyle.block.rootID;
             if (updateRecent) {
@@ -138,7 +188,7 @@ export const loadMobileFileById = (app: App, id: string, action: TProtyleAction[
     }
 
     const targetNotebookId = notebookId || window.siyuan.mobile.editor?.protyle?.notebookId;
-    const blockInfoParam: IObject = {id};
+    const blockInfoParam: {id: string; notebook?: string} = {id};
     if (isEncryptedBox(targetNotebookId)) {
         blockInfoParam.notebook = targetNotebookId;
     }
@@ -172,6 +222,7 @@ export const loadMobileFileById = (app: App, id: string, action: TProtyleAction[
             rootId: data.data.rootID,
             notebookId: data.data.box,
             scrollPosition,
+            scrollAttr,
             action: actionList,
             render: {
                 scroll: true,
@@ -195,20 +246,32 @@ export const loadMobileFileById = (app: App, id: string, action: TProtyleAction[
                 complete(editor.protyle);
             },
         };
+        const preserveContent = waitForDatabaseAttributes && window.siyuan.config.editor.databaseAttrShow &&
+            !!window.siyuan.mobile.editor?.protyle.databaseAttributePanel && !actionList.includes(Constants.CB_GET_SCROLL);
+        if (!preserveContent) {
+            setEditor(false);
+            titleHidden = true;
+        }
         if (window.siyuan.mobile.editor) {
-            invalidateTrackedRanges(window.siyuan.mobile.editor.protyle);
-            window.siyuan.mobile.editor.protyle.notebookId = data.data.box;
-            window.siyuan.mobile.editor.protyle.title.element.removeAttribute("data-render");
-            addLoading(window.siyuan.mobile.editor.protyle);
-            if (previousRootID !== data.data.rootID) {
-                window.siyuan.mobile.editor.protyle.wysiwyg.element.innerHTML = "";
+            const editor = window.siyuan.mobile.editor;
+            const prepareEditor = () => {
+                invalidateTrackedRanges(editor.protyle);
+                editor.protyle.notebookId = data.data.box;
+                editor.protyle.title.element.removeAttribute("data-render");
+            };
+            if (!preserveContent) {
+                prepareEditor();
+                addLoading(editor.protyle);
             }
+            // 保留正文直到新文档返回，跨文档切换时显式更新只读状态
+            const updateReadonly = previousRootID !== data.data.rootID ? true : undefined;
             const targetScrollAttr = scrollAttr || window.siyuan.storage[Constants.LOCAL_FILEPOSITION][data.data.rootID];
             if (actionList.includes(Constants.CB_GET_SCROLL) && targetScrollAttr) {
                 getDocByScroll({
                     protyle: window.siyuan.mobile.editor.protyle,
                     scrollAttr: targetScrollAttr,
                     mergedOptions: protyleOptions,
+                    updateReadonly,
                     signal,
                     fail,
                     isValid,
@@ -227,17 +290,17 @@ export const loadMobileFileById = (app: App, id: string, action: TProtyleAction[
                     }
                 });
             } else {
-                const getDocParam: IObject = {
+                const getDocParam: FileTreeGetDocRequestInput = {
                     id,
                     includeDocInfo: true,
                     size: actionList.includes(Constants.CB_GET_ALL) ? Constants.SIZE_GET_MAX : window.siyuan.config.editor.dynamicLoadBlocks,
                     mode: actionList.includes(Constants.CB_GET_CONTEXT) ? 3 : 0,
                 };
-                if (isEncryptedBox(window.siyuan.mobile.editor.protyle.notebookId)) {
-                    getDocParam.notebook = window.siyuan.mobile.editor.protyle.notebookId;
+                if (isEncryptedBox(data.data.box)) {
+                    getDocParam.notebook = data.data.box;
                 }
                 let getDocHandled = false;
-                void fetchPost("/api/filetree/getDoc", getDocParam, getResponse => {
+                void fetchPost("/api/filetree/getDoc", getDocParam, async getResponse => {
                     getDocHandled = true;
                     if (!isValid()) {
                         fail();
@@ -248,10 +311,22 @@ export const loadMobileFileById = (app: App, id: string, action: TProtyleAction[
                         return;
                     }
                     try {
+                        if (preserveContent) {
+                            const prepared = await prepareDatabaseAttributePanel(editor.protyle, id);
+                            if (!prepared || !isValid() || window.siyuan.mobile.editor !== editor) {
+                                fail();
+                                return;
+                            }
+                            prepared();
+                            prepareEditor();
+                            editor.protyle.undo.clear();
+                            titleHidden = true;
+                        }
                         onGet({
                             data: getResponse,
                             protyle: window.siyuan.mobile.editor.protyle,
                             action: actionList,
+                            updateReadonly,
                             scrollPosition,
                             isValid,
                             afterCB() {
@@ -278,7 +353,9 @@ export const loadMobileFileById = (app: App, id: string, action: TProtyleAction[
                     }
                 });
             }
-            window.siyuan.mobile.editor.protyle.undo.clear();
+            if (!preserveContent) {
+                editor.protyle.undo.clear();
+            }
             // 切换文档后校准新文档的撤销镜像（语义 B：各文档栈隔离）
             if (window.siyuan.mobile.editor.protyle.block?.rootID) {
                 initMirror(window.siyuan.mobile.editor.protyle.block.rootID);
@@ -293,8 +370,9 @@ export const loadMobileFileById = (app: App, id: string, action: TProtyleAction[
                 return;
             }
         }
-        setEditor();
-        closePanel();
+        if (!keepPanels) {
+            closePanel();
+        }
     }, undefined, undefined, signal).then(() => {
         if (!blockInfoHandled) {
             fail();
@@ -304,33 +382,48 @@ export const loadMobileFileById = (app: App, id: string, action: TProtyleAction[
 
 export const openMobileFileById = (app: App, id: string, action: TProtyleAction[] = [Constants.CB_GET_HL],
                                    scrollPosition?: ScrollLogicalPosition, notebookId?: string,
-                                   afterOpen?: (protyle: IProtyle) => void, forceReload = false) => {
+                                   afterOpen?: (protyle: IProtyle) => void, forceReload = false,
+                                   waitForDatabaseAttributes = false): Promise<boolean> => {
+    clearMobileSearchHighlight();
+    const closing = closeMobileEditorSheets();
+    if (closing) {
+        return closing.then(() => openMobileFileById(app, id, action, scrollPosition, notebookId, afterOpen,
+            forceReload, waitForDatabaseAttributes)).catch(error => {
+            console.error(error);
+            return false;
+        });
+    }
     if (window.siyuan.mobile.tabs) {
-        const options = {action, scrollPosition, notebookId, afterOpen, forceReload};
-        if (action.includes(Constants.CB_GET_OPENNEW)) {
-            void window.siyuan.mobile.tabs.openInNewTab(id, options).then((result) => {
-                if (result === "invalid" || result === "failed") {
-                    void window.siyuan.mobile.tabs.restore();
-                }
-            });
-        } else {
-            void window.siyuan.mobile.tabs.open(id, options).then((result) => {
-                if (result === "invalid" || result === "failed") {
-                    void window.siyuan.mobile.tabs.restore();
-                }
-            });
-        }
-        return;
+        const options = {action, scrollPosition, notebookId, afterOpen, forceReload, waitForDatabaseAttributes};
+        const opening = action.includes(Constants.CB_GET_OPENNEW) ?
+            window.siyuan.mobile.tabs.openInNewTab(id, options) : window.siyuan.mobile.tabs.open(id, options);
+        return opening.then(result => {
+            if ((result === "invalid" || result === "failed") && !waitForDatabaseAttributes) {
+                void window.siyuan.mobile.tabs.restore();
+            }
+            return result === "success";
+        });
     }
     window.siyuan.storage[Constants.LOCAL_DOCINFO] = isEncryptedBox(notebookId) ? {id: ""} : {id};
     setStorageVal(Constants.LOCAL_DOCINFO, window.siyuan.storage[Constants.LOCAL_DOCINFO]);
-    loadMobileFileById(app, id, action, scrollPosition, notebookId, afterOpen, forceReload);
+    return new Promise<boolean>(resolve => {
+        loadMobileFileById(app, id, action, scrollPosition, notebookId, protyle => {
+            afterOpen?.(protyle);
+            resolve(true);
+        }, forceReload, undefined, undefined, undefined, true, () => resolve(false), false, waitForDatabaseAttributes);
+    });
 };
 
 export const openMobileFileByIdInNewTab = (app: App, id: string,
                                            action: TProtyleAction[] = [Constants.CB_GET_HL],
                                            scrollPosition?: ScrollLogicalPosition, notebookId?: string,
                                            afterOpen?: (protyle: IProtyle) => void) => {
+    const closing = closeMobileEditorSheets();
+    if (closing) {
+        void closing.then(() => openMobileFileByIdInNewTab(app, id, action, scrollPosition, notebookId, afterOpen))
+            .catch(error => console.error(error));
+        return;
+    }
     if (window.siyuan.mobile.tabs) {
         void window.siyuan.mobile.tabs.openInNewTab(id, {
             action,

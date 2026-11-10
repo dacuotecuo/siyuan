@@ -1,18 +1,6 @@
-// SiYuan - From thought to insight, with agents
+// SiYuan - https://github.com/siyuan-note/siyuan
 // Copyright (c) 2020-present, b3log.org
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU Affero General Public License for more details.
-//
-// You should have received a copy of the GNU Affero General Public License
-// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+// SPDX-License-Identifier: AGPL-3.0-or-later
 
 package model
 
@@ -30,7 +18,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/88250/lute/parse"
 	"github.com/siyuan-note/siyuan/kernel/util"
 	"golang.org/x/image/bmp"
 )
@@ -83,15 +70,15 @@ func TestBuildImportedSYSortValues(t *testing.T) {
 			name:           "prepend batch",
 			createDocAtTop: true,
 			want: map[string]int{
-				second.newID: 0, first.newID: 1, "existing-first": 2, "existing-second": 3,
-				childNew.newID: 0, childOld.newID: 1,
+				second.newID: 1, first.newID: 2, "existing-first": 3, "existing-second": 4,
+				childNew.newID: 1, childOld.newID: 2,
 			},
 		},
 		{
 			name: "append batch",
 			want: map[string]int{
-				"existing-first": 0, "existing-second": 1, second.newID: 2, first.newID: 3,
-				childNew.newID: 0, childOld.newID: 1,
+				"existing-first": 1, "existing-second": 2, second.newID: 3, first.newID: 4,
+				childNew.newID: 1, childOld.newID: 2,
 			},
 		},
 	}
@@ -113,7 +100,7 @@ func TestBuildImportedSYSortValuesWithoutSourceSort(t *testing.T) {
 		oldID: "20260801000002-bbbbbbb", newID: "20260801000002-newbbbb", sourcePath: "/20260801000002-bbbbbbb.sy"}
 
 	got := buildImportedSYSortValues([]*importedSYSortDoc{older, newer}, nil, []string{"existing"}, true)
-	assertImportedSYSortValues(t, got, map[string]int{newer.newID: 0, older.newID: 1, "existing": 2})
+	assertImportedSYSortValues(t, got, map[string]int{newer.newID: 1, older.newID: 2, "existing": 3})
 }
 
 func TestImportedSYRootIDs(t *testing.T) {
@@ -127,15 +114,13 @@ func TestImportedSYRootIDs(t *testing.T) {
 }
 
 func TestImportedTreeRootIDs(t *testing.T) {
-	trees := []*parse.Tree{
-		{ID: "root-b", Path: "/target/root-b.sy"},
-		nil,
-		{ID: "child", Path: "/target/root-b/child.sy"},
-		{ID: "root-a", Path: "/target/root-a.sy"},
-		{ID: "other", Path: "/other.sy"},
-	}
-
-	got := importedTreeRootIDs(trees, "/target")
+	spool := &markdownImportSpool{entries: []markdownImportEntry{
+		{id: "root-b", path: "/target/root-b.sy"},
+		{id: "child", path: "/target/root-b/child.sy"},
+		{id: "root-a", path: "/target/root-a.sy"},
+		{id: "other", path: "/other.sy"},
+	}}
+	got := spool.rootIDs("/target")
 	assertStringSlice(t, got, []string{"root-a", "root-b"})
 }
 

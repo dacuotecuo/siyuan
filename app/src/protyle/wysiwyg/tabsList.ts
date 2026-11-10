@@ -1,9 +1,11 @@
 import {getTabTitle, getTabTitleBlock} from "../render/tabsRender";
+import {initializeListMindmapConnectorStyle, retagMindmapBranch} from "../render/listMindmap/model";
+import {getDefaultListMindmapConnectorStyle} from "../render/listMindmap/preferences";
 
-export type TTabsListConversion = "List2Tabs" | "Tabs2UL" | "Tabs2OL" | "Tabs2TL";
+export type TTabsListConversion = "List2Tabs" | "Tabs2UL" | "Tabs2OL" | "Tabs2TL" | "Tabs2Mindmap";
 
 export const isTabsListConversion = (type: string): type is TTabsListConversion =>
-    ["List2Tabs", "Tabs2UL", "Tabs2OL", "Tabs2TL"].includes(type);
+    ["List2Tabs", "Tabs2UL", "Tabs2OL", "Tabs2TL", "Tabs2Mindmap"].includes(type);
 
 const blockChildren = (element: Element): Element[] => Array.from(
     (element.getAttribute("data-type") === "NodeTabItem" ?
@@ -62,7 +64,7 @@ export const isEmptyTabPlaceholder = (paragraph: Element): boolean => {
 const convertContainer = (source: Element, target: HTMLElement): HTMLElement => {
     const result = source.cloneNode(false) as HTMLElement;
     ["data-subtype", "data-marker", "data-task", "data-tight", "fold", "data-tabs-hidden", "data-tabs-editing",
-        "tabs-active-id", "tabs-position", "data-sb-layout", "data-list-index", "aria-hidden", "hidden"].forEach(name =>
+        "tabs-active-id", "tabs-position", "tabs-task", "data-sb-layout", "data-list-index", "aria-hidden", "hidden"].forEach(name =>
         result.removeAttribute(name));
     Array.from(target.attributes).forEach(attr => {
         if (!["data-node-id", "updated"].includes(attr.name)) {
@@ -91,6 +93,9 @@ export const convertTabsList = (source: Element, type: TTabsListConversion, lute
     const target = skeleton(lute, toTabs ? "::: tabs\n@tab\n\n:::\n" : `${listMarker} \n`);
     const itemTemplate = target.querySelector(toTabs ? ":scope > .tab-item" : ":scope > .li") as HTMLElement;
     const result = convertContainer(source, target);
+    if (toTabs && source.getAttribute("data-subtype") === "t") {
+        result.setAttribute("tabs-task", "true");
+    }
     result.querySelector(toTabs ? ":scope > .tab-item" : ":scope > .li").remove();
     items.forEach((item, index) => {
         const converted = convertContainer(item, itemTemplate.cloneNode(true) as HTMLElement);
@@ -136,7 +141,7 @@ export const convertTabsList = (source: Element, type: TTabsListConversion, lute
                 titleBlock.removeAttribute("tabs-title");
                 titleBlock.querySelector(".tab-item-title").classList.remove("tab-item-title", "callout-title");
                 blocks.unshift(titleBlock);
-            } else if (title?.innerHTML) {
+            } else if (title) {
                 const titleBlock = newParagraph(lute);
                 titleBlock.querySelector("[contenteditable]").innerHTML = title.innerHTML;
                 titleBlock.querySelectorAll("wbr").forEach(caret => caret.remove());
@@ -166,6 +171,10 @@ export const convertTabsList = (source: Element, type: TTabsListConversion, lute
             result.querySelector(toTabs ? ".tab-item-content [contenteditable=\"true\"]" : "[contenteditable=\"true\"]")
                 ?.insertAdjacentHTML("afterbegin", "<wbr>");
         }
+    }
+    if (type === "Tabs2Mindmap") {
+        initializeListMindmapConnectorStyle(result, getDefaultListMindmapConnectorStyle());
+        retagMindmapBranch(result, true);
     }
     return result;
 };

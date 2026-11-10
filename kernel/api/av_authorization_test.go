@@ -1,18 +1,6 @@
-// SiYuan - From thought to insight, with agents
+// SiYuan - https://github.com/siyuan-note/siyuan
 // Copyright (c) 2020-present, b3log.org
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU Affero General Public License for more details.
-//
-// You should have received a copy of the GNU Affero General Public License
-// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+// SPDX-License-Identifier: AGPL-3.0-or-later
 
 package api
 
@@ -78,6 +66,46 @@ func TestAttributeViewEditorEndpointsRejectReader(t *testing.T) {
 				t.Fatalf("reader request reached the handler: %s", recorder.Body.String())
 			}
 		})
+	}
+}
+
+func TestAttributeViewLayoutRejectsReadonlyKernel(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	previousConf, previousReadonly := model.Conf, util.ReadOnly
+	model.Conf = &model.AppConf{Lang: "en"}
+	util.ReadOnly = true
+	t.Cleanup(func() {
+		model.Conf, util.ReadOnly = previousConf, previousReadonly
+	})
+	engine := gin.New()
+	engine.Use(func(c *gin.Context) {
+		c.Set(model.RoleContextKey, model.RoleAdministrator)
+		c.Next()
+	})
+	ServeAPI(engine)
+	recorder := httptest.NewRecorder()
+	engine.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/api/av/changeAttrViewLayout", strings.NewReader(`{}`)))
+	var response struct {
+		Code int `json:"code"`
+		Data struct {
+			CloseTimeout int `json:"closeTimeout"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.Code != -1 || response.Data.CloseTimeout != 5000 {
+		t.Fatalf("readonly request reached layout handler: %s", recorder.Body.String())
+	}
+	for _, endpoint := range []string{"updateRecentDocOpenTime", "updateRecentDocViewTime", "updateRecentDocCloseTime", "batchUpdateRecentDocCloseTime"} {
+		recorder = httptest.NewRecorder()
+		engine.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/api/storage/"+endpoint, strings.NewReader(`invalid`)))
+		var result struct {
+			Code int `json:"code"`
+		}
+		if err := json.Unmarshal(recorder.Body.Bytes(), &result); err != nil || result.Code != 0 {
+			t.Fatalf("readonly storage mutation was not skipped: %s (%v)", recorder.Body.String(), err)
+		}
 	}
 }
 

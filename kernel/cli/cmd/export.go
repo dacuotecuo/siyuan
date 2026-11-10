@@ -1,18 +1,6 @@
-// SiYuan - From thought to insight, with agents
+// SiYuan - https://github.com/siyuan-note/siyuan
 // Copyright (c) 2020-present, b3log.org
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU Affero General Public License for more details.
-//
-// You should have received a copy of the GNU Affero General Public License
-// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+// SPDX-License-Identifier: AGPL-3.0-or-later
 
 package cmd
 
@@ -41,17 +29,21 @@ var exportMdCmd = &cobra.Command{
 		}
 
 		output, _ := cmd.Flags().GetString("output")
-		if dryRun && output != "" {
+		if dryRun {
+			if output == "" {
+				output = "stdout"
+			}
 			fmt.Printf("[dry-run] Would export markdown for document %s to %s\n", id, output)
 			return nil
 		}
 
-		_, content := model.ExportMarkdownContent(id, 4, 0, true, false, false, false, false)
-		if output != "" {
-			return os.WriteFile(output, []byte(content), 0644)
-		}
-		fmt.Print(content)
-		return nil
+		_, content := model.ExportMarkdownContent(id, &model.ExportOptions{
+			BlockRefMode:   new(4),
+			BlockEmbedMode: new(0),
+			MarkdownYFM:    new(true),
+			AddTitle:       new(false),
+		})
+		return writeExportContent(content, output)
 	},
 }
 
@@ -65,17 +57,16 @@ var exportHTMLCmd = &cobra.Command{
 		}
 
 		output, _ := cmd.Flags().GetString("output")
-		if dryRun && output != "" {
+		if dryRun {
+			if output == "" {
+				output = "stdout"
+			}
 			fmt.Printf("[dry-run] Would export HTML for document %s to %s\n", id, output)
 			return nil
 		}
 
 		_, dom, _ := model.ExportHTML(id, "", false, false, false)
-		if output != "" {
-			return os.WriteFile(output, []byte(dom), 0644)
-		}
-		fmt.Print(dom)
-		return nil
+		return writeExportContent(dom, output)
 	},
 }
 
@@ -89,17 +80,16 @@ var exportPreviewCmd = &cobra.Command{
 		}
 
 		output, _ := cmd.Flags().GetString("output")
-		if dryRun && output != "" {
+		if dryRun {
+			if output == "" {
+				output = "stdout"
+			}
 			fmt.Printf("[dry-run] Would export preview HTML for document %s to %s\n", id, output)
 			return nil
 		}
 
-		html := model.ExportPreview(id, false)
-		if output != "" {
-			return os.WriteFile(output, []byte(html), 0644)
-		}
-		fmt.Print(html)
-		return nil
+		html := model.ExportPreview(id, false, nil)
+		return writeExportContent(html, output)
 	},
 }
 
@@ -269,4 +259,15 @@ func init() {
 	exportCmd.AddCommand(exportSYCmd)
 	exportCmd.AddCommand(exportMdZipCmd)
 	exportCmd.AddCommand(exportDataCmd)
+}
+
+func writeExportContent(content, output string) error {
+	if content == "" {
+		return fmt.Errorf("export failed: empty content")
+	}
+	if output != "" {
+		return os.WriteFile(output, []byte(content), 0644)
+	}
+	fmt.Print(content)
+	return nil
 }

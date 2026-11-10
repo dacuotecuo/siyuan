@@ -7,10 +7,32 @@ const { trimChangelogs } = require("./trimChangelogs");
 
 module.exports = async function afterPack(context) {
   const {appOutDir, arch, electronPlatformName, packager} = context;
+  await validatePackagedKernel(appOutDir, packager, electronPlatformName);
   await extractPackagedPandoc(appOutDir, packager, electronPlatformName, arch);
   await removeLanguagePacks(appOutDir, packager, electronPlatformName);
   await trimPackagedChangelogs(appOutDir, packager, electronPlatformName);
 };
+
+async function validatePackagedKernel(appOutDir, packager, platform) {
+  const resourcePath = getPackagedResourcePath(appOutDir, packager, platform);
+  const kernelName = platform === "win32" ? "SiYuan-Kernel.exe" : "SiYuan-Kernel";
+  const kernelPath = path.join(resourcePath, "kernel", kernelName);
+  let stat;
+  try {
+    stat = await fsPromises.stat(kernelPath);
+  } catch (error) {
+    if (error.code === "ENOENT") {
+      throw new Error(`Packaged kernel not found: ${kernelPath}`, {cause: error});
+    }
+    throw error;
+  }
+  if (!stat.isFile() || stat.size === 0) {
+    throw new Error(`Invalid packaged kernel: ${kernelPath}`);
+  }
+  if (platform !== "win32") {
+    await fsPromises.access(kernelPath, fs.constants.X_OK);
+  }
+}
 
 async function extractPackagedPandoc(appOutDir, packager, platform, arch) {
   const resourcePath = getPackagedResourcePath(appOutDir, packager, platform);
@@ -22,7 +44,7 @@ async function extractPackagedPandoc(appOutDir, packager, platform, arch) {
       return;
     }
     if (error.code === "ENOENT") {
-      throw new Error(`Packaged Pandoc archive not found: ${archivePath}`);
+      throw new Error(`Packaged Pandoc archive not found: ${archivePath}`, {cause: error});
     }
     throw error;
   }
@@ -44,7 +66,7 @@ async function extractPackagedPandoc(appOutDir, packager, platform, arch) {
     await fsPromises.rm(archivePath);
     console.log(`Extracted packaged Pandoc: ${pandocBin}`);
   } catch (error) {
-    throw new Error(`Failed to extract packaged Pandoc: ${error.message}`);
+    throw new Error(`Failed to extract packaged Pandoc: ${error.message}`, {cause: error});
   }
 }
 
@@ -75,7 +97,7 @@ async function trimPackagedChangelogs(appOutDir, packager, platform) {
 
 async function removeLanguagePacks(appOutDir, packager, platform) {
   // 支持的语言都要保留，否则影响开发者工具字体显示
-  const wantedLanguages = ["ar", "de", "en", "es", "fr", "he", "hi", "id", "it", "ja", "ko", "nl", "pl", "pt-BR", "ru", "sk", "th", "tr", "uk", "zh-TW", "zh-CN"];
+  const wantedLanguages = ["ar", "de", "en", "es", "fr", "he", "hi", "id", "it", "ja", "ko", "nl", "pl", "pt-BR", "ru", "sk", "sr", "th", "tr", "uk", "zh-TW", "zh-CN"];
   const keepPrefixes = new Set(wantedLanguages.map(lang => lang.substring(0, 2)));
 
   let resourcePath;
@@ -187,3 +209,4 @@ function formatBytes(bytes) {
 }
 
 module.exports.extractPackagedPandoc = extractPackagedPandoc;
+module.exports.validatePackagedKernel = validatePackagedKernel;

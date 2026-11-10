@@ -1,18 +1,6 @@
-// SiYuan - From thought to insight, with agents
+// SiYuan - https://github.com/siyuan-note/siyuan
 // Copyright (c) 2020-present, b3log.org
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU Affero General Public License for more details.
-//
-// You should have received a copy of the GNU Affero General Public License
-// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+// SPDX-License-Identifier: AGPL-3.0-or-later
 
 package mcp
 
@@ -53,9 +41,9 @@ func Serve(ginServer *gin.Engine) {
 
 	// MCP 工具暴露任意工作区文件读写删、SQL、插件分发等管理级原语，必须要求管理员角色，
 	// 否则 Publish 匿名模式注入的 RoleReader JWT 可经此链路越权调用全部工具。
-	ginServer.POST("/mcp", model.CheckAuth, model.CheckAdminRole, model.CheckReadonly, serveHTTP(handler))
-	ginServer.GET("/mcp", model.CheckAuth, model.CheckAdminRole, serveHTTP(handler))
-	ginServer.DELETE("/mcp", model.CheckAuth, model.CheckAdminRole, model.CheckReadonly, serveHTTP(handler))
+	ginServer.POST("/mcp", model.CheckMCPAuth, model.CheckAdminRole, model.CheckReadonly, serveHTTP(handler))
+	ginServer.GET("/mcp", model.CheckMCPAuth, model.CheckAdminRole, serveHTTP(handler))
+	ginServer.DELETE("/mcp", model.CheckMCPAuth, model.CheckAdminRole, model.CheckReadonly, serveHTTP(handler))
 }
 
 func getHTTPHandler() http.Handler {
@@ -140,13 +128,15 @@ func RefreshToolExposure() {
 }
 
 func externalMCPToolAllowed(tool *tools.Tool) bool {
+	confAIReadSnapshot := model.Conf.LoadAI()
+
 	if tool == nil || tool.AgentOnly || tool.Source == "mcp" || tool.Runtime == "mcp" {
 		return false
 	}
-	if model.Conf == nil || model.Conf.AI == nil || model.Conf.AI.MCP == nil {
+	if model.Conf == nil || confAIReadSnapshot == nil || confAIReadSnapshot.MCP == nil {
 		return true
 	}
-	return model.Conf.AI.MCP.ExposurePolicy.Allows(tools.CapabilityIDForTool(tool))
+	return confAIReadSnapshot.MCP.ExposurePolicy.Allows(tools.CapabilityIDForTool(tool))
 }
 
 func newServer() *mcpsdk.Server {
@@ -164,19 +154,35 @@ func privateCacheMiddleware() mcpsdk.Middleware {
 	return func(next mcpsdk.MethodHandler) mcpsdk.MethodHandler {
 		return func(ctx context.Context, method string, request mcpsdk.Request) (mcpsdk.Result, error) {
 			result, err := next(ctx, method, request)
+			if err != nil {
+				return result, err
+			}
+			// SDK results may hold typed nil pointers, which still match the type switch.
 			switch cacheable := result.(type) {
 			case *mcpsdk.DiscoverResult:
-				cacheable.CacheScope = "private"
+				if cacheable != nil {
+					cacheable.CacheScope = "private"
+				}
 			case *mcpsdk.ListToolsResult:
-				cacheable.CacheScope = "private"
+				if cacheable != nil {
+					cacheable.CacheScope = "private"
+				}
 			case *mcpsdk.ListPromptsResult:
-				cacheable.CacheScope = "private"
+				if cacheable != nil {
+					cacheable.CacheScope = "private"
+				}
 			case *mcpsdk.ListResourcesResult:
-				cacheable.CacheScope = "private"
+				if cacheable != nil {
+					cacheable.CacheScope = "private"
+				}
 			case *mcpsdk.ListResourceTemplatesResult:
-				cacheable.CacheScope = "private"
+				if cacheable != nil {
+					cacheable.CacheScope = "private"
+				}
 			case *mcpsdk.ReadResourceResult:
-				cacheable.CacheScope = "private"
+				if cacheable != nil {
+					cacheable.CacheScope = "private"
+				}
 			}
 			return result, err
 		}

@@ -1,9 +1,11 @@
+import {toggleMenu} from "../../menus/menuToggle";
+import {markMenuInnerScroll} from "../../menus/Menu";
 import {hasClosestByClassName} from "../util/hasClosest";
-import {getRandom, isMobile} from "../../util/functions";
+import {getRandom} from "../../util/functions";
 import {hideElements} from "../ui/hideElements";
 import {uploadFiles} from "../upload";
 import {fetchPost} from "../../util/fetch";
-import {getRandomEmoji, openEmojiPanel, unicode2Emoji, updateFileTreeEmoji, updateOutlineEmoji} from "../../emoji";
+import {openEmojiPanel, unicode2Emoji} from "../../emoji";
 import {upDownHint} from "../../util/upDownHint";
 /// #if !MOBILE
 import {openGlobalSearch} from "../../search/util";
@@ -11,12 +13,14 @@ import {openGlobalSearch} from "../../search/util";
 import {popSearch} from "../../mobile/menu/search";
 /// #endif
 import {Dialog} from "../../dialog";
+import {openInputDialog} from "../../dialog/inputDialog";
 import {Constants} from "../../constants";
 import {assetMenu} from "../../menus/protyle";
 import {previewImages} from "../preview/image";
 import {Menu} from "../../plugin/Menu";
 import {escapeHtml} from "../../util/escape";
-import {fetchCoverData, getCategoryLabel} from "./coverData";
+import {fetchCoverData} from "./coverData";
+import {openCoverPicker} from "./coverPicker";
 import {getAssetUploadSuccesses} from "../upload/uploadResult";
 import {hasDataTransferFiles} from "../upload/localDropFiles";
 import {showMessage} from "../../dialog/message";
@@ -295,18 +299,6 @@ export class Background {
                     break;
                 } else if (type === "show-random" && !protyle.disabled) {
                     window.siyuan.menus.menu.remove();
-                    // 内置题头图对话框：优先展示封面图片，加载失败时回退到 CSS 图案
-                    const dialog = new Dialog({
-                        title: window.siyuan.languages.builtIn,
-                        content: `<div class="b3-cards" style="padding:16px;justify-content:center;align-items:center;min-height:200px">
-            <img src="/stage/loading-pure.svg" style="width:64px;height:64px">
-        </div>`,
-                        width: isMobile() ? "92vw" : "912px",
-                        height: isMobile() ? "80vh" : "70vh",
-                    });
-                    dialog.element.setAttribute("data-key", Constants.DIALOG_BACKGROUNDRANDOM);
-                    bindPopoverDialog(dialog, protyle.element);
-
                     const renderCSSPatterns = (d: Dialog) => {
                         let html = "";
                         bgs.forEach((item: string, index: number) => {
@@ -330,61 +322,12 @@ export class Background {
                         });
                     };
 
-                    fetchCoverData().then((coverData) => {
-                        if (!coverData) {
-                            renderCSSPatterns(dialog);
-                            return;
-                        }
-                        const { categories, coversByCategory, allCovers } = coverData;
-
-                        const buildCards = (category: string): string => {
-                            const covers = category === "all" ? allCovers : (coversByCategory.get(category) || []);
-                            return covers.map(c => {
-                                const url = `/appearance/covers/${c.file}`;
-                                return `<div class="b3-card b3-cover__card" data-name="${c.file}"><img src="${url}" loading="lazy"></div>`;
-                            }).join("");
-                        };
-
-                        const buildTabs = (activeCategory: string): string => {
-                            let tabs = `<span class="b3-chip b3-chip--hover${activeCategory === "all" ? " b3-chip--current" : ""}" data-category="all">${window.siyuan.languages.coverAll}</span>`;
-                            for (const cat of categories) {
-                                tabs += `<span class="b3-chip b3-chip--hover${activeCategory === cat ? " b3-chip--current" : ""}" data-category="${cat}">${getCategoryLabel(cat)}</span>`;
-                            }
-                            return `<div class="b3-cover__tabs">${tabs}</div>`;
-                        };
-
-                        let activeCategory = "all";
-
-                        const renderContent = (): void => {
-                            const bodyEl = dialog.element.querySelector(".b3-dialog__body");
-                            if (bodyEl) {
-                                bodyEl.innerHTML = `${buildTabs(activeCategory)}
-        <div class="b3-cards b3-cover__cards" style="padding:16px">${buildCards(activeCategory)}</div>`;
-                            }
-                        };
-
-                        renderContent();
-
-                        // 点击事件委托
-                        dialog.element.querySelector(".b3-dialog__body")!.addEventListener("click", (event) => {
-                            const target = event.target as HTMLElement;
-                            const chip = target.closest(".b3-chip") as HTMLElement;
-                            if (chip && chip.hasAttribute("data-category")) {
-                                activeCategory = chip.getAttribute("data-category") || "all";
-                                renderContent();
-                                dialog.element.querySelector(".b3-dialog__body")!.scrollTop = 0;
-                            } else if (target.closest(".b3-cover__card")) {
-                                const card = target.closest(".b3-cover__card") as HTMLElement;
-                                const name = card.getAttribute("data-name");
-                                if (name) {
-                                    this.uploadBuiltInCover(protyle, name);
-                                }
-                                dialog.destroy();
-                            }
-                        });
-                    }).catch(() => {
-                        renderCSSPatterns(dialog);
+                    const dialog = openCoverPicker({
+                        select: name => this.uploadBuiltInCover(protyle, name),
+                        fallback: renderCSSPatterns,
                     });
+                    dialog.element.setAttribute("data-key", Constants.DIALOG_BACKGROUNDRANDOM);
+                    bindPopoverDialog(dialog, protyle.element);
 
                     event.preventDefault();
                     event.stopPropagation();
@@ -409,7 +352,7 @@ export class Background {
                     break;
                 } else if (type === "asset" && !protyle.disabled) {
                     const rect = target.getBoundingClientRect();
-                    assetMenu(protyle, {
+                    assetMenu(protyle, {target: target,
                         x: target.parentElement.getBoundingClientRect().right,
                         y: rect.bottom + 8,
                         isLeft: true,
@@ -438,26 +381,13 @@ export class Background {
                     event.stopPropagation();
                     break;
                 } else if (type === "icon" && !protyle.disabled) {
-                    const emoji = getRandomEmoji();
-                    if (emoji) {
-                        updateFileTreeEmoji(emoji, protyle.block.rootID);
-                        updateOutlineEmoji(emoji, protyle.block.rootID);
-                        fetchPost("/api/attr/setBlockAttrs", {
-                            id: protyle.block.rootID,
-                            attrs: {"icon": emoji}
-                        });
-                        if (protyle.model) {
-                            protyle.model.parent.setDocIcon(emoji);
-                        }
-                        this.iconElement.classList.remove("fn__none");
-                        const rect = this.iconElement.getBoundingClientRect();
-                        openEmojiPanel(protyle.block.rootID, "doc", {
-                            x: rect.left,
-                            y: rect.bottom,
-                            h: rect.height,
-                            w: rect.width
-                        }, undefined, undefined, {ownerElement: protyle.element});
-                    }
+                    const rect = target.getBoundingClientRect();
+                    openEmojiPanel(protyle.block.rootID, "doc", {
+                        x: rect.left,
+                        y: rect.bottom,
+                        h: rect.height,
+                        w: rect.width
+                    }, undefined, undefined, {ownerElement: protyle.element});
                     event.preventDefault();
                     event.stopPropagation();
                     break;
@@ -467,34 +397,22 @@ export class Background {
                     event.stopPropagation();
                     break;
                 } else if (type === "link" && !protyle.disabled) {
-                    const dialog = new Dialog({
+                    const dialog = openInputDialog({
                         title: window.siyuan.languages.link,
-                        width: isMobile() ? "92vw" : "520px",
-                        content: `<div class="b3-dialog__content">
-        <input class="b3-text-field fn__block" value="${this.imgElement.src.startsWith("data:") ? "" : this.imgElement.getAttribute("src")}">
-</div>
-<div class="b3-dialog__action">
-    <button class="b3-button b3-button--cancel">${window.siyuan.languages.cancel}</button><div class="fn__space"></div>
-    <button class="b3-button b3-button--text">${window.siyuan.languages.confirm}</button>
-</div>`,
+                        value: this.imgElement.src.startsWith("data:") ? "" : this.imgElement.getAttribute("src"),
+                        onConfirm: (value, dialog) => {
+                            const style = `background-image:url("${value}");`;
+                            this.ial["title-img"] = style;
+                            this.render(this.ial, protyle.block.rootID);
+                            fetchPost("/api/attr/setBlockAttrs", {
+                                id: protyle.block.rootID,
+                                attrs: {"title-img": this.ial["title-img"]}
+                            });
+                            dialog.destroy();
+                        },
                     });
                     dialog.element.setAttribute("data-key", Constants.DIALOG_BACKGROUNDLINK);
                     bindPopoverDialog(dialog, protyle.element);
-                    const btnsElement = dialog.element.querySelectorAll(".b3-button");
-                    btnsElement[0].addEventListener("click", () => {
-                        dialog.destroy();
-                    });
-                    btnsElement[1].addEventListener("click", () => {
-                        const style = `background-image:url("${dialog.element.querySelector("input").value}");`;
-                        this.ial["title-img"] = style;
-                        this.render(this.ial, protyle.block.rootID);
-                        fetchPost("/api/attr/setBlockAttrs", {
-                            id: protyle.block.rootID,
-                            attrs: {"title-img": this.ial["title-img"]}
-                        });
-                        dialog.destroy();
-                    });
-                    dialog.element.querySelector("input").focus();
                     event.preventDefault();
                     event.stopPropagation();
                     break;
@@ -823,100 +741,124 @@ export class Background {
     }
 
     private openTag(protyle: IProtyle, target: HTMLElement) {
-        window.siyuan.menus.menu.remove();
-        const menu = new Menu();
-        menu.addItem({
-            iconHTML: "",
-            type: "empty",
-            label: `<div class="fn__flex-column b3-menu__filter">
-    <input class="b3-text-field fn__flex-shrink" placeholder="${window.siyuan.languages.tag}"/>
-    <div class="fn__hr"></div>
-    <div class="b3-list fn__flex-1 b3-list--background">
-        <img style="margin: 0 auto;display: block;width: 64px;height: 64px" src="/stage/loading-pure.svg">
-    </div>
-</div>`,
-            bind: (element) => {
-                const listElement = element.querySelector(".b3-list--background");
-                fetchPost("/api/search/searchTag", {
-                    k: "",
-                }, (response) => {
-                    let html = "";
-                    const currentTags = this.getTags();
-                    response.data.tags.forEach((item: string, index: number) => {
-                        html += `<div class="b3-list-item b3-list-item--narrow${index === 0 ? " b3-list-item--focus" : ""}">
-    <div class="fn__flex-1">${item}</div>
-    ${currentTags.includes(Lute.UnEscapeHTMLStr(item)) ? '<svg class="b3-menu__checked"><use xlink:href="#iconSelect"></use></svg>' : ""}
-</div>`;
-                    });
-                    listElement.innerHTML = html;
-                });
-                const inputElement = element.querySelector("input");
-                inputElement.addEventListener("keydown", (event: KeyboardEvent) => {
-                    event.stopPropagation();
-                    if (event.isComposing) {
-                        return;
-                    }
-                    upDownHint(listElement, event);
-                    if (event.key === "Enter") {
-                        const currentElement = listElement.querySelector(".b3-list-item--focus") as HTMLElement;
-                        this.addTags(currentElement ?
-                            (currentElement.dataset.type === "new" ? currentElement.querySelector("mark").textContent.trim() : currentElement.textContent.trim()) :
-                            inputElement.value.trim(), protyle, () => {
-                            inputElement.value = "";
-                            inputElement.dispatchEvent(new CustomEvent("input"));
+        toggleMenu({
+            target: target,
+            build: (_menu, session) => {
+                const menu = new Menu();
+                menu.addItem({
+                    iconHTML: "",
+                    type: "empty",
+                    label: `<div class="fn__flex-column b3-menu__filter">
+            <input class="b3-text-field fn__flex-shrink" placeholder="${window.siyuan.languages.tag}"/>
+            <div class="fn__hr"></div>
+            <div class="b3-list fn__flex-1 b3-list--background">
+                <div class="fn__flex" style="height:64px;align-items:center;justify-content:center"><span class="b3-loading" aria-hidden="true"></span></div>
+            </div>
+        </div>`,
+                    bind: (element) => {
+                        const listElement = element.querySelector(".b3-list--background");
+                        const renderTagList = (html: string) => {
+                            if (!listElement.isConnected || !menu.element.contains(listElement)) {
+                                return;
+                            }
+                            listElement.innerHTML = html;
+                            const filterElement = listElement.parentElement;
+                            filterElement.style.maxHeight = "";
+                            // 异步列表更新后重新计算菜单高度，避免沿用加载占位的高度限制。
+                            window.siyuan.menus.menu.resetPosition();
+                            const maxHeight = (menu.element.lastElementChild as HTMLElement).style.maxHeight;
+                            if (maxHeight) {
+                                filterElement.style.maxHeight = `min(50vh, ${maxHeight})`;
+                            }
+                        };
+                        fetchPost("/api/search/searchTag", {
+                            k: "",
+                        }, (response) => {
+                            if (!listElement.isConnected) {
+                                return;
+                            }
+                            let html = "";
+                            const currentTags = this.getTags();
+                            response.data.tags.forEach((item: string, index: number) => {
+                                html += `<div class="b3-list-item b3-list-item--narrow${index === 0 ? " b3-list-item--focus" : ""}">
+            <div class="fn__flex-1">${item}</div>
+            ${currentTags.includes(Lute.UnEscapeHTMLStr(item)) ? '<svg class="b3-menu__checked"><use xlink:href="#iconSelect"></use></svg>' : ""}
+        </div>`;
+                            });
+                            renderTagList(html);
                         });
-                    } else if (event.key === "Escape") {
-                        window.siyuan.menus.menu.remove();
-                    }
-                });
-                inputElement.addEventListener("input", (event) => {
-                    event.stopPropagation();
-                    fetchPost("/api/search/searchTag", {
-                        k: inputElement.value.trim(),
-                    }, (response) => {
-                        let searchHTML = "";
-                        let hasKey = false;
-                        const currentTags = this.getTags();
-                        response.data.tags.forEach((item: string, index: number) => {
-                            searchHTML += `<div class="b3-list-item b3-list-item--narrow${index === 0 ? " b3-list-item--focus" : ""}">
-    <div class="fn__flex-1">${item}</div>
-    ${currentTags.includes(Lute.UnEscapeHTMLStr(item.replace(/<mark>/g, "").replace(/<\/mark>/g, ""))) ? '<svg class="b3-menu__checked"><use xlink:href="#iconSelect"></use></svg>' : ""}
-</div>`;
-                            if (item === `<mark>${response.data.k}</mark>`) {
-                                hasKey = true;
+                        const inputElement = element.querySelector("input");
+                        inputElement.addEventListener("keydown", (event: KeyboardEvent) => {
+                            event.stopPropagation();
+                            if (event.isComposing) {
+                                return;
+                            }
+                            upDownHint(listElement, event);
+                            if (event.key === "Enter") {
+                                const currentElement = listElement.querySelector(".b3-list-item--focus") as HTMLElement;
+                                this.addTags(currentElement ?
+                                    (currentElement.dataset.type === "new" ? currentElement.querySelector("mark").textContent.trim() : currentElement.textContent.trim()) :
+                                    inputElement.value.trim(), protyle, () => {
+                                        inputElement.value = "";
+                                        inputElement.dispatchEvent(new CustomEvent("input"));
+                                    });
+                            } else if (event.key === "Escape") {
+                                window.siyuan.menus.menu.remove();
                             }
                         });
-                        if (!hasKey && response.data.k) {
-                            searchHTML = `<div data-type="new" class="b3-list-item b3-list-item--narrow${searchHTML ? "" : " b3-list-item--focus"}"><div class="fn__flex-1">${window.siyuan.languages.new} <mark>${escapeHtml(response.data.k)}</mark></div></div>` + searchHTML;
-                        }
-                        listElement.innerHTML = searchHTML;
-                    });
-                });
-                listElement.addEventListener("click", (event) => {
-                    const target = event.target as HTMLElement;
-                    const listItemElement = hasClosestByClassName(target, "b3-list-item");
-                    if (!listItemElement) {
-                        return;
-                    }
-                    this.addTags(listItemElement.dataset.type === "new" ? listItemElement.querySelector("mark").textContent.trim() : listItemElement.textContent.trim(),
-                        protyle, () => {
-                            inputElement.value = "";
-                            inputElement.dispatchEvent(new CustomEvent("input"));
-                            inputElement.focus();
+                        inputElement.addEventListener("input", (event) => {
+                            event.stopPropagation();
+                            fetchPost("/api/search/searchTag", {
+                                k: inputElement.value.trim(),
+                            }, (response) => {
+                                if (!listElement.isConnected) {
+                                    return;
+                                }
+                                let searchHTML = "";
+                                let hasKey = false;
+                                const currentTags = this.getTags();
+                                response.data.tags.forEach((item: string, index: number) => {
+                                    searchHTML += `<div class="b3-list-item b3-list-item--narrow${index === 0 ? " b3-list-item--focus" : ""}">
+            <div class="fn__flex-1">${item}</div>
+            ${currentTags.includes(Lute.UnEscapeHTMLStr(item.replace(/<mark>/g, "").replace(/<\/mark>/g, ""))) ? '<svg class="b3-menu__checked"><use xlink:href="#iconSelect"></use></svg>' : ""}
+        </div>`;
+                                    if (item === `<mark>${response.data.k}</mark>`) {
+                                        hasKey = true;
+                                    }
+                                });
+                                if (!hasKey && response.data.k) {
+                                    searchHTML = `<div data-type="new" class="b3-list-item b3-list-item--narrow${searchHTML ? "" : " b3-list-item--focus"}"><div class="fn__flex-1">${window.siyuan.languages.new} <mark>${escapeHtml(response.data.k)}</mark></div></div>` + searchHTML;
+                                }
+                                renderTagList(searchHTML);
+                            });
                         });
+                        listElement.addEventListener("click", (event) => {
+                            const target = event.target as HTMLElement;
+                            const listItemElement = hasClosestByClassName(target, "b3-list-item");
+                            if (!listItemElement) {
+                                return;
+                            }
+                            this.addTags(listItemElement.dataset.type === "new" ? listItemElement.querySelector("mark").textContent.trim() : listItemElement.textContent.trim(),
+                                protyle, () => {
+                                    inputElement.value = "";
+                                    inputElement.dispatchEvent(new CustomEvent("input"));
+                                    inputElement.focus();
+                                });
+                        });
+                    }
                 });
-            }
+                const itemsElement = markMenuInnerScroll(menu.element);
+                /// #if MOBILE
+                session.show(() => menu.fullscreen("bottom"));
+                itemsElement.firstElementChild.setAttribute("style", "padding: 0 8px;height: 100%;");
+                /// #else
+                const rect = target.getBoundingClientRect();
+                session.show(() => menu.open({x: rect.left, y: rect.top + rect.height, h: rect.height}));
+                menu.element.querySelector("input").focus();
+                /// #endif
+
+            },
         });
-        const itemsElement = menu.element.querySelector(".b3-menu__items");
-        itemsElement.setAttribute("style", "overflow: initial");
-        /// #if MOBILE
-        menu.fullscreen("bottom");
-        itemsElement.firstElementChild.setAttribute("style", "padding: 0 8px;height: 100%;");
-        /// #else
-        const rect = target.getBoundingClientRect();
-        menu.open({x: rect.left, y: rect.top + rect.height});
-        menu.element.querySelector("input").focus();
-        /// #endif
     }
 
     private getTags(removeTag?: string) {
